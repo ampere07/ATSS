@@ -1190,10 +1190,9 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
             setMobileViewMode('list');
           }
         }}
-        className={`${
-          mobileViewMode === 'sidebar' ? 'flex w-full' : 'hidden'
-        } md:flex border-r flex-shrink-0 flex-col relative z-40 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
-        }`} style={{ width: isMobile ? '100%' : `${sidebarWidth}px` }}>
+        className={`${mobileViewMode === 'sidebar' ? 'flex w-full' : 'hidden'
+          } md:flex border-r flex-shrink-0 flex-col relative z-40 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
+          }`} style={{ width: isMobile ? '100%' : `${sidebarWidth}px` }}>
         <div className={`p-4 border-b flex-shrink-0 ${isDarkMode ? 'border-gray-700' : 'border-gray-200'
           }`}>
           <div className="flex items-center justify-between mb-1">
@@ -1212,7 +1211,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
                     console.error('Failed to parse authData');
                   }
                 }
-                const url = email ? `https://apply.akmiis.com?created_by_email=${encodeURIComponent(email)}` : 'https://apply.akmiis.com';
+                const url = email ? `https://apply.atssfiber.ph?created_by_email=${encodeURIComponent(email)}` : 'https://apply.atssfiber.ph';
                 window.open(url, '_blank', 'noopener,noreferrer');
               }}
               className="px-2.5 py-1 text-xs font-medium rounded flex items-center transition-colors shadow-sm text-white hover:opacity-90"
@@ -1398,9 +1397,8 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
       </div>
 
       {/* Main Content */}
-      <div className={`${
-        mobileViewMode === 'list' || !isMobile ? 'flex-1 flex flex-col' : 'hidden'
-      } overflow-hidden ${isDarkMode ? 'bg-gray-900' : 'bg-gray-50'}`}>
+      <div className={`${mobileViewMode === 'list' || !isMobile ? 'flex-1 flex flex-col' : 'hidden'
+        } overflow-hidden ${isDarkMode ? 'bg-gray-900' : 'bg-gray-50'}`}>
         <div className="flex flex-col h-full">
           {/* Search Bar */}
           <div className={`p-4 border-b flex-shrink-0 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
@@ -1410,11 +1408,10 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
                 {mobileViewMode === 'list' && (
                   <button
                     onClick={() => setMobileViewMode('sidebar')}
-                    className={`md:hidden p-2 rounded-lg border transition-colors flex items-center justify-center flex-shrink-0 ${
-                      isDarkMode
+                    className={`md:hidden p-2 rounded-lg border transition-colors flex items-center justify-center flex-shrink-0 ${isDarkMode
                         ? 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
                         : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
-                    }`}
+                      }`}
                     title="Back to Filters"
                   >
                     <Menu className="h-5 w-5" />

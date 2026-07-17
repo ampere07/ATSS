@@ -258,7 +258,7 @@ class PaymentWorkerService
 
     private function replaceGlobalVariables(string $message): string
     {
-        $portalUrl = 'sync.akmiis.com';
+        $portalUrl = 'sync.atssfiber.ph';
         $brandName = DB::table('form_ui')->value('brand_name') ?? 'Your ISP';
 
         $message = str_replace('{{portal_url}}', $portalUrl, $message);

@@ -3320,7 +3320,7 @@ Route::prefix('payments')->group(function () {
             return response()->json([
             'status' => 'success',
             'message' => 'Xendit webhook endpoint is configured',
-            'webhook_url' => 'https://backend.akmiis.com/api/payments/webhook',
+            'webhook_url' => 'https://backend.atssfiber.ph/api/payments/webhook',
             'method' => 'POST',
             'required_header' => 'X-Callback-Token',
             'callback_token_configured' => !empty(env('XENDIT_CALLBACK_TOKEN')),

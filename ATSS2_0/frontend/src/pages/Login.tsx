@@ -126,7 +126,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cooldownTime > 0) return;
-    
+
     if (!forgotEmail) {
       setError('Please enter your email or account number');
       return;
@@ -241,7 +241,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           overflow: 'hidden',
           boxShadow: '0 10px 30px rgba(0, 0, 0, 0.1)'
         }} className="login-container">
-          
+
           <div style={{
             flex: 1,
             background: `linear-gradient(135deg, ${colorPalette?.primary || '#7c3aed'} 0%, ${colorPalette?.secondary || '#7c3aed'} 100%)`,
@@ -253,7 +253,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             borderBottomRightRadius: '16px',
             boxShadow: '4px 0 15px rgba(0, 0, 0, 0.1)'
           }} className="login-left">
-            
+
             {showForgotPassword ? (
               <>
                 <div style={{ marginBottom: '40px' }}>
@@ -381,9 +381,9 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                         }
                       }}
                     >
-                      {isLoading 
-                        ? 'SENDING...' 
-                        : cooldownTime > 0 
+                      {isLoading
+                        ? 'SENDING...'
+                        : cooldownTime > 0
                           ? `WAIT ${Math.floor(cooldownTime / 60)}:${String(cooldownTime % 60).padStart(2, '0')}`
                           : 'SEND CREDENTIALS'}
                     </button>
@@ -645,7 +645,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                 type="button"
                 className="apply-button"
                 onClick={() => {
-                  window.open('https://apply.akmiis.com', '_blank');
+                  window.open('https://apply.atssfiber.ph', '_blank');
                 }}
                 style={{
                   padding: '16px 48px',

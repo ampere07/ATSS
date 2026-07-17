@@ -250,7 +250,7 @@ const Support: React.FC<SupportProps> = ({ forceLightMode }) => {
   };
 
   const handleRequestPlanUpdate = () => {
-    window.open('https://www.facebook.com/akmiis', '_blank');
+    window.open('https://www.facebook.com/atssfiber', '_blank');
   };
 
   const currentRequests = requests.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
@@ -650,9 +650,9 @@ const Support: React.FC<SupportProps> = ({ forceLightMode }) => {
                     {selectedRequest.statusNote || 'Waiting for support team response...'}
                   </p>
                 </div>
-                <div 
+                <div
                   className={`p-4 rounded-lg border-l-4 ${isDarkMode ? '' : ''}`}
-                  style={{ 
+                  style={{
                     backgroundColor: isDarkMode ? `${colorPalette?.primary || '#3b82f6'}1A` : `${colorPalette?.primary || '#3b82f6'}1A`,
                     borderLeftColor: colorPalette?.primary || '#3b82f6'
                   }}

@@ -1,9 +1,5 @@
 import { registerRootComponent } from 'expo';
 
-// Temporarily disabled for Play Store review — do not register the location task
-// (technician live-location tracking is off until location permissions are re-added).
-// import './src/services/locationTask';
-
 import App from './App';
 
 // registerRootComponent calls AppRegistry.registerComponent('main', () => App);

@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Image, Text, ActivityIndicator } from 'react-native';
-import logo2 from '../assets/logo2.png';
+import logo2 from '../assets/applogo.png';
 
 const SplashScreen: React.FC = () => {
   return (

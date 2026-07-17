@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-  X, Info, ExternalLink, Receipt, CheckCircle,
-  ChevronRight, ChevronLeft, DollarSign, Calendar,
-  User, Hash, MessageSquare, Image as ImageIcon
+    X, Info, ExternalLink, Receipt, CheckCircle,
+    ChevronRight, ChevronLeft, DollarSign, Calendar,
+    User, Hash, MessageSquare, Image as ImageIcon
 } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { CommissionData, PayoutHistoryData } from '../types/commission';
@@ -86,7 +86,7 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
     const getImageUrl = (url: string) => {
         if (!url) return '';
         if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('data:')) return url;
-        const baseUrl = process.env.REACT_APP_API_URL || 'https://backend.akmiis.com';
+        const baseUrl = process.env.REACT_APP_API_URL || 'https://backend.atssfiber.ph';
         return `${baseUrl.replace(/\/$/, '')}/${url.replace(/^\//, '')}`;
     };
 
@@ -137,15 +137,14 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
     }, [payout.proof_of_payment, isEarning, type]);
 
     return (
-        <div className={`${
-            activeIsMobile
+        <div className={`${activeIsMobile
                 ? 'fixed inset-0 z-[9999] w-screen h-[100dvh] max-h-[100dvh]'
                 : 'h-full flex flex-col overflow-hidden md:border-l relative w-full md:w-auto transition-all duration-300'
-        } flex flex-col overflow-hidden border-l relative ${isDarkMode
-            ? 'bg-gray-950 border-white border-opacity-30'
-            : 'bg-white border-gray-300'
+            } flex flex-col overflow-hidden border-l relative ${isDarkMode
+                ? 'bg-gray-950 border-white border-opacity-30'
+                : 'bg-white border-gray-300'
             }`} style={!activeIsMobile && window.innerWidth >= 768 ? { width: `${detailsWidth}px` } : undefined}>
-            
+
             {/* Resize Handle */}
             {!activeIsMobile && (
                 <div className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize transition-colors z-50"
@@ -166,12 +165,12 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
 
                 <div className="flex items-center space-x-3">
                     <div className="flex items-center">
-                        <button onClick={onPrevious} disabled={!onPrevious} 
+                        <button onClick={onPrevious} disabled={!onPrevious}
                             className={`p-2 rounded transition-colors ${!onPrevious ? 'opacity-50 cursor-not-allowed' : ''} ${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'}`}
                             title="Previous Record">
                             <ChevronLeft size={18} />
                         </button>
-                        <button onClick={onNext} disabled={!onNext} 
+                        <button onClick={onNext} disabled={!onNext}
                             className={`p-2 rounded transition-colors ${!onNext ? 'opacity-50 cursor-not-allowed' : ''} ${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'}`}
                             title="Next Record">
                             <ChevronRight size={18} />
@@ -213,7 +212,7 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
                                 {renderField('Processed By', payout.created_by)}
                                 {renderField('Agent Name', payout.agent_name)}
                                 {renderField('Remarks', payout.remarks || 'No remarks provided')}
-                                
+
                                 <div className="mt-4">
                                     <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>Proof of Payment</p>
                                     {payout.proof_of_payment ? (

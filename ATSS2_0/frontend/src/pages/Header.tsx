@@ -444,11 +444,11 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
           <div className="flex items-center">
             {/* Logo Section */}
             {logoUrl ? (
-              <img src={logoUrl} alt="AKM iis" className="h-10 object-contain" />
+              <img src={logoUrl} alt="ATSS Fiber" className="h-10 object-contain" />
             ) : (
               <div className="flex items-center">
-                <span className="text-slate-900 font-bold text-lg tracking-tight hidden sm:inline uppercase">AKM <span className="font-black">iis</span></span>
-                <span className="text-slate-900 font-bold text-lg tracking-tight sm:hidden uppercase">AKM iis</span>
+                <span className="text-slate-900 font-bold text-lg tracking-tight hidden sm:inline uppercase">ATSS <span className="font-black">Fiber</span></span>
+                <span className="text-slate-900 font-bold text-lg tracking-tight sm:hidden uppercase">ATSS Fiber</span>
               </div>
             )}
           </div>
@@ -623,8 +623,8 @@ const Header: React.FC<HeaderProps> = ({ onToggleSidebar, onSearch, onNavigate, 
           onClick={handleThemeToggle}
           disabled={isTogglingDarkMode}
           className={`p-2 rounded-full transition-colors ${isDarkMode
-              ? 'text-yellow-400 hover:bg-gray-700'
-              : 'text-gray-600 hover:bg-gray-100'
+            ? 'text-yellow-400 hover:bg-gray-700'
+            : 'text-gray-600 hover:bg-gray-100'
             } ${isTogglingDarkMode ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
           title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
         >

@@ -38,7 +38,7 @@ class XenditPaymentController extends Controller
             }
         }
 
-        $this->portalLink = (string) (config('app.url') ?: env('APP_URL', 'https://sync.akmiis.com'));
+        $this->portalLink = (string) (config('app.url') ?: env('APP_URL', 'https://sync.atssfiber.ph'));
     }
 
     public function createPayment(Request $request)
@@ -116,14 +116,14 @@ class XenditPaymentController extends Controller
             $payload = [
                 'external_id' => $referenceNo,
                 'amount' => $amount,
-                'payer_email' => $account->email_address ?? 'noreply@akmiis.com',
+                'payer_email' => $account->email_address ?? 'noreply@atssfiber.ph',
                 'description' => "Bill Payment - Account $accountNo",
                 'invoice_duration' => 86400,
                 'currency' => 'PHP',
                 'customer' => [
                     'given_names' => $givenName,
                     'surname' => $surname,
-                    'email' => $account->email_address ?? 'noreply@akmiis.com',
+                    'email' => $account->email_address ?? 'noreply@atssfiber.ph',
                     'mobile_number' => '+' . $mobile
                 ],
                 'items' => [
