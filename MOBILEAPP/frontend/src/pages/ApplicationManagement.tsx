@@ -10,10 +10,8 @@ import {
   Modal,
   ScrollView,
   Linking,
-  Platform,
 } from 'react-native';
-import { Filter, Download, RefreshCw, X, ExternalLink, Calendar } from 'lucide-react-native';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { Filter, Download, RefreshCw, X, ExternalLink } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import ApplicationDetails from '../components/ApplicationDetails';
@@ -40,20 +38,6 @@ const formatDate = (dateString?: string): string => {
   } catch {
     return dateString;
   }
-};
-
-// Convert a Date to a local `YYYY-MM-DD` string (timezone-safe, no UTC drift).
-const toYMD = (d: Date): string => {
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
-};
-
-// Parse a `YYYY-MM-DD` string into a local Date (for seeding the picker).
-const parseYMD = (s: string): Date => {
-  const [y, m, d] = (s || '').split('-').map(Number);
-  if (!y) return new Date();
-  return new Date(y, (m || 1) - 1, d || 1);
 };
 
 const getStatusColor = (status: string): string => {
@@ -152,10 +136,8 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   const [selectedLocation, setSelectedLocation] = useState<string>('all');
   const [selectedApplication, setSelectedApplication] = useState<Application | null>(null);
   const [funnelFilters, setFunnelFilters] = useState<FilterValues>({});
-  const [timestampFrom, setTimestampFrom] = useState('');
-  const [timestampTo, setTimestampTo] = useState('');
-  const [showFromPicker, setShowFromPicker] = useState(false);
-  const [showToPicker, setShowToPicker] = useState(false);
+  const [timestampFrom] = useState('');
+  const [timestampTo] = useState('');
 
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -258,18 +240,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
       currentUserRole === 'superadmin' ||
       currentUserRole === 'headtech',
     [currentUserRoleId, currentUserRole]
-  );
-
-  // The Timestamp Range filter is hidden for technician (role 2) and agent (role 4).
-  const canUseTimestampFilter = useMemo(
-    () =>
-      !(
-        currentUserRole === 'technician' ||
-        currentUserRoleId === 2 ||
-        currentUserRole === 'agent' ||
-        currentUserRoleId === 4
-      ),
-    [currentUserRole, currentUserRoleId]
   );
 
   const globalFilteredApplications = useMemo(() => {
@@ -430,7 +400,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
   // Reset to first page whenever the result set changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, selectedLocation, funnelFilters, timestampFrom, timestampTo]);
+  }, [searchQuery, selectedLocation, funnelFilters]);
 
   // ── actions ───────────────────────────────────────────────────────────────
 
@@ -491,11 +461,10 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           flexDirection: 'row',
           alignItems: 'center',
           justifyContent: 'space-between',
-          paddingHorizontal: 16,
-          paddingBottom: 12,
-          paddingTop: isTablet ? 12 : 44,
+          padding: 16,
           borderBottomWidth: 1,
           borderBottomColor: '#e5e7eb',
+          paddingTop: isTablet ? 16 : 60,
         }}
       >
         <Text style={{ fontSize: 18, fontWeight: '700', color: '#111827' }}>Applications</Text>
@@ -522,122 +491,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
       </View>
 
       <ScrollView style={{ flex: 1 }}>
-        {/* Timestamp Range filter — hidden for technician & agent roles */}
-        {canUseTimestampFilter && (
-          <View
-            style={{
-              paddingHorizontal: 16,
-              paddingTop: 10,
-              paddingBottom: 12,
-              borderBottomWidth: 1,
-              borderBottomColor: '#f3f4f6',
-            }}
-          >
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                marginBottom: 6,
-              }}
-            >
-              <Text
-                style={{
-                  fontSize: 10,
-                  fontWeight: '700',
-                  color: '#9ca3af',
-                  letterSpacing: 1,
-                  textTransform: 'uppercase',
-                }}
-              >
-                Timestamp Range
-              </Text>
-              {(timestampFrom || timestampTo) ? (
-                <TouchableOpacity onPress={() => { setTimestampFrom(''); setTimestampTo(''); }}>
-                  <Text
-                    style={{
-                      fontSize: 10,
-                      fontWeight: '700',
-                      color: primary,
-                      letterSpacing: 1,
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    Clear
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
-            </View>
-
-            {/* From */}
-            <Text style={{ fontSize: 10, color: '#6b7280', marginBottom: 4 }}>From</Text>
-            <TouchableOpacity
-              onPress={() => setShowFromPicker(true)}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-                borderRadius: 6,
-                borderWidth: 1,
-                borderColor: timestampFrom ? primary : '#d1d5db',
-                backgroundColor: '#fff',
-                marginBottom: 10,
-              }}
-            >
-              <Text style={{ fontSize: 14, color: timestampFrom ? '#111827' : '#9ca3af' }} numberOfLines={1}>
-                {timestampFrom ? formatDate(timestampFrom) : 'mm/dd/yyyy'}
-              </Text>
-              <Calendar size={16} color="#6b7280" />
-            </TouchableOpacity>
-            {showFromPicker ? (
-              <DateTimePicker
-                value={timestampFrom ? parseYMD(timestampFrom) : new Date()}
-                mode="date"
-                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                onChange={(_e, date) => {
-                  setShowFromPicker(false);
-                  if (date) setTimestampFrom(toYMD(date));
-                }}
-              />
-            ) : null}
-
-            {/* To */}
-            <Text style={{ fontSize: 10, color: '#6b7280', marginBottom: 4 }}>To</Text>
-            <TouchableOpacity
-              onPress={() => setShowToPicker(true)}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                paddingHorizontal: 12,
-                paddingVertical: 10,
-                borderRadius: 6,
-                borderWidth: 1,
-                borderColor: timestampTo ? primary : '#d1d5db',
-                backgroundColor: '#fff',
-              }}
-            >
-              <Text style={{ fontSize: 14, color: timestampTo ? '#111827' : '#9ca3af' }} numberOfLines={1}>
-                {timestampTo ? formatDate(timestampTo) : 'mm/dd/yyyy'}
-              </Text>
-              <Calendar size={16} color="#6b7280" />
-            </TouchableOpacity>
-            {showToPicker ? (
-              <DateTimePicker
-                value={timestampTo ? parseYMD(timestampTo) : new Date()}
-                mode="date"
-                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                onChange={(_e, date) => {
-                  setShowToPicker(false);
-                  if (date) setTimestampTo(toYMD(date));
-                }}
-              />
-            ) : null}
-          </View>
-        )}
-
         {/* All Applications */}
         <TouchableOpacity
           onPress={() => { setSelectedLocation('all'); setIsSidebarVisible(false); }}
@@ -708,16 +561,6 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           );
         })}
       </ScrollView>
-
-      {/* View Records — closes the drawer and shows the filtered list */}
-      <View style={{ padding: 16, borderTopWidth: 1, borderTopColor: '#e5e7eb' }}>
-        <TouchableOpacity
-          onPress={() => setIsSidebarVisible(false)}
-          style={{ backgroundColor: primary, paddingVertical: 12, borderRadius: 8, alignItems: 'center' }}
-        >
-          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>View Records</Text>
-        </TouchableOpacity>
-      </View>
     </View>
   );
 
@@ -1065,8 +908,8 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
             activeOpacity={1}
             onPress={() => setIsSidebarVisible(false)}
           />
-          <View style={{ flex: 6, backgroundColor: '#fff' }}>
-            {SidebarContent()}
+          <View style={{ width: '80%', maxWidth: 320, backgroundColor: '#fff', flex: 1 }}>
+            <SidebarContent />
           </View>
         </View>
       </Modal>

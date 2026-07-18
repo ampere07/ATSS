@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, TextInput, Pressable, ScrollView, Alert, Dimensions, DeviceEventEmitter, RefreshControl, StyleSheet, Modal, Platform } from 'react-native';
-import { Search, ListFilter, Menu, X, ArrowLeft, RefreshCw, LogOut, Filter, Check, Calendar } from 'lucide-react-native';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { View, Text, TextInput, Pressable, ScrollView, Alert, Dimensions, DeviceEventEmitter, RefreshControl, StyleSheet, Modal } from 'react-native';
+import { Search, ListFilter, Menu, X, ArrowLeft, RefreshCw, LogOut, Filter, Check } from 'lucide-react-native';
 import { FlashList } from '@shopify/flash-list';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import JobOrderDetails from '../components/JobOrderDetails';
@@ -159,23 +158,6 @@ const formatDate = (dateStr?: string | null): string => {
   } catch (e) {
     return '-';
   }
-};
-
-// Timestamp-range filter helpers (shared shape with ApplicationManagement).
-const toYMD = (d: Date): string => {
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
-};
-const parseYMD = (s: string): Date => {
-  const [y, m, d] = (s || '').split('-').map(Number);
-  if (!y) return new Date();
-  return new Date(y, (m || 1) - 1, d || 1);
-};
-const fmtYMD = (s: string): string => {
-  if (!s) return '';
-  const [y, m, d] = s.split('-');
-  return `${m}/${d}/${y}`;
 };
 
 const checkIsStarted = (time?: string | null) => {
@@ -337,10 +319,6 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   const [debouncedSearch, setDebouncedSearch] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [showStatusModal, setShowStatusModal] = useState<boolean>(false);
-  const [timestampFrom, setTimestampFrom] = useState<string>('');
-  const [timestampTo, setTimestampTo] = useState<string>('');
-  const [showFromPicker, setShowFromPicker] = useState<boolean>(false);
-  const [showToPicker, setShowToPicker] = useState<boolean>(false);
   const [selectedJobOrder, setSelectedJobOrder] = useState<JobOrder | null>(null);
   const { jobOrders, isLoading, error, refreshJobOrders, silentRefresh } = useJobOrderContext();
   const [billingStatuses, setBillingStatuses] = useState<BillingStatus[]>([]);
@@ -495,18 +473,6 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
 
 
-  // The Timestamp Range filter is hidden for technician (role 2) and agent (role 4).
-  const canUseTimestampFilter = useMemo(
-    () =>
-      !(
-        userRole.toLowerCase() === 'technician' ||
-        userRoleId === 2 ||
-        userRole.toLowerCase() === 'agent' ||
-        userRoleId === 4
-      ),
-    [userRole, userRoleId]
-  );
-
   const filteredJobOrders = useMemo(() => {
     const lowerSearch = debouncedSearch.toLowerCase();
     return jobOrders.filter(jobOrder => {
@@ -595,27 +561,9 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
         }
       }
 
-      // Timestamp range filter (from the "Filter by Status" modal)
-      if (timestampFrom || timestampTo) {
-        const raw = jobOrder.Timestamp || jobOrder.timestamp;
-        if (!raw) return false;
-        const dv = new Date(raw).getTime();
-        if (isNaN(dv)) return false;
-        if (timestampFrom) {
-          const fd = new Date(timestampFrom);
-          fd.setHours(0, 0, 0, 0);
-          if (dv < fd.getTime()) return false;
-        }
-        if (timestampTo) {
-          const td = new Date(timestampTo);
-          td.setHours(23, 59, 59, 999);
-          if (dv > td.getTime()) return false;
-        }
-      }
-
       return true;
     });
-  }, [jobOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, timestampFrom, timestampTo, getClientFullName, getClientFullAddress]);
+  }, [jobOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, getClientFullName, getClientFullAddress]);
 
   const sortedJobOrders = useMemo(() => {
     return [...filteredJobOrders].sort((a, b) => {
@@ -973,71 +921,6 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
             <View style={jo.statusModalHeader}>
               <Text style={jo.statusModalTitle}>Filter by Status</Text>
             </View>
-
-            {/* Timestamp Range filter — hidden for technician & agent roles */}
-            {canUseTimestampFilter && (
-              <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1, textTransform: 'uppercase' }}>
-                    Timestamp Range
-                  </Text>
-                  {(timestampFrom || timestampTo) ? (
-                    <Pressable onPress={() => { setTimestampFrom(''); setTimestampTo(''); setCurrentPage(1); }}>
-                      <Text style={{ fontSize: 10, fontWeight: '700', color: colorPalette?.primary || '#7c3aed', letterSpacing: 1, textTransform: 'uppercase' }}>
-                        Clear
-                      </Text>
-                    </Pressable>
-                  ) : null}
-                </View>
-
-                {/* From */}
-                <Text style={{ fontSize: 10, color: '#6b7280', marginBottom: 4 }}>From</Text>
-                <Pressable
-                  onPress={() => setShowFromPicker(true)}
-                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 6, borderWidth: 1, borderColor: timestampFrom ? (colorPalette?.primary || '#7c3aed') : '#d1d5db', backgroundColor: '#fff', marginBottom: 10 }}
-                >
-                  <Text style={{ fontSize: 14, color: timestampFrom ? '#111827' : '#9ca3af' }} numberOfLines={1}>
-                    {timestampFrom ? fmtYMD(timestampFrom) : 'mm/dd/yyyy'}
-                  </Text>
-                  <Calendar size={16} color="#6b7280" />
-                </Pressable>
-                {showFromPicker ? (
-                  <DateTimePicker
-                    value={timestampFrom ? parseYMD(timestampFrom) : new Date()}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                    onChange={(_e, date) => {
-                      setShowFromPicker(false);
-                      if (date) { setTimestampFrom(toYMD(date)); setCurrentPage(1); }
-                    }}
-                  />
-                ) : null}
-
-                {/* To */}
-                <Text style={{ fontSize: 10, color: '#6b7280', marginBottom: 4 }}>To</Text>
-                <Pressable
-                  onPress={() => setShowToPicker(true)}
-                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 6, borderWidth: 1, borderColor: timestampTo ? (colorPalette?.primary || '#7c3aed') : '#d1d5db', backgroundColor: '#fff' }}
-                >
-                  <Text style={{ fontSize: 14, color: timestampTo ? '#111827' : '#9ca3af' }} numberOfLines={1}>
-                    {timestampTo ? fmtYMD(timestampTo) : 'mm/dd/yyyy'}
-                  </Text>
-                  <Calendar size={16} color="#6b7280" />
-                </Pressable>
-                {showToPicker ? (
-                  <DateTimePicker
-                    value={timestampTo ? parseYMD(timestampTo) : new Date()}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                    onChange={(_e, date) => {
-                      setShowToPicker(false);
-                      if (date) { setTimestampTo(toYMD(date)); setCurrentPage(1); }
-                    }}
-                  />
-                ) : null}
-              </View>
-            )}
-
             {[
               { label: 'All Status', value: 'all' },
               { label: 'Pending', value: 'pending' },
