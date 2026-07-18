@@ -24,34 +24,41 @@ function isLoggedInTechnician(user: any): boolean {
  * (even when the app is minimized). Defined at module scope so it is registered
  * whenever the app is launched, including background relaunches.
  */
-TaskManager.defineTask(TECH_LOCATION_TASK, async ({ data, error }: any) => {
-  if (error) return;
-  const locations = data?.locations;
-  if (!locations || locations.length === 0) return;
+// Guarded so a missing/misbehaving native module (e.g. a JS bundle loaded on an
+// older native binary, or Expo Go) can NEVER crash the app at import/launch time.
+// If registration fails, location tracking simply stays off.
+try {
+  TaskManager.defineTask(TECH_LOCATION_TASK, async ({ data, error }: any) => {
+    if (error) return;
+    const locations = data?.locations;
+    if (!locations || locations.length === 0) return;
 
-  try {
-    // Only report while a technician is still logged in; skip after logout.
-    const [raw, token] = await Promise.all([
-      AsyncStorage.getItem('authData'),
-      AsyncStorage.getItem('authToken'),
-    ]);
-    const user = raw ? JSON.parse(raw) : null;
-    if (!token || !isLoggedInTechnician(user)) return;
+    try {
+      // Only report while a technician is still logged in; skip after logout.
+      const [raw, token] = await Promise.all([
+        AsyncStorage.getItem('authData'),
+        AsyncStorage.getItem('authToken'),
+      ]);
+      const user = raw ? JSON.parse(raw) : null;
+      if (!token || !isLoggedInTechnician(user)) return;
 
-    const latest = locations[locations.length - 1];
-    const { latitude, longitude, accuracy, speed, heading } = latest.coords;
+      const latest = locations[locations.length - 1];
+      const { latitude, longitude, accuracy, speed, heading } = latest.coords;
 
-    await technicianLocationService.updateLocation({
-      latitude,
-      longitude,
-      accuracy: accuracy ?? null,
-      speed: speed ?? null,
-      heading: heading ?? null,
-    });
-  } catch (e) {
-    // Network loss / transient error: the next OS location tick will retry.
-  }
-});
+      await technicianLocationService.updateLocation({
+        latitude,
+        longitude,
+        accuracy: accuracy ?? null,
+        speed: speed ?? null,
+        heading: heading ?? null,
+      });
+    } catch (e) {
+      // Network loss / transient error: the next OS location tick will retry.
+    }
+  });
+} catch (e) {
+  // expo-task-manager native module unavailable — skip task registration.
+}
 
 /**
  * Begin continuous location updates (idempotent). Requires foreground location

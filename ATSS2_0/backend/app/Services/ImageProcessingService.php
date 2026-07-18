@@ -215,9 +215,12 @@ class ImageProcessingService
                 $jobOrderToUpdate = $isJobOrderQueue ? $jobOrder : \App\Models\JobOrder::where('application_id', $imageQueue->application_id)->latest()->first();
                 if ($jobOrderToUpdate) {
                     $dbColumn = $this->getJobOrderDbColumn($imageQueue->field_name);
-                    $jobOrderToUpdate->update([
+                    // forceFill so a trusted single-column URL write is never silently
+                    // dropped by $fillable (this is what caused client_tagging_url to
+                    // upload to Drive but never persist to the job_orders table).
+                    $jobOrderToUpdate->forceFill([
                         $dbColumn => $gdriveUrl
-                    ]);
+                    ])->save();
                     Log::info("Updated job_order {$jobOrderToUpdate->id} field {$dbColumn} with URL: {$gdriveUrl}");
                 } else {
                     Log::warning("No JobOrder found to update");

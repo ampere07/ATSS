@@ -2,8 +2,6 @@
 
 namespace App\Services;
 
-use App\Models\Barangay;
-use App\Models\City;
 use App\Models\RadiusConfig;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
@@ -15,9 +13,9 @@ use Throwable;
  *
  * Two strategies live here so the rest of the app never re-implements them:
  *
- *  1. Barangay-based selection (resolveForBarangay) — used when CREATING an account,
- *     where the account does not exist on any server yet so it must be placed on the
- *     RADIUS server explicitly assigned to the customer's barangay. No fallback.
+ *  1. Default selection (resolveForCity) — returns the first available config for the
+ *     organization. Barangay-based routing has been removed; account creation now uses
+ *     radius_config #1 with failover to #2 (see JobOrderController).
  *  2. Failover lookup (findConfigForAccount) — used for operations on an EXISTING
  *     account: search radius_config #1, then #2, ... and operate only where the
  *     account is actually found.
@@ -59,10 +57,9 @@ class RadiusServerResolver
     /**
      * Pick a radius_config without any city-specific routing.
      *
-     * The former hardcoded city => server map has been removed; account placement is
-     * now driven by the barangay's assigned radius_config_id (see resolveForBarangay).
-     * This simply returns the first available config for the organization and exists
-     * only for legacy callers that still pass a city.
+     * The former hardcoded city => server map has been removed. This simply returns
+     * the first available config for the organization and exists for callers that
+     * still pass a city.
      */
     public function resolveForCity(?string $city, ?int $organizationId = null): ?RadiusConfig
     {
@@ -82,98 +79,6 @@ class RadiusServerResolver
         ]);
 
         return $config;
-    }
-
-    /**
-     * Pick the radius_config for a NEW account from the BARANGAY's assigned
-     * radius_config_id.
-     *
-     * Unlike resolveForCity(), this makes NO fallback to another server: if the
-     * barangay cannot be found, has no RADIUS config assigned, or the assigned
-     * config no longer exists, this returns null so the caller surfaces an error
-     * instead of silently placing the account on the wrong server.
-     */
-    public function resolveForBarangay(?string $barangayName, ?string $cityName, ?int $organizationId = null): ?RadiusConfig
-    {
-        if ($this->normalizeCity($barangayName) === '') {
-            $this->log('error', 'Cannot resolve RADIUS server: barangay is empty', [
-                'barangay' => $barangayName,
-                'city'     => $cityName,
-            ]);
-            return null;
-        }
-
-        $barangay = $this->findBarangay($barangayName, $cityName, $organizationId);
-
-        if (!$barangay) {
-            $this->log('error', 'Cannot resolve RADIUS server: barangay not found', [
-                'barangay'        => $barangayName,
-                'city'            => $cityName,
-                'organization_id' => $organizationId,
-            ]);
-            return null;
-        }
-
-        if (empty($barangay->radius_config_id)) {
-            $this->log('error', 'Cannot resolve RADIUS server: barangay has no RADIUS config assigned', [
-                'barangay_id' => $barangay->id,
-                'barangay'    => $barangay->barangay,
-            ]);
-            return null;
-        }
-
-        $config = RadiusConfig::find($barangay->radius_config_id);
-
-        if (!$config) {
-            $this->log('error', 'Cannot resolve RADIUS server: barangay\'s assigned radius_config not found', [
-                'barangay_id'      => $barangay->id,
-                'radius_config_id' => $barangay->radius_config_id,
-            ]);
-            return null;
-        }
-
-        $this->log('info', 'Selected RADIUS server by barangay radius_config_id', [
-            'barangay_id'      => $barangay->id,
-            'barangay'         => $barangay->barangay,
-            'radius_config_id' => $config->id,
-            'radius_ip'        => $config->ip,
-        ]);
-
-        return $config;
-    }
-
-    /**
-     * Find the barangay record matching the given name (and city, when provided).
-     *
-     * Prefers an organization-specific record and falls back to the shared
-     * (null-org) one — mirroring orderedConfigs(). City is used only to
-     * disambiguate barangays that share a name across cities.
-     */
-    private function findBarangay(?string $barangayName, ?string $cityName, ?int $organizationId): ?Barangay
-    {
-        $barangayValue = strtolower(trim($barangayName ?? ''));
-        $cityValue = strtolower(trim($cityName ?? ''));
-
-        $cityIds = $cityValue !== ''
-            ? City::whereRaw('LOWER(TRIM(city)) = ?', [$cityValue])->pluck('id')
-            : collect();
-
-        $build = function () use ($barangayValue, $cityIds) {
-            $query = Barangay::whereRaw('LOWER(TRIM(barangay)) = ?', [$barangayValue]);
-            if ($cityIds->isNotEmpty()) {
-                $query->whereIn('city_id', $cityIds);
-            }
-            return $query;
-        };
-
-        if ($organizationId !== null) {
-            $match = $build()->where('organization_id', $organizationId)->first();
-            if ($match) {
-                return $match;
-            }
-        }
-
-        return $build()->whereNull('organization_id')->first() ?? $build()->first();
     }
 
     /**
@@ -293,14 +198,6 @@ class RadiusServerResolver
             : "https://{$config->ip}:{$config->port}";
 
         return [$primary, $alternate];
-    }
-
-    /**
-     * Normalize a location name (trim, collapse whitespace, lowercase).
-     */
-    private function normalizeCity(?string $city): string
-    {
-        return strtolower(trim(preg_replace('/\s+/', ' ', $city ?? '')));
     }
 
     private function log(string $level, string $message, array $context = []): void

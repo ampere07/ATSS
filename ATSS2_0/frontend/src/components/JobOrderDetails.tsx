@@ -176,6 +176,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
     'modifiedBy',
     'modifiedDate',
     'assignedEmail',
+    'clientSignature',
     'setupImage',
     'speedtestImage',
     'signedContractImage',
@@ -183,6 +184,8 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
     'routerReadingImage',
     'portLabelImage',
     'houseFrontPicture',
+    'clientTagging',
+    'proofImage',
     'proofOfBilling',
     'governmentValidId',
     'secondGovernmentValidId',
@@ -878,13 +881,16 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
       modifiedBy: 'Modified By',
       modifiedDate: 'Modified Date',
       assignedEmail: 'Assigned Tech',
+      clientSignature: 'Client Signature',
       setupImage: 'Setup Image',
       speedtestImage: 'Speedtest Image',
       signedContractImage: 'Signed Contract Image',
       boxReadingImage: 'Box Reading Image',
       routerReadingImage: 'Router Reading Image',
       portLabelImage: 'Port Label Image',
-      houseFrontPicture: 'House Front Picture'
+      houseFrontPicture: 'House Front Picture',
+      clientTagging: 'Client Tagging',
+      proofImage: 'Proof Image'
     };
     return labels[fieldKey] || fieldKey;
   };
@@ -1529,6 +1535,28 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
           </div>
         );
 
+      case 'clientSignature':
+        const clientSignatureImg = jobOrder.client_signature_url || jobOrder.Client_Signature_URL || jobOrder.client_signature || jobOrder.Client_Signature;
+        if (!clientSignatureImg) return null;
+        return (
+          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>Client Signature</div>
+            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+              <span className="truncate mr-2">
+                {clientSignatureImg}
+              </span>
+              {clientSignatureImg && (
+                <button
+                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
+                  onClick={() => window.open(clientSignatureImg)}
+                >
+                  <ExternalLink size={16} />
+                </button>
+              )}
+            </div>
+          </div>
+        );
+
       case 'setupImage':
         const setupImg = jobOrder.setup_image_url || jobOrder.Setup_Image_URL || jobOrder.Setup_Image_Url;
         if (!setupImg) return null;
@@ -1675,6 +1703,50 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
                 <button
                   className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
                   onClick={() => window.open(houseFrontImg)}
+                >
+                  <ExternalLink size={16} />
+                </button>
+              )}
+            </div>
+          </div>
+        );
+
+      case 'clientTagging':
+        const clientTaggingImg = jobOrder.client_tagging_url || jobOrder.Client_Tagging_URL || jobOrder.client_tagging || jobOrder.Client_Tagging;
+        if (!clientTaggingImg) return null;
+        return (
+          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>Client Tagging</div>
+            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+              <span className="truncate mr-2">
+                {clientTaggingImg}
+              </span>
+              {clientTaggingImg && (
+                <button
+                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
+                  onClick={() => window.open(clientTaggingImg)}
+                >
+                  <ExternalLink size={16} />
+                </button>
+              )}
+            </div>
+          </div>
+        );
+
+      case 'proofImage':
+        const proofImg = jobOrder.proof_image_url || jobOrder.Proof_Image_URL || jobOrder.proof_image || jobOrder.Proof_Image;
+        if (!proofImg) return null;
+        return (
+          <div className={`flex border-b py-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+            <div className={`w-40 text-sm whitespace-nowrap ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>Proof Image</div>
+            <div className={`flex-1 flex items-center justify-between min-w-0 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+              <span className="truncate mr-2">
+                {proofImg}
+              </span>
+              {proofImg && (
+                <button
+                  className={`flex-shrink-0 ${isDarkMode ? 'text-gray-400 hover:text-white' : 'text-gray-600 hover:text-gray-900'}`}
+                  onClick={() => window.open(proofImg)}
                 >
                   <ExternalLink size={16} />
                 </button>

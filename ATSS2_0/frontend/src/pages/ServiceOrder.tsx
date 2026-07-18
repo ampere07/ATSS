@@ -152,6 +152,12 @@ const ServiceOrderPage: React.FC = () => {
   const dropdownRef = useRef<HTMLDivElement>(null);
   const filterDropdownRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLTableElement>(null);
+  // Trigger buttons for the fixed-position dropdowns (the toolbar clips overflow,
+  // so these menus render `fixed` and must be anchored to the button's screen rect).
+  const columnBtnRef = useRef<HTMLButtonElement>(null);
+  const viewBtnRef = useRef<HTMLButtonElement>(null);
+  const [columnMenuPos, setColumnMenuPos] = useState<{ top: number; right: number } | null>(null);
+  const [viewMenuPos, setViewMenuPos] = useState<{ top: number; left: number } | null>(null);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
   const sidebarStartXRef = useRef<number>(0);
@@ -1599,17 +1605,26 @@ const ServiceOrderPage: React.FC = () => {
                 {displayMode === 'table' && (
                   <div className="relative z-50 flex-shrink-0" ref={filterDropdownRef}>
                     <button
+                      ref={columnBtnRef}
                       className={`px-4 py-2 rounded text-sm transition-colors flex items-center ${isDarkMode
                         ? 'hover:bg-gray-800 text-white'
                         : 'hover:bg-gray-100 text-gray-900'
                         }`}
-                      onClick={() => setFilterDropdownOpen(!filterDropdownOpen)}
+                      onClick={() => {
+                        if (!filterDropdownOpen && columnBtnRef.current) {
+                          const r = columnBtnRef.current.getBoundingClientRect();
+                          setColumnMenuPos({ top: r.bottom + 4, right: Math.max(8, window.innerWidth - r.right) });
+                        }
+                        setFilterDropdownOpen(!filterDropdownOpen);
+                      }}
                       title="Column Visibility"
                     >
                       <Columns3 className="h-5 w-5" />
                     </button>
                     {filterDropdownOpen && (
-                      <div className={`fixed mt-10 w-80 border rounded shadow-lg z-50 max-h-96 flex flex-col -translate-x-[calc(100%-3.5rem)] ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
+                      <div
+                        style={{ top: columnMenuPos?.top ?? 0, right: columnMenuPos?.right ?? 8 }}
+                        className={`fixed w-80 border rounded shadow-lg z-[100] max-h-96 flex flex-col ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
                         }`}>
                         <div className={`p-3 border-b flex items-center justify-between ${isDarkMode ? 'border-gray-700' : 'border-gray-200'
                           }`}>
@@ -1685,11 +1700,18 @@ const ServiceOrderPage: React.FC = () => {
                 )}
                 <div className="relative z-50 flex-shrink-0" ref={dropdownRef}>
                   <button
+                    ref={viewBtnRef}
                     className={`px-4 py-2 rounded text-sm transition-colors flex items-center ${isDarkMode
                       ? 'hover:bg-gray-800 text-white'
                       : 'hover:bg-gray-100 text-gray-900'
                       }`}
-                    onClick={() => setDropdownOpen(!dropdownOpen)}
+                    onClick={() => {
+                      if (!dropdownOpen && viewBtnRef.current) {
+                        const r = viewBtnRef.current.getBoundingClientRect();
+                        setViewMenuPos({ top: r.bottom + 4, left: r.left });
+                      }
+                      setDropdownOpen(!dropdownOpen);
+                    }}
                   >
                     <span>{displayMode === 'card' ? 'Card' : 'Table'}</span>
                     <svg className="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -1697,7 +1719,9 @@ const ServiceOrderPage: React.FC = () => {
                     </svg>
                   </button>
                   {dropdownOpen && (
-                    <div className={`fixed right-auto mt-1 w-36 border rounded shadow-lg ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
+                    <div
+                      style={{ top: viewMenuPos?.top ?? 0, left: viewMenuPos?.left ?? 0 }}
+                      className={`fixed w-36 border rounded shadow-lg z-[100] ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
                       }`}>
                       <button
                         onClick={() => {

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, TextInput, Pressable, ScrollView, Dimensions, RefreshControl, StyleSheet, Modal, DeviceEventEmitter } from 'react-native';
-import { FileText, Search, X, Menu, RefreshCw, ArrowLeft, Filter, Check } from 'lucide-react-native';
+import { View, Text, TextInput, Pressable, ScrollView, Dimensions, RefreshControl, StyleSheet, Modal, DeviceEventEmitter, Platform } from 'react-native';
+import { FileText, Search, X, Menu, RefreshCw, ArrowLeft, Filter, Check, Calendar } from 'lucide-react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { FlashList } from '@shopify/flash-list';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ServiceOrderDetails from '../components/ServiceOrderDetails';
@@ -24,6 +25,23 @@ const formatDate = (dateStr?: string | null): string => {
   } catch (e) {
     return dateStr;
   }
+};
+
+// Timestamp-range filter helpers (shared shape with ApplicationManagement / JobOrder).
+const toYMD = (d: Date): string => {
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+};
+const parseYMD = (s: string): Date => {
+  const [y, m, d] = (s || '').split('-').map(Number);
+  if (!y) return new Date();
+  return new Date(y, (m || 1) - 1, d || 1);
+};
+const fmtYMD = (s: string): string => {
+  if (!s) return '';
+  const [y, m, d] = s.split('-');
+  return `${m}/${d}/${y}`;
 };
 
 const checkIsStarted = (time?: string | null) => {
@@ -223,6 +241,10 @@ const so = StyleSheet.create({
 const ServiceOrderPage: React.FC = () => {
   const isDarkMode = false; // Forced light mode as per user request
   const [showStatusModal, setShowStatusModal] = useState(false);
+  const [timestampFrom, setTimestampFrom] = useState<string>('');
+  const [timestampTo, setTimestampTo] = useState<string>('');
+  const [showFromPicker, setShowFromPicker] = useState<boolean>(false);
+  const [showToPicker, setShowToPicker] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [debouncedSearch, setDebouncedSearch] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -310,7 +332,7 @@ const ServiceOrderPage: React.FC = () => {
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedSearch, statusFilter]);
+  }, [debouncedSearch, statusFilter, timestampFrom, timestampTo]);
 
   const handleRefresh = useCallback(async () => {
     await refreshServiceOrders();
@@ -323,6 +345,18 @@ const ServiceOrderPage: React.FC = () => {
     fullAddress: item => item.fullAddress,
     concern: item => item.concern || '',
   };
+
+  // The Timestamp Range filter is hidden for technician (role 2) and agent (role 4).
+  const canUseTimestampFilter = useMemo(
+    () =>
+      !(
+        userRole.toLowerCase() === 'technician' ||
+        userRoleId === 2 ||
+        userRole.toLowerCase() === 'agent' ||
+        userRoleId === 4
+      ),
+    [userRole, userRoleId]
+  );
 
   const filteredServiceOrders = useMemo(() => {
     const isTechnician = userRole.toLowerCase() === 'technician' || userRoleId === 2 ||
@@ -377,6 +411,24 @@ const ServiceOrderPage: React.FC = () => {
           if (!matchesAgent) return false;
         }
 
+        // Timestamp range filter (from the "Filter by Status" modal)
+        if (timestampFrom || timestampTo) {
+          const raw = serviceOrder.timestamp;
+          if (!raw) return false;
+          const dv = new Date(raw).getTime();
+          if (isNaN(dv)) return false;
+          if (timestampFrom) {
+            const fd = new Date(timestampFrom);
+            fd.setHours(0, 0, 0, 0);
+            if (dv < fd.getTime()) return false;
+          }
+          if (timestampTo) {
+            const td = new Date(timestampTo);
+            td.setHours(23, 59, 59, 999);
+            if (dv > td.getTime()) return false;
+          }
+        }
+
         return true;
       })
       .sort((a, b) => {
@@ -391,7 +443,7 @@ const ServiceOrderPage: React.FC = () => {
         const timeB = b.rawUpdatedAt ? new Date(b.rawUpdatedAt).getTime() : (b.timestamp ? new Date(b.timestamp).getTime() : 0);
         return timeB - timeA;
       });
-  }, [serviceOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail]);
+  }, [serviceOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, timestampFrom, timestampTo]);
 
   const shouldPaginate = true; // Consistently paginate for all roles to prevent UI jumping
 
@@ -703,6 +755,71 @@ const ServiceOrderPage: React.FC = () => {
             <View style={so.statusModalHeader}>
               <Text style={so.statusModalTitle}>Filter by Status</Text>
             </View>
+
+            {/* Timestamp Range filter — hidden for technician & agent roles */}
+            {canUseTimestampFilter && (
+              <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1, textTransform: 'uppercase' }}>
+                    Timestamp Range
+                  </Text>
+                  {(timestampFrom || timestampTo) ? (
+                    <Pressable onPress={() => { setTimestampFrom(''); setTimestampTo(''); }}>
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: colorPalette?.primary || '#7c3aed', letterSpacing: 1, textTransform: 'uppercase' }}>
+                        Clear
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+
+                {/* From */}
+                <Text style={{ fontSize: 10, color: '#6b7280', marginBottom: 4 }}>From</Text>
+                <Pressable
+                  onPress={() => setShowFromPicker(true)}
+                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 6, borderWidth: 1, borderColor: timestampFrom ? (colorPalette?.primary || '#7c3aed') : '#d1d5db', backgroundColor: '#fff', marginBottom: 10 }}
+                >
+                  <Text style={{ fontSize: 14, color: timestampFrom ? '#111827' : '#9ca3af' }} numberOfLines={1}>
+                    {timestampFrom ? fmtYMD(timestampFrom) : 'mm/dd/yyyy'}
+                  </Text>
+                  <Calendar size={16} color="#6b7280" />
+                </Pressable>
+                {showFromPicker ? (
+                  <DateTimePicker
+                    value={timestampFrom ? parseYMD(timestampFrom) : new Date()}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(_e, date) => {
+                      setShowFromPicker(false);
+                      if (date) setTimestampFrom(toYMD(date));
+                    }}
+                  />
+                ) : null}
+
+                {/* To */}
+                <Text style={{ fontSize: 10, color: '#6b7280', marginBottom: 4 }}>To</Text>
+                <Pressable
+                  onPress={() => setShowToPicker(true)}
+                  style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 12, paddingVertical: 10, borderRadius: 6, borderWidth: 1, borderColor: timestampTo ? (colorPalette?.primary || '#7c3aed') : '#d1d5db', backgroundColor: '#fff' }}
+                >
+                  <Text style={{ fontSize: 14, color: timestampTo ? '#111827' : '#9ca3af' }} numberOfLines={1}>
+                    {timestampTo ? fmtYMD(timestampTo) : 'mm/dd/yyyy'}
+                  </Text>
+                  <Calendar size={16} color="#6b7280" />
+                </Pressable>
+                {showToPicker ? (
+                  <DateTimePicker
+                    value={timestampTo ? parseYMD(timestampTo) : new Date()}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(_e, date) => {
+                      setShowToPicker(false);
+                      if (date) setTimestampTo(toYMD(date));
+                    }}
+                  />
+                ) : null}
+              </View>
+            )}
+
             {[
               { label: 'All Status', value: 'all' },
               { label: 'Done', value: 'done' },

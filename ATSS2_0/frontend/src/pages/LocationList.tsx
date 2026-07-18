@@ -34,7 +34,6 @@ interface LocationItem {
   cityId?: number;
   regionId?: number;
   boroughId?: number;
-  radiusConfigId?: number | null;
   modifiedBy?: string;
   modifiedAt?: string;
   organization_id?: number | null;
@@ -196,7 +195,6 @@ const LocationList: React.FC = () => {
         parentName: city?.name,
         cityId: borough.city_id,
         regionId: city?.region_id,
-        radiusConfigId: borough.radius_config_id ?? null,
         modifiedBy: borough.modified_by,
         modifiedAt: borough.modified_at,
         organization_id: borough.organization_id
@@ -396,8 +394,7 @@ const LocationList: React.FC = () => {
           break;
         case 'borough':
           await updateBarangay(updatedLocation.id, {
-            ...updateData,
-            radius_config_id: updatedLocation.radiusConfigId ?? null
+            ...updateData
           });
           break;
         case 'location':
@@ -547,7 +544,6 @@ const LocationList: React.FC = () => {
     { id: 'name', label: 'Location Name', width: 'whitespace-nowrap' },
     { id: 'type', label: 'Type', width: 'whitespace-nowrap' },
     { id: 'parent', label: 'Parent Location', width: 'whitespace-nowrap' },
-    { id: 'radiusConfigId', label: 'Radius Config ID', width: 'whitespace-nowrap' },
     { id: 'modifiedBy', label: 'Modified By', width: 'whitespace-nowrap' },
     { id: 'modifiedAt', label: 'Modified At', width: 'whitespace-nowrap' }
   ];
@@ -878,9 +874,6 @@ const LocationList: React.FC = () => {
                       <td className={`px-4 py-3 whitespace-nowrap text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-900'
                         }`}>
                         {location.parentName || '-'}
-                      </td>
-                      <td className={`px-4 py-3 whitespace-nowrap text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                        {location.radiusConfigId ?? '-'}
                       </td>
                       <td className={`px-4 py-3 whitespace-nowrap text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
                         {location.modifiedBy || '-'}

@@ -7,11 +7,9 @@ import {
   getRegions,
   getCities,
   getBoroughs,
-  getRadiusConfigs,
   Region,
   City,
-  Borough,
-  RadiusConfigOption
+  Borough
 } from '../services/cityService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
@@ -28,14 +26,6 @@ interface LocationFormData {
   cityId: number | null;
   barangayId: number | null;
 }
-
-const formatRadiusConfigLabel = (config: RadiusConfigOption): string => {
-  const target = [config.ip, config.port].filter(Boolean).join(':');
-  const parts = [`#${config.id}`];
-  if (target) parts.push(target);
-  if (config.username) parts.push(`(${config.username})`);
-  return parts.join(' ');
-};
 
 const AddLocationModal: React.FC<AddLocationModalProps> = ({
   isOpen,
@@ -57,8 +47,6 @@ const AddLocationModal: React.FC<AddLocationModalProps> = ({
   const [newRegionName, setNewRegionName] = useState('');
   const [newCityName, setNewCityName] = useState('');
   const [newBarangayName, setNewBarangayName] = useState('');
-  const [newBarangayRadiusConfigId, setNewBarangayRadiusConfigId] = useState<number | null>(null);
-  const [radiusConfigs, setRadiusConfigs] = useState<RadiusConfigOption[]>([]);
 
   const [showNewRegionInput, setShowNewRegionInput] = useState(false);
   const [showNewCityInput, setShowNewCityInput] = useState(false);
@@ -142,9 +130,6 @@ const AddLocationModal: React.FC<AddLocationModalProps> = ({
       setAllRegions(regions);
       setAllCities(cities);
       setAllBarangays(barangays);
-
-      const configs = await getRadiusConfigs();
-      setRadiusConfigs(configs);
     } catch (error) {
       console.error('Error fetching location data:', error);
     } finally {
@@ -323,7 +308,6 @@ const AddLocationModal: React.FC<AddLocationModalProps> = ({
         await createBarangay({
           name: locationData.barangay.name,
           city_id: cityId,
-          radius_config_id: newBarangayRadiusConfigId,
           modified_by: userEmail,
           is_active: formData.is_active,
           ...(organizationId ? { organization_id: organizationId } : {})
@@ -368,7 +352,6 @@ const AddLocationModal: React.FC<AddLocationModalProps> = ({
     setNewRegionName('');
     setNewCityName('');
     setNewBarangayName('');
-    setNewBarangayRadiusConfigId(null);
     onClose();
   };
 
@@ -692,33 +675,6 @@ const AddLocationModal: React.FC<AddLocationModalProps> = ({
                   {errors.barangayId && <p className="text-red-500 text-xs mt-1">{errors.barangayId}</p>}
                 </div>
 
-                {showNewBarangayInput && (
-                  <div>
-                    <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
-                      }`}>
-                      RADIUS Config
-                    </label>
-                    <div className="relative">
-                      <select
-                        value={newBarangayRadiusConfigId ?? ''}
-                        onChange={(e) => setNewBarangayRadiusConfigId(e.target.value ? parseInt(e.target.value) : null)}
-                        className={`w-full px-3 py-2 border rounded focus:outline-none appearance-none transition-all duration-200 ${isDarkMode
-                          ? 'bg-gray-800 border-gray-700 text-white'
-                          : 'bg-white border-gray-300 text-gray-900'
-                          }`}
-                      >
-                        <option value="">None</option>
-                        {radiusConfigs.map((config) => (
-                          <option key={config.id} value={config.id}>
-                            {formatRadiusConfigLabel(config)}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className={`absolute right-3 top-2.5 pointer-events-none ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
-                        }`} size={20} />
-                    </div>
-                  </div>
-                )}
               </>
             )}
           </div>

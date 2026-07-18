@@ -9,7 +9,9 @@ import {
   Menu as MenuIcon, Package, List, ClipboardCheck, X, ChevronUp,
   CreditCard, FileText, Receipt, Clock,
   MessageSquare, Network, AlertCircle, Router, Server, Wifi, Send, Cable, MapPin, Mail,
-  MessageSquareText, Wallet, Gauge, Layers, Ticket
+  MessageSquareText, Wallet, Gauge, Layers, Ticket,
+  Activity, BarChart2, User, RefreshCw, DollarSign, Coins, AlertTriangle, Tag,
+  Users, UserCog, Database, ScrollText, Zap
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -40,6 +42,35 @@ interface NavGroup {
 const MAX_VISIBLE_ITEMS = 4;
 const GRID_COLUMNS = 3;
 
+// ─── Role → (role names, role ids) map, mirroring the localcbms (ATSS2_0) Sidebar.tsx
+// filterMenuByRole logic so mobile visibility matches web exactly.
+// Note: on web, roleId 7 (superadmin) also satisfies the 'administrator' check,
+// so 'administrator' expands to include superadmin ids.
+const ROLE_MAP: Record<string, { names: string[]; ids: (number | string)[] }> = {
+  administrator: { names: ['administrator', 'superadmin'], ids: [1, '1', 7, '7'] },
+  superadmin: { names: ['superadmin'], ids: [7, '7'] },
+  headtech: { names: ['headtech'], ids: [8, '8'] },
+  technician: { names: ['technician'], ids: [2, '2'] },
+  agent: { names: ['agent'], ids: [4, '4'] },
+  osp: { names: ['osp'], ids: [6, '6'] },
+  inventorystaff: { names: ['inventorystaff'], ids: [5, '5'] },
+  customer: { names: ['customer'], ids: [3, '3'] },
+};
+
+// Expand a list of role tokens into { allowedRoles, allowedRoleIds } for a menu item.
+const roles = (...tokens: string[]): Pick<MenuItem, 'allowedRoles' | 'allowedRoleIds'> => {
+  const names = new Set<string>();
+  const ids = new Set<number | string>();
+  tokens.forEach(token => {
+    const mapped = ROLE_MAP[token];
+    if (mapped) {
+      mapped.names.forEach(n => names.add(n));
+      mapped.ids.forEach(i => ids.add(i));
+    }
+  });
+  return { allowedRoles: Array.from(names), allowedRoleIds: Array.from(ids) };
+};
+
 const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userRole, roleId }) => {
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [isMenuExpanded, setIsMenuExpanded] = useState(false);
@@ -62,72 +93,115 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
   }, []);
 
   // ─── Navigation groups with role-based access ───
+  // Options and role gating mirror the localcbms (ATSS2_0) Sidebar.tsx menuItems.
+  // Section ids use the mobile Dashboard.tsx routing keys (which differ from web,
+  // e.g. web `so-charge`/`mass-rebate`/`lcp`/`nap`/`smart-olt`/`usage-type` map to
+  // mobile `so-charges`/`rebate`/`lcp-list`/`nap-list`/`smart-olt-config`/`usage-type-list`).
+  // Customer/agent-specific entries are preserved so those roles keep working on mobile.
+  // (`vlan-config` from web is omitted — the mobile app has no VLAN page/route.)
   const navGroups: NavGroup[] = [
     {
       title: 'Operations',
       items: [
-        { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['agent'] },
-        { id: 'customer-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['customer'] },
-        { id: 'applicationManagement', label: 'Application', icon: FileCheck, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'job-order', label: 'Job Order', icon: Wrench, allowedRoles: ['administrator', 'technician', 'agent', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 4, '4', 7, '7', 8, '8'] },
-        { id: 'service-order', label: 'Service Order', icon: Settings, allowedRoles: ['administrator', 'technician', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 7, '7', 8, '8'] },
-        { id: 'work-order', label: 'Work Order', icon: ClipboardCheck, allowedRoles: ['administrator', 'technician', 'agent', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 4, '4', 6, '6', 7, '7', 8, '8'] },
-        { id: 'lcp-nap-location', label: 'LCP/NAP', icon: MapPinned, allowedRoles: ['administrator', 'technician', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 6, '6', 7, '7', 8, '8'] },
+        { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, ...roles('agent') },
+        { id: 'customer-dashboard', label: 'Dashboard', icon: LayoutDashboard, ...roles('customer') },
+        { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, ...roles('administrator', 'superadmin') },
+        { id: 'live-monitor', label: 'Monitoring', icon: Activity, ...roles('superadmin') },
+        { id: 'applicationManagement', label: 'Application', icon: FileCheck, ...roles('administrator', 'headtech') },
+        { id: 'job-order', label: 'Job Order', icon: Wrench, ...roles('administrator', 'technician', 'agent', 'headtech') },
+        { id: 'service-order', label: 'Service Order', icon: Settings, ...roles('administrator', 'technician', 'headtech') },
+        { id: 'work-order', label: 'Work Order', icon: ClipboardCheck, ...roles('administrator', 'agent', 'osp', 'headtech') },
+        { id: 'lcp-nap-location', label: 'LCP/NAP', icon: MapPinned, ...roles('administrator', 'technician', 'osp', 'headtech') },
+        { id: 'sms-blast', label: 'SMS Blast', icon: Zap, ...roles('administrator') },
+        { id: 'reports', label: 'Reports', icon: BarChart2, ...roles('administrator', 'superadmin') },
       ],
     },
     {
       title: 'Billing',
       items: [
-        { id: 'customer-bills', label: 'Bills', icon: ReceiptText, allowedRoles: ['customer'] },
-        { id: 'overdue', label: 'Overdue', icon: Clock, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
+        { id: 'customer-bills', label: 'Bills', icon: ReceiptText, ...roles('customer') },
+        { id: 'customer', label: 'Customer', icon: User, ...roles('administrator', 'headtech') },
+        { id: 'transaction-list', label: 'Transactions', icon: Receipt, ...roles('administrator') },
+        { id: 'transactions-revert', label: 'Revert Reqs', icon: RefreshCw, ...roles('superadmin', 'administrator') },
+        { id: 'payment-portal', label: 'Payments', icon: DollarSign, ...roles('administrator') },
+        { id: 'soa', label: 'Statements', icon: FileText, ...roles('administrator') },
+        { id: 'invoice', label: 'Invoice', icon: Receipt, ...roles('administrator') },
+        { id: 'overdue', label: 'Overdue', icon: Clock, ...roles('administrator') },
+        { id: 'so-charges', label: 'SO Charge', icon: Coins, ...roles('administrator') },
+        { id: 'dc-notice', label: 'DC Notice', icon: AlertTriangle, ...roles('administrator') },
+        { id: 'rebate', label: 'Rebates', icon: Coins, ...roles('administrator') },
+        { id: 'discounts', label: 'Discounts', icon: Tag, ...roles('administrator') },
       ],
     },
     {
       title: 'Agent',
       items: [
-        { id: 'commission', label: 'History', icon: ReceiptText, allowedRoles: ['administrator', 'agent'], allowedRoleIds: [1, '1', 4, '4', 7, '7'] },
+        { id: 'commission', label: 'Pay Out/In', icon: DollarSign, ...roles('administrator', 'superadmin', 'agent') },
+        { id: 'team-agent', label: 'Team Agents', icon: Users, ...roles('administrator', 'superadmin') },
+        { id: 'agent-management', label: 'Agent Mgmt', icon: UserCog, ...roles('administrator', 'superadmin') },
+        { id: 'agent-payout', label: 'Agent Payout', icon: Wallet, ...roles('administrator', 'superadmin') },
       ],
     },
     {
       title: 'Inventory',
       items: [
-        { id: 'inventory', label: 'Inventory', icon: Package, allowedRoles: ['administrator', 'inventorystaff'], allowedRoleIds: [1, '1', 5, '5', 7, '7'] },
-        { id: 'inventory-category-list', label: 'Categories', icon: List, allowedRoles: ['administrator', 'inventorystaff'], allowedRoleIds: [1, '1', 5, '5', 7, '7'] },
+        { id: 'inventory', label: 'Inventory', icon: Package, ...roles('administrator', 'inventorystaff') },
+        { id: 'inventory-category-list', label: 'Categories', icon: List, ...roles('administrator', 'inventorystaff') },
       ],
     },
     {
       title: 'Configurations',
       items: [
-        { id: 'promo-list', label: 'Promos', icon: Ticket, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'plan-list', label: 'Plans', icon: Layers, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'location-list', label: 'Locations', icon: MapPin, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'lcp-list', label: 'LCP List', icon: Network, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'nap-list', label: 'NAP List', icon: Network, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'usage-type-list', label: 'Usage Types', icon: Gauge, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'payment-method-list', label: 'Payment', icon: CreditCard, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'work-category-list', label: 'Work Cat.', icon: Wrench, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'radius-config', label: 'RADIUS', icon: Wifi, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'smart-olt-config', label: 'SmartOLT', icon: Server, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'sms-config', label: 'SMS Config', icon: Send, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'pppoe-setup', label: 'PPPoE', icon: Router, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'concern-config', label: 'Concerns', icon: AlertCircle, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'billing-config', label: 'Billing Cfg', icon: Receipt, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
+        { id: 'promo-list', label: 'Promo', icon: Ticket, ...roles('superadmin') },
+        { id: 'plan-list', label: 'Plan', icon: Layers, ...roles('superadmin') },
+        { id: 'location-list', label: 'Location', icon: MapPin, ...roles('superadmin', 'headtech') },
+        { id: 'lcp-list', label: 'LCP', icon: Network, ...roles('superadmin', 'headtech') },
+        { id: 'nap-list', label: 'NAP', icon: Network, ...roles('superadmin', 'headtech') },
+        { id: 'usage-type-list', label: 'Usage Type', icon: Gauge, ...roles('superadmin') },
+        { id: 'payment-method-list', label: 'Payment', icon: CreditCard, ...roles('superadmin') },
+        { id: 'work-category-list', label: 'Work Cat.', icon: Wrench, ...roles('superadmin') },
+        { id: 'radius-config', label: 'Radius', icon: Wifi, ...roles('superadmin') },
+        { id: 'smart-olt-config', label: 'SmartOLT', icon: Server, ...roles('superadmin') },
+        { id: 'sms-config', label: 'SMS Config', icon: Send, ...roles('superadmin') },
+        { id: 'sms-template', label: 'SMS Tmpl', icon: MessageSquare, ...roles('superadmin') },
+        { id: 'email-templates', label: 'Email Tmpl', icon: Mail, ...roles('superadmin') },
+        { id: 'pppoe-setup', label: 'PPPoE', icon: Router, ...roles('superadmin') },
+        { id: 'concern-config', label: 'Concerns', icon: AlertCircle, ...roles('superadmin') },
+        { id: 'billing-config', label: 'Billing Cfg', icon: Receipt, ...roles('superadmin') },
+      ],
+    },
+    {
+      title: 'Users',
+      items: [
+        { id: 'user-management', label: 'Users', icon: Users, ...roles('superadmin') },
+        { id: 'tech-users', label: 'Tech Users', icon: Wrench, ...roles('superadmin') },
+        { id: 'team-agent', label: 'Team Agents', icon: Users, ...roles('superadmin') },
       ],
     },
     {
       title: 'Logs',
       items: [
-        { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquareText, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'email-logs', label: 'Email Logs', icon: Mail, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'file-log-viewer', label: 'File Logs', icon: FileText, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'expenses-log', label: 'Expenses', icon: Wallet, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
+        { id: 'disconnection-logs', label: 'Disconnected', icon: AlertTriangle, ...roles('administrator') },
+        { id: 'reconnection-logs', label: 'Reconnection', icon: RefreshCw, ...roles('administrator') },
+        { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquareText, ...roles('administrator') },
+        { id: 'email-logs', label: 'Email Logs', icon: Mail, ...roles('administrator') },
+        { id: 'data-logs', label: 'Data Logs', icon: Database, ...roles('administrator', 'superadmin') },
+        { id: 'file-log-viewer', label: 'SmartOLT Logs', icon: FileText, ...roles('superadmin') },
+        { id: 'radius-logs', label: 'Radius Logs', icon: Activity, ...roles('superadmin') },
+        { id: 'activity-logs', label: 'System Logs', icon: ScrollText, ...roles('superadmin') },
+      ],
+    },
+    {
+      title: 'System',
+      items: [
+        { id: 'settings', label: 'Settings', icon: Settings, ...roles('superadmin') },
       ],
     },
     {
       title: 'Account',
       items: [
-        { id: 'customer-support', label: 'Support', icon: LifeBuoy, allowedRoles: ['customer'] },
-        { id: 'menu', label: 'Menu', icon: MenuIcon, isMenuPage: true, allowedRoles: ['customer', 'technician', 'administrator', 'inventorystaff', 'agent', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 3, '3', 4, '4', 5, '5', 6, '6', 7, '7', 8, '8'] },
+        { id: 'customer-support', label: 'Support', icon: LifeBuoy, ...roles('customer') },
+        { id: 'menu', label: 'Menu', icon: MenuIcon, isMenuPage: true, ...roles('customer', 'technician', 'administrator', 'superadmin', 'inventorystaff', 'agent', 'osp', 'headtech') },
       ],
     },
   ];

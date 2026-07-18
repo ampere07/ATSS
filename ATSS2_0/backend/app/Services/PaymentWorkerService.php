@@ -413,6 +413,11 @@ class PaymentWorkerService
                 return 'balance_positive';
             }
 
+            // Balance is now settled (0 or negative). Cancel any pending disconnection /
+            // restriction still queued for this account so the RADIUS queue cron won't
+            // restrict a customer who has already paid.
+            $this->cancelPendingDisconnectionsInQueue($accountNo);
+
             // Step 2: Check if already active (we'll still proceed to reconnect if needed)
             $isAlreadyActive = ($billingAccount->billing_status_id == 1);
 
@@ -601,6 +606,62 @@ class PaymentWorkerService
             $this->workerLog("[RECONNECT EXCEPTION] Trace: {$e->getTraceAsString()}");
             \Log::channel('radiusrelated')->error('[PAYMENT WORKER RECONNECT EXCEPTION] Account: ' . ($account->account_no ?? 'Unknown') . ' - Error: ' . $e->getMessage());
             return 'exception';
+        }
+    }
+
+    /**
+     * Cancel any still-pending disconnection / restriction operations queued in
+     * radius_operation_queue for this account.
+     *
+     * Fired from attemptReconnect once the account balance has settled to 0 (or
+     * negative). Without this, a disconnect/restrict operation queued before the
+     * payment could still be picked up by the ProcessRadiusQueue cron and restrict
+     * a customer who has already paid.
+     *
+     * Only rows still in the 'pending' state are touched (an operation already
+     * 'processing'/'success'/'failed' is left alone). Matching rows are marked
+     * 'cancelled' so the cron will skip them.
+     */
+    private function cancelPendingDisconnectionsInQueue(string $accountNo): void
+    {
+        try {
+            if (!\Illuminate\Support\Facades\Schema::hasTable('radius_operation_queue')) {
+                return;
+            }
+
+            // Balance guard: only cancel queued disconnections once the account
+            // balance has actually reached 0 (fully paid). A small epsilon absorbs
+            // rounding residuals. If the balance is still positive, do nothing.
+            $balance = floatval(DB::table('billing_accounts')
+                ->where('account_no', $accountNo)
+                ->value('account_balance') ?? 0);
+
+            if ($balance > 0.01) {
+                $this->workerLog("[RECONNECT QUEUE SKIP] Account balance still positive (₱" . number_format($balance, 2) . ") - not cancelling queued disconnections for account: {$accountNo}");
+                return;
+            }
+
+            $disconnectOperations = ['disconnect_user', 'restricted_user'];
+
+            $cancelled = DB::table('radius_operation_queue')
+                ->where('account_no', $accountNo)
+                ->where('status', 'pending')
+                ->whereIn('operation', $disconnectOperations)
+                ->update([
+                    'status'       => 'cancelled',
+                    'last_error'   => 'Cancelled - payment received (Payment Worker), account balance settled to 0',
+                    'completed_at' => now(),
+                    'updated_at'   => now(),
+                ]);
+
+            if ($cancelled > 0) {
+                $this->workerLog("[RECONNECT QUEUE] Cancelled {$cancelled} pending disconnection/restriction operation(s) for account: {$accountNo}");
+                \Log::channel('radiusrelated')->info('[Radius_Queue] [CANCELLED] ' . $cancelled . ' pending disconnect/restrict op(s) for account ' . $accountNo . ' - payment received (Payment Worker), balance settled.');
+            } else {
+                $this->workerLog("[RECONNECT QUEUE] No pending disconnection/restriction operations to cancel for account: {$accountNo}");
+            }
+        } catch (Exception $e) {
+            $this->workerLog("[RECONNECT QUEUE EXCEPTION] Failed to cancel pending disconnections for account {$accountNo}: {$e->getMessage()}");
         }
     }
 
