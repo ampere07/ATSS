@@ -866,13 +866,30 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
   };
 
   const handleSave = async () => {
-    // ── Block technician reassignment once the job has already been started ──
-    const startTime = serviceOrderData?.start_time || serviceOrderData?.startTime || serviceOrderData?.Start_Time || null;
+    // ── Block technician reassignment only once the job is actually being worked on ──
+    // A ticket counts as "started" only when its visit status is In Progress AND a real
+    // start time exists. Empty / placeholder start times (''/null/'0000-00-00 ...') do
+    // NOT count, so a ticket that was never physically started can still be transferred.
+    const isRealTs = (v: any) => {
+      const s = (v == null ? '' : String(v)).trim();
+      return s !== '' && s.toLowerCase() !== 'null' && !/^0000-00-00/.test(s);
+    };
+    const rawStart = serviceOrderData?.start_time ?? serviceOrderData?.startTime ?? serviceOrderData?.Start_Time ?? null;
+    const startStr = (rawStart == null ? '' : String(rawStart)).trim();
+    const hasStartTime = isRealTs(rawStart);
+    const hasEndTime = isRealTs(serviceOrderData?.end_time ?? serviceOrderData?.endTime ?? serviceOrderData?.End_Time ?? null);
+
+    const rawVisitStatus = (serviceOrderData?.visitStatus || serviceOrderData?.visit_status || '').toString().trim().toLowerCase();
+    const isVisitInProgress = rawVisitStatus === 'in progress' || rawVisitStatus === 'in-progress';
+
     const currentAssigned = (formData.assignedEmail || '').trim();
     const originalAssigned = (originalAssignedEmail || '').trim();
     const technicianChanged = !!originalAssigned && currentAssigned !== originalAssigned;
 
-    if (startTime && technicianChanged) {
+    // Only block while the tech is actively on the job: visit status In Progress, a real
+    // start time, and no end time yet. Reschedule (not In Progress) and finished tickets
+    // (an end time exists) are always transferable, as is a ticket that never started.
+    if (technicianChanged && isVisitInProgress && hasStartTime && !hasEndTime) {
       const findName = (email: string) =>
         [{ name: 'None', email: 'None' }, ...technicianUsers].find(t => t.email === email)?.name || email;
       const originalTechName = findName(originalAssigned);
@@ -886,7 +903,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
           original_technician_name: originalTechName,
           new_technician_name: newTechName,
           account_no: formData.accountNo,
-          start_time: startTime
+          start_time: startStr
         });
       }
 

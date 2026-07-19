@@ -1216,13 +1216,34 @@ class TransactionController extends Controller
                 return 'balance_positive';
             }
 
-            // Balance is now settled (0 or negative). Cancel any pending disconnection /
-            // restriction still queued for this account so the RADIUS queue cron won't
-            // restrict a customer who has already paid.
-            $this->cancelPendingDisconnectionsInQueue($accountNo, $updatedByUser);
-
-            // Step 2: Check if already active (we'll still proceed to reconnect if needed)
+            // Step 2: Check current billing status.
             $isAlreadyActive = ($billingAccount->billing_status_id == 1);
+
+            // Step 2b: If the account is already active in billing AND the customer is
+            // genuinely Online in RADIUS, there is nothing to fix — the payment's balance
+            // deduction and invoice update are already committed. Do nothing else: no queue
+            // cancel, no RADIUS reconnect, no pullout handling. Just record and return.
+            //
+            // Only when the customer is NOT Online (Offline / Disconnected / Restricted /
+            // missing) — or the account is not active — do we run the settlement flow below
+            // (cancel queued disconnects, RADIUS reconnect, fail pullout SOs).
+            if ($isAlreadyActive) {
+                $sessionStatus = DB::table('online_status')
+                    ->where('account_no', $accountNo)
+                    ->value('session_status');
+
+                if (strcasecmp(trim((string) $sessionStatus), 'Online') === 0) {
+                    \Log::info("[TRANSACTION RECONNECT SKIP] Account {$accountNo} already active and session_status=Online — balance deducted & invoice updated only, no further action.");
+                    return 'already_online';
+                }
+
+                \Log::info("[TRANSACTION RECONNECT PROCEED] Account {$accountNo} active in billing but session_status='" . ($sessionStatus ?? 'null') . "' (not Online) — proceeding with RADIUS reconnect.");
+            }
+
+            // Balance is now settled (0 or negative) and a reconnect is warranted. Cancel any
+            // pending disconnection / restriction still queued for this account so the RADIUS
+            // queue cron won't restrict a customer who has already paid.
+            $this->cancelPendingDisconnectionsInQueue($accountNo, $updatedByUser);
 
             // Step 3: Get account details (PPPoE Username and Plan)
             // Join with technical_details for username, and customers for plan

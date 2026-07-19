@@ -47,6 +47,64 @@ function liveStatus(tech: TechLocation, now: number): 'online' | 'stale' | 'offl
   return now - ts <= STALE_MS ? 'online' : 'stale';
 }
 
+// ── GPS fix-quality filtering ────────────────────────────────────────────────
+// Stops a single noisy device from scattering its marker across the map by
+// rejecting invalid coordinates, coarse-accuracy fixes, and impossible jumps.
+const ACCURACY_LIMIT_M = 150;        // discard fixes with a reported accuracy worse than this
+const MAX_PLAUSIBLE_SPEED_MS = 70;   // ~250 km/h; a bigger implied speed is treated as noise
+const JUMP_GUARD_MIN_M = 200;        // only teleport-guard jumps larger than this
+
+function isValidCoord(lat: any, lng: any): boolean {
+  return typeof lat === 'number' && typeof lng === 'number'
+    && isFinite(lat) && isFinite(lng)
+    && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+    && !(lat === 0 && lng === 0);
+}
+
+function tsMs(t?: string | null): number {
+  if (!t) return NaN;
+  return new Date(t.replace(' ', 'T')).getTime();
+}
+
+function metersBetween(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  const R = 6371000;
+  const dLat = (bLat - aLat) * Math.PI / 180;
+  const dLng = (bLng - aLng) * Math.PI / 180;
+  const s = Math.sin(dLat / 2) ** 2
+    + Math.cos(aLat * Math.PI / 180) * Math.cos(bLat * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+// Whether an incoming fix should replace the technician's current position.
+function shouldAcceptFix(incoming: TechLocation, prev?: TechLocation): boolean {
+  if (!isValidCoord(incoming.latitude, incoming.longitude)) return false;
+  if (typeof incoming.accuracy === 'number' && isFinite(incoming.accuracy) && incoming.accuracy > ACCURACY_LIMIT_M) {
+    return false;
+  }
+  if (prev && isValidCoord(prev.latitude, prev.longitude)) {
+    const dt = (tsMs(incoming.last_updated_at) - tsMs(prev.last_updated_at)) / 1000;
+    const dist = metersBetween(prev.latitude as number, prev.longitude as number, incoming.latitude as number, incoming.longitude as number);
+    if (isFinite(dt) && dt > 0 && dist > JUMP_GUARD_MIN_M && (dist / dt) > MAX_PLAUSIBLE_SPEED_MS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Merge an incoming record: accept a good fix, otherwise keep the last good position
+// while still updating non-positional metadata (status / last_updated_at).
+function mergeFix(prev: TechLocation | undefined, incoming: TechLocation): TechLocation {
+  if (shouldAcceptFix(incoming, prev)) {
+    return { ...prev, ...incoming };
+  }
+  return {
+    ...prev,
+    ...incoming,
+    latitude: prev?.latitude ?? null,
+    longitude: prev?.longitude ?? null,
+  };
+}
+
 function timeAgo(iso?: string | null): string {
   if (!iso) return 'never';
   const ts = new Date(iso.replace(' ', 'T')).getTime();
@@ -175,12 +233,17 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
   }, []);
 
   // 2) Seed / refresh from the polled `data` prop (authoritative snapshot).
+  //    Filter each fix against the last good position so a noisy device stays put
+  //    instead of scattering across the map.
   useEffect(() => {
-    const next: Record<number, TechLocation> = {};
-    (data || []).forEach((t) => {
-      if (t && t.user_id != null) next[t.user_id] = t;
+    setTechs((prev) => {
+      const next: Record<number, TechLocation> = {};
+      (data || []).forEach((t) => {
+        if (!t || t.user_id == null) return;
+        next[t.user_id] = mergeFix(prev[t.user_id], t);
+      });
+      return next;
     });
-    setTechs(next);
   }, [data]);
 
   // 3) Live updates via Soketi/Pusher — upsert individual technicians instantly.
@@ -188,7 +251,7 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
     const channel = pusher.subscribe('technician-locations');
     const onUpdate = (payload: TechLocation) => {
       if (!payload || payload.user_id == null) return;
-      setTechs((prev) => ({ ...prev, [payload.user_id]: { ...prev[payload.user_id], ...payload } }));
+      setTechs((prev) => ({ ...prev, [payload.user_id]: mergeFix(prev[payload.user_id], payload) }));
     };
     channel.bind('location-updated', onUpdate);
     return () => {
@@ -249,13 +312,23 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
       seen.add(tech.user_id);
       const status = liveStatus(tech, nowTick);
       const color = STATUS_COLORS[status] || STATUS_COLORS.offline;
-      const initials = (tech.full_name || tech.username || '?')
-        .split(' ')
-        .map((p) => p[0])
-        .filter(Boolean)
-        .slice(0, 2)
-        .join('')
-        .toUpperCase();
+      // Initials = first letter of the first name + first two letters of the last name
+      // (e.g. "John Smith" -> "JSm"). Falls back gracefully for single-word names.
+      const nameParts = (tech.full_name || tech.username || '?')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      let initials: string;
+      if (nameParts.length >= 2) {
+        const first = nameParts[0];
+        const last = nameParts[nameParts.length - 1];
+        initials = first.charAt(0).toUpperCase()
+          + last.charAt(0).toUpperCase()
+          + last.charAt(1).toLowerCase();
+      } else {
+        const only = nameParts[0] || '?';
+        initials = only.charAt(0).toUpperCase() + only.slice(1, 3).toLowerCase();
+      }
 
       const icon = L.divIcon({
         html: markerHtml(color, status, initials, tech.profile_picture),

@@ -49,5 +49,8 @@
     "tailwindcss": "^3.4.19",
     "typescript": "~5.9.2"
   },
+  "overrides": {
+    "expo-font": "~14.0.12"
+  },
   "private": true
 }

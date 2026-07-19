@@ -25,6 +25,35 @@ class AutoDisconnectService
     private $lockTimeout = 300; // 5 minutes max execution time
     private $hasLock = false;
 
+    /** Emit extra-detailed [VERBOSE] lines to the log/CLI. */
+    private $verbose = true;
+
+    /** Mirror every log line to stdout when running from the CLI. */
+    private $cliEcho = true;
+
+    /** Whether the current process is running under the CLI SAPI (set in constructor). */
+    private $isCli = false;
+
+    /**
+     * Fixed 30-day billing-cycle configuration.
+     *
+     * The billing cycle behaves as a fixed 30-day calendar:
+     *   - Day 31 never exists in billing-cycle computation.
+     *   - Billing-cycle day 30 always exists logically (even in February).
+     *   - Computed billing-cycle days are normalized into valid real calendar dates.
+     *   - Proration always divides by 30 (never 28, 29 or 31).
+     */
+    private const BILLING_CYCLE_DAYS = 30;
+    private const DC_OFFSET_DAYS = 10;
+    private const ADDITIONAL_INVOICE_OFFSET_DAYS = 7;
+    private const PRORATE_DIVISOR_DAYS = 30;
+
+    // Due-date offset applied to a generated additional invoice (mirrors the billing generator's DAYS_UNTIL_DUE).
+    private const ADDITIONAL_INVOICE_DUE_OFFSET_DAYS = 7;
+
+    // Marker used in service_charge_logs to identify (and dedupe) auto-generated additional invoices.
+    private const ADDITIONAL_INVOICE_CHARGE_TYPE = 'Prorated Additional Invoice';
+
     public function __construct(
         ManualRadiusOperationsService $radiusService,
         ?ItexmoSmsService $smsService = null,
@@ -857,6 +886,428 @@ class AutoDisconnectService
         
         // Also log to Laravel default log
         Log::channel('single')->info("[{$this->logName}] {$message}");
+    }
+
+    /**
+     * Toggle verbose file logging and CLI echo at runtime.
+     *
+     * @param bool $verbose Emit [VERBOSE] detail lines.
+     * @param bool $cliEcho Mirror log lines to stdout when running in the CLI.
+     */
+    public function setVerbose(bool $verbose = true, bool $cliEcho = true): self
+    {
+        $this->verbose = $verbose;
+        $this->cliEcho = $cliEcho;
+        return $this;
+    }
+
+    /**
+     * Normalize a fixed billing-cycle day into a valid real calendar date.
+     *
+     * normalizedDate = first day of target cycle month + (cycleDay - 1) days
+     *
+     * This lets billing-cycle day 30 exist even in months with fewer than 30 real
+     * calendar days (e.g. February) by rolling the surplus into the next real month:
+     *   - normalizeBillingCycleDate(2026, 2, 30) => 2026-03-02 (Feb has 28 real days)
+     *   - normalizeBillingCycleDate(2028, 2, 30) => 2028-03-01 (Feb has 29 real days)
+     */
+    private function normalizeBillingCycleDate(int $year, int $month, int $cycleDay): Carbon
+    {
+        return Carbon::create($year, $month, 1, 0, 0, 0)->addDays($cycleDay - 1);
+    }
+
+    /**
+     * Add a fixed number of billing-cycle days to a billing-cycle coordinate.
+     *
+     * Uses fixed 30-day billing-cycle arithmetic (day 31 never exists, day 30 always
+     * exists) and then normalizes the result into a real calendar date. Month overflow
+     * (including December → January of the next year) is handled correctly.
+     *
+     * @return array{date: Carbon, year: int, month: int, day: int}
+     */
+    private function addFixedBillingCycleDays(int $cycleYear, int $cycleMonth, int $cycleDay, int $offset): array
+    {
+        $totalDay = $cycleDay + $offset;
+        $targetYear = $cycleYear;
+        $targetMonth = $cycleMonth;
+
+        while ($totalDay > self::BILLING_CYCLE_DAYS) {
+            $totalDay -= self::BILLING_CYCLE_DAYS;
+            $targetMonth++;
+            if ($targetMonth > 12) {
+                $targetMonth = 1;
+                $targetYear++;
+            }
+        }
+
+        $normalizedDate = $this->normalizeBillingCycleDate($targetYear, $targetMonth, $totalDay);
+
+        return [
+            'date' => $normalizedDate,
+            'year' => $targetYear,
+            'month' => $targetMonth,
+            'day' => $totalDay,
+        ];
+    }
+
+    /**
+     * Resolve which billing-cycle days have their (billing day + $offset) fixed-cycle
+     * date landing on $today.
+     *
+     * A given offset (<= 30) wraps at most one billing-cycle month, so a target that
+     * lands in $today's month can only originate from this month's or the previous
+     * month's billing cycle. Each qualifying billing-cycle day maps to exactly one
+     * originating cycle.
+     *
+     * @return array<int, array{cycle_year:int, cycle_month:int, target: array}>
+     *         Keyed by billing-cycle day.
+     */
+    private function resolveCycleDaysForTarget(Carbon $today, int $offset): array
+    {
+        $result = [];
+
+        // A target lands at most floor(offset / 30) + 1 billing-cycle months after its
+        // originating billing cycle, so we look back that many months (plus the current
+        // one) to find every billing-cycle day whose target equals today. This keeps the
+        // resolver correct even when config-driven offsets exceed 30 cycle days.
+        $monthsBack = intdiv(max(0, $offset), self::BILLING_CYCLE_DAYS) + 1;
+
+        for ($back = 0; $back <= $monthsBack; $back++) {
+            $ref = $today->copy()->startOfMonth()->subMonths($back);
+            $cycleYear = (int) $ref->year;
+            $cycleMonth = (int) $ref->month;
+
+            for ($day = 1; $day <= self::BILLING_CYCLE_DAYS; $day++) {
+                $computed = $this->addFixedBillingCycleDays($cycleYear, $cycleMonth, $day, $offset);
+                if ($computed['date']->isSameDay($today)) {
+                    $result[$day] = [
+                        'cycle_year' => $cycleYear,
+                        'cycle_month' => $cycleMonth,
+                        'target' => $computed,
+                    ];
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Resolve the fixed billing-cycle schedule offsets from BillingConfig.
+     *
+     * All offsets are expressed in fixed billing-cycle days measured from the billing day:
+     *   due date         = billing day + due_date_day
+     *   DC / restriction = due date    + disconnection_day
+     *                    = billing day + (due_date_day + disconnection_day)
+     *   coverage (proration window) = disconnection_day   (days from due date to DC)
+     *   grace / additional invoice  = DC + ADDITIONAL_INVOICE_OFFSET_DAYS
+     *
+     * Falls back to the documented constants when a value is missing. A disconnection_day
+     * of 0 disables auto-DC (and therefore the grace charge), matching the config UI where
+     * "0 = disabled".
+     *
+     * NOTE: the grace/additional-invoice offset (days after DC) has no dedicated field in
+     * billing_config, so it stays the ADDITIONAL_INVOICE_OFFSET_DAYS constant.
+     *
+     * The DC-notice date is informational only (the service has no notice channel) and is
+     * measured as due date + disconnection_notice cycle days.
+     *
+     * @return array{due_offset:int, dc_after_due:int, dc_offset:int, notice_after_due:int, notice_offset:int, coverage:int, grace_after_dc:int, grace_offset:int, dc_enabled:bool}
+     */
+    private function getScheduleOffsets(?BillingConfig $config): array
+    {
+        $dueOffset      = (int) ($config->due_date_day ?? 0);
+        $dcAfterDue     = (int) ($config->disconnection_day ?? self::DC_OFFSET_DAYS);
+        $noticeAfterDue = (int) ($config->disconnection_notice ?? 0);
+        $graceAfterDc   = self::ADDITIONAL_INVOICE_OFFSET_DAYS;
+        $pulloutAfterDc = (int) ($config->pullout_day ?? $config->pullout_offset ?? 30);
+
+        return [
+            'due_offset'       => $dueOffset,
+            'dc_after_due'     => $dcAfterDue,
+            'dc_offset'        => $dueOffset + $dcAfterDue,
+            'notice_after_due' => $noticeAfterDue,
+            'notice_offset'    => $dueOffset + $noticeAfterDue,
+            'coverage'         => $dcAfterDue,
+            'grace_after_dc'   => $graceAfterDc,
+            'grace_offset'     => $dueOffset + $dcAfterDue + $graceAfterDc,
+            'pullout_after_dc' => $pulloutAfterDc,
+            'pullout_offset'   => $dueOffset + $dcAfterDue + $pulloutAfterDc,
+            'dc_enabled'       => $dcAfterDue > 0,
+        ];
+    }
+
+    /**
+     * Grace-period charge: generate prorated additional invoices for accounts whose
+     * additional-invoice generation date is today (7 fixed billing-cycle days after the
+     * DC/restriction date). Invoked by the console command right after processAutoDisconnect().
+     *
+     * additionalInvoiceDate = billing day + DC_OFFSET_DAYS + ADDITIONAL_INVOICE_OFFSET_DAYS
+     *                         (all fixed billing-cycle days), normalized to a real date.
+     *
+     * Coverage is the fixed DC_OFFSET_DAYS (10 billing-cycle days) and proration always
+     * divides the monthly fee by PRORATE_DIVISOR_DAYS (30), never by the real number of
+     * calendar days in the month.
+     *
+     * @return array{success:bool, charged:int, skipped:int, errors:array, duration:int}
+     */
+    public function processGracePeriodCharge(): array
+    {
+        $this->writeLog("");
+        $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+        $this->writeLog("║         STARTING GRACE PERIOD CHARGE (ADDITIONAL INVOICE)      ║");
+        $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+        $startTime = Carbon::now();
+        $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
+        $this->writeVerbose("Runtime: PHP " . PHP_VERSION . " | SAPI: " . PHP_SAPI . " | Memory: " . $this->formatBytes(memory_get_usage(true)));
+
+        $today = Carbon::today();
+        $config = BillingConfig::first();
+        $off = $this->getScheduleOffsets($config);
+
+        $charged = 0;
+        $skipped = 0;
+        $errors = [];
+
+        if (!$off['dc_enabled']) {
+            $this->writeLog("[GRACE] Auto-DC is disabled (billing_config.disconnection_day = 0). No grace charges will be generated.");
+            $duration = Carbon::now()->diffInSeconds($startTime);
+            return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
+        }
+
+        $totalOffset = $off['grace_offset'];
+        $cycleMap = $this->resolveCycleDaysForTarget($today, $totalOffset);
+        $billingDays = array_keys($cycleMap);
+
+        if (empty($billingDays)) {
+            $this->writeLog("[GRACE] No billing-cycle day resolves to an additional-invoice date of today. Nothing to generate.");
+            $duration = Carbon::now()->diffInSeconds($startTime);
+            return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
+        }
+
+        $this->writeLog("[GRACE] Billing day(s) whose additional-invoice date is today (billing day + {$totalOffset} cycle days): " . implode(', ', $billingDays));
+
+        // Only restricted/disconnected/pulled-out accounts qualify (any status except Active and Pending).
+        $disconnectedStatusIds = DB::table('billing_status')
+            ->whereNotIn('status_name', ['Active', 'Pending'])
+            ->pluck('id')
+            ->toArray();
+
+        $latestInvoiceIds = DB::table('invoices')
+            ->select(DB::raw('MAX(id) as id'))
+            ->groupBy('account_no')
+            ->pluck('id');
+
+        $invoices = Invoice::with(['billingAccount.customer', 'billingAccount.plan', 'billingAccount.billingStatus'])
+            ->whereIn('id', $latestInvoiceIds)
+            ->whereIn('status', ['Unpaid', 'Partial'])
+            ->whereHas('billingAccount', function ($query) use ($billingDays, $disconnectedStatusIds) {
+                $query->whereIn('billing_day', $billingDays);
+                if (!empty($disconnectedStatusIds)) {
+                    $query->whereIn('billing_status_id', $disconnectedStatusIds);
+                }
+            })
+            ->get();
+
+        $totalCount = $invoices->count();
+        $this->writeLog("[GRACE] Found {$totalCount} restricted/disconnected account(s) due for an additional invoice today.");
+        $this->writeVerbose("Grace status filter status_ids=(" . implode(', ', $disconnectedStatusIds) . ")");
+
+        if ($totalCount === 0) {
+            $duration = Carbon::now()->diffInSeconds($startTime);
+            return ['success' => true, 'charged' => 0, 'skipped' => 0, 'errors' => [], 'duration' => $duration];
+        }
+
+        $counter = 0;
+        foreach ($invoices as $invoice) {
+            $counter++;
+            $accountNo = $invoice->account_no;
+            $billingAccount = $invoice->billingAccount;
+
+            $this->writeLog("");
+            $this->writeLog("[GRACE][{$counter}/{$totalCount}] Account: {$accountNo}");
+            $this->writeVerbose("Grace candidate: invoice#{$invoice->id} account={$accountNo} status={$invoice->status} balance=" . number_format(floatval($billingAccount->account_balance ?? 0), 2));
+
+            if (!$billingAccount) {
+                $this->writeLog("  [SKIP] Billing account not found");
+                $skipped++;
+                continue;
+            }
+
+            $billingDay = (int) ($billingAccount->billing_day ?? 0);
+            if (!isset($cycleMap[$billingDay])) {
+                $this->writeLog("  [SKIP] Billing day {$billingDay} does not resolve to today");
+                $skipped++;
+                continue;
+            }
+
+            $cycle = $cycleMap[$billingDay];
+            $cycleYear = $cycle['cycle_year'];
+            $cycleMonth = $cycle['cycle_month'];
+
+            // Fixed billing-cycle coordinates: billing -> due -> DC -> additional invoice.
+            $normalizedBilling = $this->normalizeBillingCycleDate($cycleYear, $cycleMonth, $billingDay);
+            $due = $this->addFixedBillingCycleDays($cycleYear, $cycleMonth, $billingDay, $off['due_offset']);
+            $dc = $this->addFixedBillingCycleDays($cycleYear, $cycleMonth, $billingDay, $off['dc_offset']);
+            $additional = $this->addFixedBillingCycleDays($dc['year'], $dc['month'], $dc['day'], $off['grace_after_dc']);
+
+            // Dedup guard: generate at most once per account per generation date.
+            $alreadyGenerated = DB::table('service_charge_logs')
+                ->where('account_no', $accountNo)
+                ->where('service_charge_type', self::ADDITIONAL_INVOICE_CHARGE_TYPE)
+                ->whereDate('date_used', $today)
+                ->exists();
+
+            if ($alreadyGenerated) {
+                $this->writeLog("  [SKIP] Additional invoice already generated today for this account");
+                $skipped++;
+                continue;
+            }
+
+            // Monthly fee comes from the account's plan price.
+            $monthlyFee = floatval($billingAccount->plan->price ?? 0);
+            if ($monthlyFee <= 0) {
+                $this->writeLog("  [SKIP] Monthly fee (plan price) unavailable or zero");
+                $skipped++;
+                continue;
+            }
+
+            // Fixed 30-day proration over the due-date -> DC coverage window (disconnection_day).
+            $coverageDays = $off['coverage'];
+            $dailyRate = $monthlyFee / self::PRORATE_DIVISOR_DAYS;
+            $proratedAmount = round($dailyRate * $coverageDays, 2);
+
+            // Required logging of all computed values.
+            $this->writeLog("  [CALC] Billing Day: {$billingDay}");
+            $this->writeLog("  [CALC] Billing Cycle Year: {$cycleYear}");
+            $this->writeLog("  [CALC] Billing Cycle Month: {$cycleMonth}");
+            $this->writeLog("  [CALC] Normalized Billing Date: " . $normalizedBilling->format('Y-m-d'));
+            $this->writeLog("  [CALC] Due Offset Days: {$off['due_offset']}");
+            $this->writeLog("  [CALC] Normalized Due Date: " . $due['date']->format('Y-m-d'));
+            $this->writeLog("  [CALC] DC Offset Days (from billing day): {$off['dc_offset']}");
+            $this->writeLog("  [CALC] DC Cycle Day: {$dc['day']}");
+            $this->writeLog("  [CALC] DC Cycle Month: {$dc['month']}");
+            $this->writeLog("  [CALC] Normalized DC Date: " . $dc['date']->format('Y-m-d'));
+            $this->writeLog("  [CALC] Additional Invoice Offset Days: {$off['grace_after_dc']}");
+            $this->writeLog("  [CALC] Additional Invoice Cycle Day: {$additional['day']}");
+            $this->writeLog("  [CALC] Additional Invoice Cycle Month: {$additional['month']}");
+            $this->writeLog("  [CALC] Normalized Additional Invoice Date: " . $additional['date']->format('Y-m-d'));
+            $this->writeLog("  [CALC] Monthly Fee: ₱" . number_format($monthlyFee, 2));
+            $this->writeLog("  [CALC] Fixed Daily Rate (fee / " . self::PRORATE_DIVISOR_DAYS . "): ₱" . number_format($dailyRate, 2));
+            $this->writeLog("  [CALC] Coverage Days (due→DC): {$coverageDays}");
+            $this->writeLog("  [CALC] Prorated Amount: ₱" . number_format($proratedAmount, 2));
+
+            DB::beginTransaction();
+            try {
+                $invoiceDate = $additional['date']->copy();
+                $dueDate = $invoiceDate->copy()->addDays(self::ADDITIONAL_INVOICE_DUE_OFFSET_DAYS);
+
+                $newInvoiceId = DB::table('invoices')->insertGetId([
+                    'account_no' => $accountNo,
+                    'invoice_date' => $invoiceDate,
+                    'invoice_balance' => $proratedAmount,
+                    'others_and_basic_charges' => 0.00,
+                    'pro_rate' => $proratedAmount,
+                    'pro_rate_start' => $normalizedBilling->toDateString(),
+                    'service_charge' => 0.00,
+                    'rebate' => 0.00,
+                    'discounts' => 0.00,
+                    'staggered' => 0.00,
+                    'total_amount' => $proratedAmount,
+                    'received_payment' => 0.00,
+                    'due_date' => $dueDate,
+                    'status' => 'Unpaid',
+                    'payment_portal_log_ref' => null,
+                    'transaction_id' => null,
+                    'created_by' => 'System',
+                    'updated_by' => 'System',
+                    'created_at' => Carbon::now(),
+                    'updated_at' => Carbon::now(),
+                ]);
+
+                // Marker for dedup + audit trail (mirrors the DC fee logging pattern).
+                DB::table('service_charge_logs')->insert([
+                    'account_no' => $accountNo,
+                    'invoice_id' => $newInvoiceId,
+                    'service_charge_type' => self::ADDITIONAL_INVOICE_CHARGE_TYPE,
+                    'service_charge' => $proratedAmount,
+                    'date_used' => Carbon::now(),
+                    'created_at' => Carbon::now(),
+                    'updated_at' => Carbon::now(),
+                    'created_by' => 'System',
+                    'updated_by' => 'System',
+                ]);
+
+                $currentBalance = floatval($billingAccount->account_balance);
+                $newBalance = $currentBalance + $proratedAmount;
+                DB::table('billing_accounts')
+                    ->where('id', $billingAccount->id)
+                    ->update([
+                        'account_balance' => $newBalance,
+                        'updated_by' => 'System',
+                        'updated_at' => Carbon::now(),
+                    ]);
+
+                DB::commit();
+
+                $this->writeLog("  [DB] ✓ Additional invoice #{$newInvoiceId} created (₱" . number_format($proratedAmount, 2) . "). New Balance: ₱" . number_format($newBalance, 2));
+                $charged++;
+
+            } catch (Throwable $e) {
+                DB::rollBack();
+                $this->writeLog("  [ERROR] Failed to generate additional invoice: " . $e->getMessage());
+                $this->writeLog("  [TRACE] " . $e->getTraceAsString());
+                $errors[] = "Account {$accountNo} (additional invoice): " . $e->getMessage();
+                $skipped++;
+            }
+        }
+
+        $duration = Carbon::now()->diffInSeconds($startTime);
+        $this->writeLog("");
+        $this->writeLog("[GRACE] Summary: Charged {$charged}, Skipped {$skipped}, Errors " . count($errors) . ", Duration {$duration}s");
+        $this->writeVerbose("Peak memory: " . $this->formatBytes(memory_get_peak_usage(true)));
+
+        return ['success' => true, 'charged' => $charged, 'skipped' => $skipped, 'errors' => $errors, 'duration' => $duration];
+    }
+
+    /**
+     * Write an extra-detailed line that is only emitted when verbose mode is on.
+     * Verbose lines are tagged [VERBOSE] and follow the same file + CLI echo path.
+     */
+    private function writeVerbose(string $message): void
+    {
+        if (!$this->verbose) {
+            return;
+        }
+        $this->writeLog("[VERBOSE] {$message}");
+    }
+
+    /**
+     * Echo a single line to stdout (CLI) and flush so output streams live.
+     */
+    private function echoCli(string $line): void
+    {
+        if (defined('STDOUT')) {
+            @fwrite(STDOUT, $line . PHP_EOL);
+        } else {
+            echo $line . PHP_EOL;
+        }
+        @flush();
+    }
+
+    /**
+     * Human-readable byte formatting for verbose memory logging.
+     */
+    private function formatBytes($bytes): string
+    {
+        $bytes = (float) $bytes;
+        $units = ['B', 'KB', 'MB', 'GB'];
+        $i = 0;
+        while ($bytes >= 1024 && $i < count($units) - 1) {
+            $bytes /= 1024;
+            $i++;
+        }
+        return round($bytes, 2) . ' ' . $units[$i];
     }
 
     /**

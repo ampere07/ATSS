@@ -60,6 +60,9 @@ import {
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
+// Widgets an "administrator" (non-superadmin) is allowed to see in Live Monitor.
+const ADMIN_WIDGET_IDS = ['tech_availability', 'team_detailed_queue', 'agent_detailed_queue', 'tech_live_location'];
+
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -96,6 +99,14 @@ const LiveMonitor: React.FC = () => {
   const authData = JSON.parse(localStorage.getItem('authData') || '{}');
   const userOrgId = authData.organization_id;
   const isSuperAdmin = userOrgId === null || userOrgId === undefined;
+
+  // Administrators (role_id 1 / role name "administrator") may access Live Monitor but
+  // are limited to a fixed subset of widgets. Superadmins (role_id 7) keep full access.
+  // Detected purely by role — org id is not reliably present in authData.
+  const roleRaw: any = authData.role;
+  const userRoleName = (typeof roleRaw === 'string' ? roleRaw : (roleRaw?.role_name || roleRaw?.name || authData.role_name || '')).toString().toLowerCase();
+  const isAdministrator = userRoleName === 'administrator' || String(authData.role_id ?? '') === '1';
+  const isWidgetAllowed = (id: string) => !isAdministrator || ADMIN_WIDGET_IDS.includes(id);
 
   // React Grid Layout state
 
@@ -343,6 +354,14 @@ const LiveMonitor: React.FC = () => {
       }
     });
 
+    // Administrators only ever see the allowed widgets — force those visible and
+    // hide everything else regardless of any saved/default state.
+    if (isAdministrator) {
+      Object.keys(initialStates).forEach(id => {
+        initialStates[id].visible = ADMIN_WIDGET_IDS.includes(id);
+      });
+    }
+
     // Initialize layout from saved state or default
     const savedLayouts = localStorage.getItem('dashboard_layouts');
     let initialLayouts: any = { lg: [] };
@@ -517,6 +536,8 @@ const LiveMonitor: React.FC = () => {
   };
 
   const toggleWidgetVisibility = (id: string) => {
+    // Administrators can only toggle their allowed widgets.
+    if (!isWidgetAllowed(id)) return;
     setWidgetStates(prev => {
       const isVisible = !prev[id]?.visible;
       const nextStates = {
@@ -1627,7 +1648,7 @@ const LiveMonitor: React.FC = () => {
               <div className="flex gap-2">
                 <button
                   onClick={() => {
-                    const ids = Object.keys(WIDGETS);
+                    const ids = Object.keys(WIDGETS).filter(isWidgetAllowed);
                     const nextStates = { ...widgetStates };
                     ids.forEach(id => {
                       nextStates[id] = { ...nextStates[id], visible: true };
@@ -1671,7 +1692,7 @@ const LiveMonitor: React.FC = () => {
                 </button>
                 <button
                   onClick={() => {
-                    const ids = Object.keys(WIDGETS);
+                    const ids = Object.keys(WIDGETS).filter(isWidgetAllowed);
                     setWidgetStates(prev => {
                       const nextStates = { ...prev };
                       ids.forEach(id => {
@@ -1690,7 +1711,7 @@ const LiveMonitor: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-              {Object.entries(WIDGETS).map(([id, config]) => (
+              {Object.entries(WIDGETS).filter(([id]) => isWidgetAllowed(id)).map(([id, config]) => (
                 <label
                   key={id}
                   className={`flex items-center gap-2 p-2 rounded cursor-pointer ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
@@ -1728,7 +1749,7 @@ const LiveMonitor: React.FC = () => {
           }}
           draggableHandle=".drag-handle"
         >
-          {Object.keys(WIDGETS).filter(id => widgetStates[id]?.visible).map((id, visibleIdx) => {
+          {Object.keys(WIDGETS).filter(id => widgetStates[id]?.visible && isWidgetAllowed(id)).map((id, visibleIdx) => {
             const config = WIDGETS[id];
             const itemsPerRow = Math.max(1, Math.floor(12 / (config.w || 4)));
 
