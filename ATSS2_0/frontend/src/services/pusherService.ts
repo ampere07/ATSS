@@ -1,9 +1,9 @@
 import Pusher from 'pusher-js';
 import apiClient, { API_BASE_URL } from '../config/api';
 
-const SOKETI_HOST = process.env.REACT_APP_SOKETI_HOST || 'ws.syncnow.ph';
+const SOKETI_HOST = process.env.REACT_APP_SOKETI_HOST || 'ws.atssfiber.ph';
 const SOKETI_PORT = 443;
-const SOKETI_KEY = process.env.REACT_APP_SOKETI_KEY || '805a1cbfe78c47f1';
+const SOKETI_KEY = process.env.REACT_APP_SOKETI_KEY || '8ctWR5PdV1dgM5h6RTGioI8k1hPbl8ImM3P6K3cne5v';
 const SOKETI_FORCE_TLS = true; 
 // Enable Pusher logging (disabled for production clean-up)
 Pusher.logToConsole = false;

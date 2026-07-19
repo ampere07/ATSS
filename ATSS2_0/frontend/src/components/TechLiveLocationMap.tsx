@@ -156,6 +156,9 @@ function escapeHtml(v: any): string {
     .replace(/"/g, '&quot;');
 }
 
+// How long the map must sit idle (no user pan/zoom) before auto-fit resumes.
+const AUTOFIT_RESUME_MS = 4000;
+
 const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }) => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapObj = useRef<any>(null);
@@ -164,6 +167,10 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
   const trailRef = useRef<any>(null);
   const leafletReady = useRef(false);
   const didFit = useRef(false);
+  // Suppress auto-fit while the user is interacting with the map; resume when idle.
+  const userMovingRef = useRef(false);
+  const idleTimerRef = useRef<any>(null);
+  const programmaticRef = useRef(false); // true while WE move the map (fit/setView)
   const [ready, setReady] = useState(false);
   const [nowTick, setNowTick] = useState(Date.now());
 
@@ -190,6 +197,23 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       }).addTo(map);
       layerRef.current = L.layerGroup().addTo(map);
+
+      // Pause auto-fit the moment the user starts panning/zooming, and resume it only
+      // after the map has been idle for AUTOFIT_RESUME_MS. Our own programmatic moves
+      // (fitBounds/setView) are flagged so they don't count as user interaction.
+      map.on('movestart zoomstart', () => {
+        if (programmaticRef.current) return;
+        userMovingRef.current = true;
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      });
+      map.on('moveend zoomend', () => {
+        if (programmaticRef.current) return;
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = setTimeout(() => {
+          userMovingRef.current = false;
+          setNowTick(Date.now()); // re-run the reconcile so auto-fit can resume
+        }, AUTOFIT_RESUME_MS);
+      });
 
       mapObj.current = map;
       leafletReady.current = true;
@@ -220,6 +244,7 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
 
     return () => {
       cancelled = true;
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       Object.values(markersRef.current).forEach((m: any) => {
         if (m && m._raf) cancelAnimationFrame(m._raf);
       });
@@ -339,6 +364,10 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
       });
 
       const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+      const lat6 = Number(tech.latitude).toFixed(6);
+      const lng6 = Number(tech.longitude).toFixed(6);
+      const coordStr = `${lat6}, ${lng6}`;
+      const mapsUrl = `https://www.google.com/maps?q=${lat6},${lng6}`;
       const popup = `
         <div style="min-width:190px;font-family:system-ui,sans-serif;">
           <div style="font-weight:700;font-size:13px;margin-bottom:2px;">${escapeHtml(tech.full_name)}</div>
@@ -346,9 +375,13 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
           <div style="display:inline-block;font-size:10px;font-weight:700;text-transform:uppercase;
             padding:2px 8px;border-radius:9999px;color:#fff;background:${color};margin-bottom:6px;">${statusLabel}</div>
           <div style="font-size:11px;color:#374151;line-height:1.5;">
-            <div>Lat: ${escapeHtml(Number(tech.latitude).toFixed(6))}</div>
-            <div>Lng: ${escapeHtml(Number(tech.longitude).toFixed(6))}</div>
-            <div>Updated: ${escapeHtml(timeAgo(tech.last_updated_at))}</div>
+            <div>Lat: ${escapeHtml(lat6)}</div>
+            <div>Lng: ${escapeHtml(lng6)}</div>
+            <div style="margin-top:3px;">Address Coordinates:<br/>
+              <a href="${escapeHtml(mapsUrl)}" target="_blank" rel="noopener noreferrer"
+                style="color:#2563eb;text-decoration:underline;font-weight:600;">${escapeHtml(coordStr)}</a>
+            </div>
+            <div style="margin-top:3px;">Updated: ${escapeHtml(timeAgo(tech.last_updated_at))}</div>
           </div>
         </div>`;
 
@@ -380,18 +413,21 @@ const TechLiveLocationMap: React.FC<Props> = ({ data, isDarkMode, colorPalette }
     // and again whenever a technician is outside the current viewport (new tech joined
     // or moved off-screen). Skipped while a technician is selected so the trail/recenter
     // view isn't overridden.
-    if (bounds.length > 0 && selectedTechId == null) {
+    if (bounds.length > 0 && selectedTechId == null && !userMovingRef.current) {
       try {
         const anyOutside = bounds.some((b) => !mapObj.current.getBounds().contains(b));
         if (!didFit.current || anyOutside) {
+          programmaticRef.current = true; // don't treat this move as user interaction
           if (bounds.length === 1) {
             mapObj.current.setView(bounds[0], Math.min(mapObj.current.getZoom() || 15, 15));
           } else {
             mapObj.current.fitBounds(bounds, { padding: [40, 40] });
           }
           didFit.current = true;
+          setTimeout(() => { programmaticRef.current = false; }, 800);
         }
       } catch (e) {
+        programmaticRef.current = false;
         /* ignore */
       }
     }

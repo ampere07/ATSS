@@ -11,8 +11,8 @@ try {
         port: 6001,
         'appManager.array.apps': [{
             id: '1000001',
-            key: '805a1cbfe78c47f1',
-            secret: '19e5d25277f341bbbc3dadc205f9b3f4'
+            key: '8ctWR5PdV1dgM5h6RTGioI8k1hPbl8ImM3P6K3cne5v',
+            secret: 'KsCIAKjsPEWMDj2vWCWs7qYwkXZBUugVfcRjZyPRhJo'
         }]
     };
 }
@@ -21,8 +21,8 @@ const PORT = config.port || 6001;
 const apps = config['appManager.array.apps'] || [];
 const app = apps[0] || {};
 const APP_ID = app.id || '1000001';
-const APP_KEY = app.key || '805a1cbfe78c47f1';
-const APP_SECRET = app.secret || '19e5d25277f341bbbc3dadc205f9b3f4';
+const APP_KEY = app.key || '8ctWR5PdV1dgM5h6RTGioI8k1hPbl8ImM3P6K3cne5v';
+const APP_SECRET = app.secret || 'KsCIAKjsPEWMDj2vWCWs7qYwkXZBUugVfcRjZyPRhJo';
 
 // Channel subscriptions: { channelName: Set<ws> }
 const channels = {};
