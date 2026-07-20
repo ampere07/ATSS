@@ -13,7 +13,6 @@ import { getAllLCPNAPs, LCPNAP } from '../services/lcpnapService';
 import { routerModelService, RouterModel } from '../services/routerModelService';
 import { getBillingRecordDetails } from '../services/billingService';
 import { technicianService } from '../services/technicianService';
-import { logBlockedTechnicianTransfer } from '../services/serviceOrderService';
 import SearchableField from '../components/common/SearchableField';
 
 
@@ -866,56 +865,12 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
   };
 
   const handleSave = async () => {
-    // ── Block technician reassignment only once the job is actually being worked on ──
-    // A ticket counts as "started" only when its visit status is In Progress AND a real
-    // start time exists. Empty / placeholder start times (''/null/'0000-00-00 ...') do
-    // NOT count, so a ticket that was never physically started can still be transferred.
-    const isRealTs = (v: any) => {
-      const s = (v == null ? '' : String(v)).trim();
-      return s !== '' && s.toLowerCase() !== 'null' && !/^0000-00-00/.test(s);
-    };
-    const rawStart = serviceOrderData?.start_time ?? serviceOrderData?.startTime ?? serviceOrderData?.Start_Time ?? null;
-    const startStr = (rawStart == null ? '' : String(rawStart)).trim();
-    const hasStartTime = isRealTs(rawStart);
-    const hasEndTime = isRealTs(serviceOrderData?.end_time ?? serviceOrderData?.endTime ?? serviceOrderData?.End_Time ?? null);
-
-    const rawVisitStatus = (serviceOrderData?.visitStatus || serviceOrderData?.visit_status || '').toString().trim().toLowerCase();
-    const isVisitInProgress = rawVisitStatus === 'in progress' || rawVisitStatus === 'in-progress';
-
+    // ── Technician reassignment: allowed at any time. When the assigned tech
+    //    changes, the on-site visit is reset so the new technician starts fresh
+    //    (start_time / end_time are cleared below in the service order update). ──
     const currentAssigned = (formData.assignedEmail || '').trim();
     const originalAssigned = (originalAssignedEmail || '').trim();
     const technicianChanged = !!originalAssigned && currentAssigned !== originalAssigned;
-
-    // Only block while the tech is actively on the job: visit status In Progress, a real
-    // start time, and no end time yet. Reschedule (not In Progress) and finished tickets
-    // (an end time exists) are always transferable, as is a ticket that never started.
-    if (technicianChanged && isVisitInProgress && hasStartTime && !hasEndTime) {
-      const findName = (email: string) =>
-        [{ name: 'None', email: 'None' }, ...technicianUsers].find(t => t.email === email)?.name || email;
-      const originalTechName = findName(originalAssigned);
-      const newTechName = findName(currentAssigned);
-      const serviceOrderId = serviceOrderData?.id;
-
-      // Record the blocked attempt in details_update_logs (fire-and-forget; never blocks the UI)
-      if (serviceOrderId) {
-        logBlockedTechnicianTransfer(serviceOrderId, {
-          performed_by: currentUserEmail,
-          original_technician_name: originalTechName,
-          new_technician_name: newTechName,
-          account_no: formData.accountNo,
-          start_time: startStr
-        });
-      }
-
-      setModal({
-        isOpen: true,
-        type: 'error',
-        title: 'Transfer Not Allowed',
-        message: `This ticket has already been started by ${originalTechName}. Technician reassignment is no longer allowed because the assigned technician is already dispatched and working on-site.`
-      });
-      return;
-    }
-    // ── End reassignment block ──────────────────────────────────────────────
 
     const updatedFormData = {
       ...formData,
@@ -1173,7 +1128,11 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         support_remarks: updatedFormData.supportRemarks,
         service_charge: parseFloat(updatedFormData.serviceCharge),
         status: updatedFormData.status,
-        ...(updatedFormData.concern === 'Upgrade/Downgrade Plan' ? { new_plan: updatedFormData.newPlan } : {})
+        ...(updatedFormData.concern === 'Upgrade/Downgrade Plan' ? { new_plan: updatedFormData.newPlan } : {}),
+
+        // Reset the on-site timers when the technician is reassigned so the new
+        // technician starts a fresh visit (no inherited start/end time).
+        ...(technicianChanged ? { start_time: null, end_time: null } : {})
       };
 
       setUploadProgress(85);
