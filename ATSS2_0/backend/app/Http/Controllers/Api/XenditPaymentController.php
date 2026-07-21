@@ -20,18 +20,18 @@ class XenditPaymentController extends Controller
     {
         $this->xenditApiKey = (string) (config('services.xendit.api_key') ?: env('XENDIT_API_KEY', ''));
         $this->xenditCallbackToken = (string) (config('services.xendit.callback_token') ?: env('XENDIT_CALLBACK_TOKEN', ''));
-        
+
         // Fallback for production environments where config cache might be returning null
         // and we cannot easily run `php artisan config:clear`
         if (empty($this->xenditApiKey) || empty($this->xenditCallbackToken)) {
             $envPath = base_path('.env');
             if (file_exists($envPath)) {
                 $envContent = file_get_contents($envPath);
-                
+
                 if (empty($this->xenditApiKey) && preg_match('/^XENDIT_API_KEY=(.*)$/m', $envContent, $matches)) {
                     $this->xenditApiKey = trim($matches[1], "\"' \t\n\r\0\x0B");
                 }
-                
+
                 if (empty($this->xenditCallbackToken) && preg_match('/^XENDIT_CALLBACK_TOKEN=(.*)$/m', $envContent, $matches)) {
                     $this->xenditCallbackToken = trim($matches[1], "\"' \t\n\r\0\x0B");
                 }
@@ -96,8 +96,32 @@ class XenditPaymentController extends Controller
 
 
 
-            // Parse customer name
-            $fullNameParts = explode(' ', trim($account->full_name ?? 'Customer'));
+            // Resolve payer email. Xendit rejects the whole invoice if this is not a
+            // well-formed address, so '??' is not enough here: it only catches NULL and
+            // lets through empty strings, placeholders like 'N/A', and values with
+            // stray whitespace/newlines that look fine in the database.
+            $rawEmail = (string) ($account->email_address ?? '');
+            // Strip non-breaking spaces and zero-width characters that survive trim()
+            $rawEmail = preg_replace('/[\x{00A0}\x{200B}-\x{200D}\x{FEFF}]/u', '', $rawEmail);
+            $rawEmail = trim($rawEmail);
+            $payerEmail = filter_var($rawEmail, FILTER_VALIDATE_EMAIL) ? $rawEmail : null;
+
+            if (!$payerEmail) {
+                Log::warning('Payment: unusable customer email, falling back', [
+                    'account_no' => $accountNo,
+                    'raw_email' => $account->email_address,
+                    'reason' => $rawEmail === '' ? 'empty' : 'malformed'
+                ]);
+                $payerEmail = 'noreply@atssfiber.ph';
+            }
+
+            // Parse customer name. The SQL CONCAT leaves a double space when the
+            // middle initial is blank, which yields empty name parts.
+            $fullName = trim(preg_replace('/\s+/', ' ', (string) ($account->full_name ?? '')));
+            if ($fullName === '') {
+                $fullName = 'Customer';
+            }
+            $fullNameParts = explode(' ', $fullName);
             $surname = (count($fullNameParts) > 1) ? array_pop($fullNameParts) : $fullNameParts[0];
             $givenName = implode(' ', $fullNameParts);
             if (empty($givenName)) {
@@ -112,20 +136,31 @@ class XenditPaymentController extends Controller
                 $mobile = '63' . substr($mobile, 1);
             }
 
+            // Only send a mobile number when it is plausible E.164. Sending a bare '+'
+            // for a customer with no contact number fails Xendit validation too.
+            $customer = [
+                'given_names' => $givenName,
+                'surname' => $surname,
+                'email' => $payerEmail
+            ];
+            if (strlen($mobile) >= 10 && strlen($mobile) <= 15) {
+                $customer['mobile_number'] = '+' . $mobile;
+            } else {
+                Log::warning('Payment: unusable customer mobile, omitting', [
+                    'account_no' => $accountNo,
+                    'raw_mobile' => $account->contact_number_primary
+                ]);
+            }
+
             // Prepare Xendit payload
             $payload = [
                 'external_id' => $referenceNo,
                 'amount' => $amount,
-                'payer_email' => $account->email_address ?? 'noreply@atssfiber.ph',
+                'payer_email' => $payerEmail,
                 'description' => "Bill Payment - Account $accountNo",
                 'invoice_duration' => 86400,
                 'currency' => 'PHP',
-                'customer' => [
-                    'given_names' => $givenName,
-                    'surname' => $surname,
-                    'email' => $account->email_address ?? 'noreply@atssfiber.ph',
-                    'mobile_number' => '+' . $mobile
-                ],
+                'customer' => $customer,
                 'items' => [
                     [
                         'name' => "Account $accountNo - " . ($account->desired_plan ?? 'Internet Service'),
@@ -142,11 +177,27 @@ class XenditPaymentController extends Controller
                 ->post('https://api.xendit.co/v2/invoices', $payload);
 
             if (!$response->successful()) {
+                $error = $response->json();
+                $errorCode = $error['error_code'] ?? '';
+
                 Log::error('Xendit API Error', [
                     'status' => $response->status(),
                     'body' => $response->body(),
-                    'account_no' => $accountNo
+                    'account_no' => $accountNo,
+                    // Log what we actually sent so validation failures are diagnosable
+                    'sent_payer_email' => $payerEmail,
+                    'sent_customer' => $customer
                 ]);
+
+                // A 400 here is our payload's fault, not an outage. Say so rather than
+                // blaming the gateway and telling the customer to retry a call that
+                // will fail identically every time.
+                if ($response->status() === 400 || $errorCode === 'API_VALIDATION_ERROR') {
+                    return response()->json([
+                        'status' => 'error',
+                        'message' => 'We could not create your payment because your account details are incomplete or invalid. Please contact support to update your contact information.'
+                    ], 422);
+                }
 
                 return response()->json([
                     'status' => 'error',
@@ -219,14 +270,14 @@ class XenditPaymentController extends Controller
     {
         // Get callback token from request
         $incomingToken = '';
-        
+
         // Try multiple methods to get the token
         $incomingToken = $request->header('X-Callback-Token');
-        
+
         if (empty($incomingToken) && isset($_SERVER['HTTP_X_CALLBACK_TOKEN'])) {
             $incomingToken = $_SERVER['HTTP_X_CALLBACK_TOKEN'];
         }
-        
+
         if (empty($incomingToken)) {
             $headers = array_change_key_case($request->headers->all(), CASE_LOWER);
             $incomingToken = $headers['x-callback-token'][0] ?? '';
@@ -263,7 +314,7 @@ class XenditPaymentController extends Controller
         try {
             $payload = $request->all();
             $rawPayload = json_encode($payload);
-            
+
             $ref = $payload['external_id'] ?? $payload['requestReferenceNumber'] ?? '';
             $status = strtoupper($payload['status'] ?? '');
 
