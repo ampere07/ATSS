@@ -26,7 +26,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const { width, height } = useWindowDimensions();
     const isMobile = width < 768;
     const isShort = height < 700;
-    const { customerDetail, payments, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
+    const { customerDetail, payments, invoiceRecords, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
     const [user, setUser] = useState<any>(null);
 
     const [isPaymentProcessing, setIsPaymentProcessing] = useState<boolean>(false);
@@ -148,8 +148,25 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const usageType = customerDetail?.technicalDetails?.usageType || 'N/A';
     const emailAddress = customerDetail?.emailAddress || user?.email || 'N/A';
 
+    // Format a stored date string ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or ISO) to
+    // MM/DD/YYYY by reading the parts directly — avoids the timezone shift that
+    // `new Date(...)` can introduce (which turned 07/17 into 08/17, etc.).
+    const formatDbDate = (raw?: string | null): string | null => {
+        if (!raw) return null;
+        const datePart = String(raw).split('T')[0].split(' ')[0];
+        const [y, m, d] = datePart.split('-');
+        if (!y || !m || !d) return null;
+        return `${m.padStart(2, '0')}/${d.padStart(2, '0')}/${y}`;
+    };
+
     let dueDateString = 'Upon Receipt';
-    if (customerDetail?.billingAccount?.billingDay) {
+    // Prefer the real due date stored on the latest invoice (invoiceRecords are
+    // ordered by invoice_date desc by the backend). Only fall back to deriving it
+    // from the billing day when the account has no invoice yet.
+    const latestInvoiceDueDate = formatDbDate(invoiceRecords?.[0]?.due_date);
+    if (latestInvoiceDueDate) {
+        dueDateString = latestInvoiceDueDate;
+    } else if (customerDetail?.billingAccount?.billingDay) {
         const today = new Date();
         const billingDay = customerDetail.billingAccount.billingDay;
 
