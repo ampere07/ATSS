@@ -723,9 +723,10 @@ class EnhancedBillingGenerationServiceWithNotifications
         $totalProrate = 0.00;
         $proRateStart = null;
         $logIds = [];
+        $advanceGenOffset = $this->getAdvanceGenerationDay();
 
         foreach ($unbilledLogs as $log) {
-            $reconDate = Carbon::parse($log->created_at);
+            $reconDate = Carbon::parse($log->created_at)->startOfDay();
             
             $cycleEnd = $this->calculateAdjustedBillingDate($account, $reconDate);
             $cycleStart = $cycleEnd->copy()->subMonth();
@@ -735,27 +736,41 @@ class EnhancedBillingGenerationServiceWithNotifications
                 $totalDaysInCycle = self::DAYS_IN_MONTH;
             }
 
+            // Calculate advance generation cutoff date for this cycle (e.g. 23rd if cycleEnd is 30th and offset is 7)
+            $advanceGenCutoff = $cycleEnd->copy()->subDays($advanceGenOffset > 0 ? $advanceGenOffset : self::DAYS_UNTIL_DUE);
+
             if ($reconDate->betweenIncluded($cycleStart, $cycleEnd)) {
-                $activeDays = $reconDate->diffInDays($cycleEnd);
-                if ($activeDays > 0 && $activeDays < $totalDaysInCycle) {
-                    $dailyRate = $monthlyFee / $totalDaysInCycle;
-                    $proratedAmount = round($dailyRate * $activeDays, 2);
-                    
-                    $totalProrate += $proratedAmount;
-                    $logIds[] = $log->id;
+                $logIds[] = $log->id;
 
-                    if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
-                        $proRateStart = $reconDate->format('Y-m-d');
+                if ($reconDate->gt($advanceGenCutoff)) {
+                    // Reconnection happened AFTER advance generation cutoff date (e.g., 24th > 23rd)
+                    $excessDays = $advanceGenCutoff->diffInDays($reconDate);
+                    if ($excessDays > 0 && $excessDays < $totalDaysInCycle) {
+                        $dailyRate = $monthlyFee / $totalDaysInCycle;
+                        $proratedAmount = round($dailyRate * $excessDays, 2);
+                        
+                        $totalProrate += $proratedAmount;
+
+                        if (!$proRateStart || $reconDate->lt(Carbon::parse($proRateStart))) {
+                            $proRateStart = $reconDate->format('Y-m-d');
+                        }
+
+                        $this->log('info', 'Calculated excess days reconnection prorate past advance generation date', [
+                            'account_no' => $account->account_no,
+                            'reconnection_log_id' => $log->id,
+                            'reconnection_date' => $reconDate->format('Y-m-d'),
+                            'advance_gen_cutoff' => $advanceGenCutoff->format('Y-m-d'),
+                            'excess_days' => $excessDays,
+                            'daily_rate' => round($dailyRate, 2),
+                            'prorated_amount' => $proratedAmount
+                        ]);
                     }
-
-                    $this->log('info', 'Calculated mid-cycle reconnection prorate', [
+                } else {
+                    $this->log('info', 'Reconnection occurred on or before advance generation date; covered by standard plan rate', [
                         'account_no' => $account->account_no,
                         'reconnection_log_id' => $log->id,
                         'reconnection_date' => $reconDate->format('Y-m-d'),
-                        'cycle_end' => $cycleEnd->format('Y-m-d'),
-                        'active_days' => $activeDays,
-                        'daily_rate' => round($dailyRate, 2),
-                        'prorated_amount' => $proratedAmount
+                        'advance_gen_cutoff' => $advanceGenCutoff->format('Y-m-d')
                     ]);
                 }
             }
