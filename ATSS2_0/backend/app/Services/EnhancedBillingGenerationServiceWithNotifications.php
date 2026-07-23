@@ -725,21 +725,32 @@ class EnhancedBillingGenerationServiceWithNotifications
         $logIds = [];
         $advanceGenOffset = $this->getAdvanceGenerationDay();
 
+        // Calculate cycle bounds relative to the current generation date
+        $currentCycleEnd = $this->calculateAdjustedBillingDate($account, $generationDate);
+        $currentCycleStart = $currentCycleEnd->copy()->subMonth();
+
+        $totalDaysInCycle = $currentCycleStart->diffInDays($currentCycleEnd);
+        if ($totalDaysInCycle <= 0) {
+            $totalDaysInCycle = self::DAYS_IN_MONTH;
+        }
+
+        // Calculate advance generation cutoff date for the current cycle (e.g. 23rd if cycleEnd is 30th and offset is 7)
+        $advanceGenCutoff = $currentCycleEnd->copy()->subDays($advanceGenOffset > 0 ? $advanceGenOffset : self::DAYS_UNTIL_DUE);
+
         foreach ($unbilledLogs as $log) {
             $reconDate = Carbon::parse($log->created_at)->startOfDay();
-            
-            $cycleEnd = $this->calculateAdjustedBillingDate($account, $reconDate);
-            $cycleStart = $cycleEnd->copy()->subMonth();
 
-            $totalDaysInCycle = $cycleStart->diffInDays($cycleEnd);
-            if ($totalDaysInCycle <= 0) {
-                $totalDaysInCycle = self::DAYS_IN_MONTH;
-            }
-
-            // Calculate advance generation cutoff date for this cycle (e.g. 23rd if cycleEnd is 30th and offset is 7)
-            $advanceGenCutoff = $cycleEnd->copy()->subDays($advanceGenOffset > 0 ? $advanceGenOffset : self::DAYS_UNTIL_DUE);
-
-            if ($reconDate->betweenIncluded($cycleStart, $cycleEnd)) {
+            if ($reconDate->lt($currentCycleStart)) {
+                // Log is from a past billing cycle -> mark as cleared/processed so it doesn't pile up, but do NOT add proration
+                $logIds[] = $log->id;
+                $this->log('info', 'Clearing past-cycle unbilled reconnection log without adding proration to current bill', [
+                    'account_no' => $account->account_no,
+                    'reconnection_log_id' => $log->id,
+                    'reconnection_date' => $reconDate->format('Y-m-d'),
+                    'current_cycle_start' => $currentCycleStart->format('Y-m-d')
+                ]);
+            } elseif ($reconDate->betweenIncluded($currentCycleStart, $currentCycleEnd)) {
+                // Log is within the current billing cycle
                 $logIds[] = $log->id;
 
                 if ($reconDate->gt($advanceGenCutoff)) {
