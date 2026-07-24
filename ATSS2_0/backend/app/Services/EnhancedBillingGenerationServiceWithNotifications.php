@@ -342,15 +342,20 @@ class EnhancedBillingGenerationServiceWithNotifications
             $vat = $monthlyFeeGross * self::VAT_RATE;
             $monthlyServiceFee = $effectiveProrateAmount - $vat;
 
-            // Use statement ID as the reference for charges
+            // Use statement ID as the reference for charges.
+            // includeDiscounts = true so the SOA REFLECTS the discount (amount_due
+            // and the discounts column), matching the invoice. updateDiscountStatus
+            // stays false: calculateDiscounts() is read-only anyway, and the discount
+            // is only consumed by markDiscountsAsUsed() in the invoice path — so the
+            // SOA displays it without spending it.
             $charges = $this->calculateChargesAndDeductions(
-                $account, 
-                $statementDate, 
-                $userId, 
+                $account,
+                $statementDate,
+                $userId,
                 (string)$statement->id,
                 $plan->price,
                 false,
-                false
+                true
             );
             
             $othersAndBasicCharges = 0;

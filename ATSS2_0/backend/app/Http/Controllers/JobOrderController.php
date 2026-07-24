@@ -695,7 +695,44 @@ class JobOrderController extends Controller
             ]);
 
             $oldStatus = $jobOrder->onsite_status;
-            
+
+            // ── Technician availability guard (mirrors Api\ServiceOrderApiController) ──
+            // onsite_status is the Job Order equivalent of the Service Order
+            // visit_status.
+            //   • Reassigning the order (assigned_email changed) resets both timers
+            //     so the new technician starts fresh.
+            //   • Once a STARTED job leaves the "In Progress" state (any onsite_status
+            //     other than In Progress — Failed, Done, Reschedule, …) it must carry
+            //     an end_time, so the technician is not left flagged as busy.
+            // start_time/end_time are stored as Asia/Manila wall-clock to match the
+            // mobile timer, so we stamp Manila time here — bare now() is UTC here.
+            $assignedEmailChanged = array_key_exists('assigned_email', $data)
+                && (string) $data['assigned_email'] !== (string) ($jobOrder->assigned_email ?? '');
+
+            if ($assignedEmailChanged) {
+                $data['start_time'] = null;
+                $data['end_time']   = null;
+            } else {
+                $effectiveOnsite = strtolower(trim((string) (array_key_exists('onsite_status', $data)
+                    ? $data['onsite_status']
+                    : ($jobOrder->onsite_status ?? ''))));
+
+                $onsiteInProgress = in_array($effectiveOnsite, ['in progress', 'in-progress', 'inprogress'], true);
+                $leftInProgress   = ($effectiveOnsite !== '' && !$onsiteInProgress);
+
+                $startTimePresent = array_key_exists('start_time', $data)
+                    ? !empty($data['start_time'])
+                    : !empty($jobOrder->start_time);
+                // A payload that mentions end_time (a real timestamp OR an explicit
+                // null to (re)open the timer) is authoritative — never override it.
+                $callerManagesEndTime = array_key_exists('end_time', $data);
+
+                if ($leftInProgress && $startTimePresent && !$callerManagesEndTime && empty($jobOrder->end_time)) {
+                    $data['end_time'] = \Carbon\Carbon::now('Asia/Manila')->format('Y-m-d H:i:s');
+                }
+            }
+            // ──────────────────────────────────────────────────────────────────────
+
             $jobOrder->fill($data);
             $dirtyAttributes = $jobOrder->getDirty();
             
