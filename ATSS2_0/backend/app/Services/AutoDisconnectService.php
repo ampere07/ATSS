@@ -299,174 +299,150 @@ class AutoDisconnectService
         $username = $technicalDetail->username;
         $this->writeLog("  [INFO] Username: {$username}");
 
-        // Pre-flight: make sure the RADIUS server is reachable BEFORE we mutate anything.
-        // If it is not (connection timeout, network error, or auth failure), queue the
-        // restrict operation for the ProcessRadiusQueue cron to retry later and move on —
-        // one unreachable server must never abort the whole run.
-        if (!$this->isRadiusReachable()) {
-            $this->writeLog("  [RADIUS] Server unreachable — queueing restrict for retry instead of disconnecting now");
-            $this->queueRadiusOperation(
-                $billingAccount,
-                $username,
-                $accountNo,
-                'restricted_user',
-                'Auto DC',
-                'RADIUS server unreachable during auto-disconnect'
-            );
-            return ['success' => false, 'queued' => true, 'reason' => 'RADIUS unreachable — queued restrict for retry'];
-        }
+        // ── Apply the disconnection at the DECISION point ──────────────────────────────
+        // The fee, balance and status change are committed here regardless of whether the
+        // RADIUS restrict succeeds synchronously. If RADIUS is unreachable or fails, only
+        // the actual cut-off is deferred (queued for the ProcessRadiusQueue cron) — the
+        // customer is still charged and set Inactive exactly once. Idempotency: the fee is
+        // keyed to the invoice, and the "already Inactive / already disconnected today"
+        // guards above stop a second run from repeating anything.
+        $config = BillingConfig::first();
+        $dcFee = floatval($config->disconnection_fee ?? 0);
 
-        // Create transaction to ensure atomicity
+        // Charge the disconnection fee at most once per invoice.
+        $feeAlreadyApplied = DB::table('service_charge_logs')
+            ->where('invoice_id', $invoice->id)
+            ->where('service_charge_type', 'Disconnection Fee')
+            ->exists();
+
         DB::beginTransaction();
         try {
-            // 1. Restrict via RADIUS first
-            $this->writeLog("  [RADIUS] Initiating restriction...");
-            $restrictResult = $this->radiusService->restrictedUser([
-                'username' => $username,
-                'accountNumber' => $accountNo,
-                'remarks' => 'Auto DC',
-                'updatedBy' => 'System'
-            ]);
-
-            if ($restrictResult['status'] !== 'success') {
-                $reason = $restrictResult['message'] ?? 'Unknown RADIUS error';
-                $this->writeLog("  [RADIUS] Restriction failed: {$reason}. Rolling back and queueing for retry.");
-                \Log::channel('radiusrelated')->error('[AUTO DC RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
-                DB::rollBack();
-                // Do NOT throw — queue the operation and let the run continue with the next customer.
-                $this->queueRadiusOperation(
-                    $billingAccount,
-                    $username,
-                    $accountNo,
-                    'restricted_user',
-                    'Auto DC',
-                    'RADIUS restrict failed: ' . $reason
-                );
-                return ['success' => false, 'queued' => true, 'reason' => 'RADIUS restrict failed — queued for retry: ' . $reason];
-            }
-            $this->writeLog("  [RADIUS] ✓ Successfully restricted");
-
-            // 2. Apply disconnection fee if configured
-            $config = BillingConfig::first();
-            $dcFee = floatval($config->disconnection_fee ?? 0);
-
-            if ($dcFee > 0) {
+            // 1. Apply disconnection fee (once)
+            if ($dcFee > 0 && !$feeAlreadyApplied) {
                 $this->writeLog("  [FEE] Applying disconnection fee: ₱" . number_format($dcFee, 2));
 
-                // Update invoice
-                // Use DB::table to ensure it's part of the raw transaction and avoid model events
-                $currentServiceCharge = floatval($invoice->service_charge ?? 0);
-                $currentTotalAmount = floatval($invoice->total_amount ?? 0);
+                // Use DB::table to keep this in the raw transaction and avoid model events.
+                $currentServiceCharge  = floatval($invoice->service_charge ?? 0);
+                $currentTotalAmount    = floatval($invoice->total_amount ?? 0);
                 $currentInvoiceBalance = floatval($invoice->invoice_balance ?? 0);
-                $newServiceCharge = $currentServiceCharge + $dcFee;
-                $newTotalAmount = $currentTotalAmount + $dcFee;
-                $newInvoiceBalance = $currentInvoiceBalance + $dcFee;
 
                 DB::table('invoices')
                     ->where('id', $invoice->id)
                     ->update([
-                        'service_charge' => $newServiceCharge,
-                        'total_amount' => $newTotalAmount,
-                        'invoice_balance' => $newInvoiceBalance,
-                        'updated_by' => 'System',
-                        'updated_at' => Carbon::now()
+                        'service_charge'  => $currentServiceCharge + $dcFee,
+                        'total_amount'    => $currentTotalAmount + $dcFee,
+                        'invoice_balance' => $currentInvoiceBalance + $dcFee,
+                        'updated_by'      => 'System',
+                        'updated_at'      => Carbon::now()
                     ]);
 
-                // Update account balance
-                $newBalance = $currentBalance + $dcFee;
-                
-                // Direct update to billing_accounts to ensure it persists
+                // account_balance is a running ledger — read fresh and add the fee once.
+                $freshBalance = floatval(
+                    DB::table('billing_accounts')->where('id', $billingAccount->id)->value('account_balance') ?? 0
+                );
+                $newBalance = $freshBalance + $dcFee;
+
                 DB::table('billing_accounts')
                     ->where('id', $billingAccount->id)
                     ->update([
                         'account_balance' => $newBalance,
-                        'updated_by' => 'System',
-                        'updated_at' => Carbon::now()
+                        'updated_by'      => 'System',
+                        'updated_at'      => Carbon::now()
                     ]);
-                
-                // Update the local instance for logging & SMS
                 $billingAccount->account_balance = $newBalance;
 
-                $this->writeLog("  [FEE] New Balance: ₱" . number_format($newBalance, 2));
-
-                // Log service charge
                 DB::table('service_charge_logs')->insert([
-                    'account_no' => $accountNo,
-                    'invoice_id' => $invoice->id,
+                    'account_no'          => $accountNo,
+                    'invoice_id'          => $invoice->id,
                     'service_charge_type' => 'Disconnection Fee',
-                    'service_charge' => $dcFee,
-                    'date_used' => Carbon::now(),
-                    'created_at' => Carbon::now(),
-                    'updated_at' => Carbon::now(),
-                    'created_by' => 'System',
-                    'updated_by' => 'System'
+                    'service_charge'      => $dcFee,
+                    'date_used'           => Carbon::now(),
+                    'created_at'          => Carbon::now(),
+                    'updated_at'          => Carbon::now(),
+                    'created_by'          => 'System',
+                    'updated_by'          => 'System'
                 ]);
 
+                $this->writeLog("  [FEE] New Balance: ₱" . number_format($newBalance, 2));
+            } elseif ($feeAlreadyApplied) {
+                $this->writeLog("  [FEE] Disconnection fee already applied for invoice #{$invoice->id} — skipping");
             } else {
                 $this->writeLog("  [FEE] No disconnection fee (set to 0)");
             }
 
-            // 3. Override billing account status to Inactive (RADIUS service sets Restricted; we want Inactive here)
+            // 2. Set billing account status to Inactive
             $inactiveStatusId = DB::table('billing_status')->where('status_name', 'Inactive')->value('id') ?? 4;
             DB::table('billing_accounts')
                 ->where('id', $billingAccount->id)
                 ->update([
                     'billing_status_id' => $inactiveStatusId,
-                    'updated_by' => 'System',
-                    'updated_at' => Carbon::now()
+                    'updated_by'        => 'System',
+                    'updated_at'        => Carbon::now()
                 ]);
-
-            $this->writeLog("  [LOG] Status overridden to Inactive (ID: {$inactiveStatusId}) after RADIUS restriction");
+            $this->writeLog("  [LOG] Status set to Inactive (ID: {$inactiveStatusId})");
 
             $this->writeLog("  [DB] STARTING DB COMMIT for Account {$accountNo}...");
             DB::commit();
             $this->writeLog("  [DB] ✓ COMMIT SUCCESSFUL");
-            
-            // Send SMS notification - AFTER commit to prevent duplicates on rollback
-            if ($this->smsService && $billingAccount->customer && $billingAccount->customer->contact_number_primary) {
-                $this->writeLog("  [SMS] Attempting to trigger triggerSMS function...");
-                $this->triggerSMS($billingAccount, 'Disconnected');
-                $this->writeLog("  [SMS] triggerSMS function finished.");
-            } else {
-                $this->writeLog("  [SMS] Skipping SMS (Service null or no primary contact)");
-            }
-
-            // Send Email notification - AFTER commit
-            if ($this->emailQueueService && $billingAccount->customer && $billingAccount->customer->email_address) {
-                $this->writeLog("  [EMAIL] Attempting to trigger triggerEmail function...");
-                $this->triggerEmail($billingAccount);
-                $this->writeLog("  [EMAIL] triggerEmail function finished.");
-            } else {
-                $this->writeLog("  [EMAIL] Skipping Email (Service null or no email address)");
-            }
-
-            $this->writeLog("  [COMPLETE] Account {$accountNo} successfully restricted and set to Inactive");
-
-            return ['success' => true];
-
         } catch (Throwable $e) {
             DB::rollBack();
             $this->writeLog("  [ERROR] Transaction rolled back for Account {$accountNo}: " . $e->getMessage());
             $this->writeLog("  [TRACE] " . $e->getTraceAsString());
-
-            // A connection-related failure that surfaced as an exception is queued for retry.
-            // Either way we return a failure result rather than throwing, so the remaining
-            // customers are still processed instead of aborting the whole run.
-            if (str_contains($e->getMessage(), 'RADIUS')) {
-                \Log::channel('radiusrelated')->error('[AUTO DC EXCEPTION] Account: ' . $accountNo . ' - Error: ' . $e->getMessage());
-                $this->queueRadiusOperation(
-                    $billingAccount,
-                    $username,
-                    $accountNo,
-                    'restricted_user',
-                    'Auto DC',
-                    'RADIUS exception during auto-disconnect: ' . $e->getMessage()
-                );
-                return ['success' => false, 'queued' => true, 'reason' => 'RADIUS exception — queued for retry: ' . $e->getMessage()];
-            }
-
             return ['success' => false, 'reason' => $e->getMessage()];
         }
+
+        // 3. Restrict via RADIUS (best-effort). The fee/status are already committed, so a
+        //    RADIUS failure only defers the real cut-off — it is queued for retry.
+        $radiusRestricted = false;
+        try {
+            if ($this->isRadiusReachable()) {
+                $this->writeLog("  [RADIUS] Initiating restriction...");
+                $restrictResult = $this->radiusService->restrictedUser([
+                    'username'      => $username,
+                    'accountNumber' => $accountNo,
+                    'remarks'       => 'Auto DC',
+                    'updatedBy'     => 'System'
+                ]);
+
+                if (($restrictResult['status'] ?? null) === 'success') {
+                    $radiusRestricted = true;
+                    $this->writeLog("  [RADIUS] ✓ Successfully restricted");
+                } else {
+                    $reason = $restrictResult['message'] ?? 'Unknown RADIUS error';
+                    $this->writeLog("  [RADIUS] Restrict failed: {$reason}. Queueing for retry.");
+                    \Log::channel('radiusrelated')->error('[AUTO DC RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
+                    $this->queueRadiusOperation($billingAccount, $username, $accountNo, 'restricted_user', 'Auto DC', 'RADIUS restrict failed: ' . $reason);
+                }
+            } else {
+                $this->writeLog("  [RADIUS] Server unreachable — queueing restrict for retry");
+                $this->queueRadiusOperation($billingAccount, $username, $accountNo, 'restricted_user', 'Auto DC', 'RADIUS server unreachable during auto-disconnect');
+            }
+        } catch (Throwable $e) {
+            $this->writeLog("  [RADIUS] Exception during restrict: " . $e->getMessage() . " — queueing for retry");
+            \Log::channel('radiusrelated')->error('[AUTO DC EXCEPTION] Account: ' . $accountNo . ' - Error: ' . $e->getMessage());
+            $this->queueRadiusOperation($billingAccount, $username, $accountNo, 'restricted_user', 'Auto DC', 'RADIUS exception during auto-disconnect: ' . $e->getMessage());
+        }
+
+        // 4. Notifications (after commit).
+        if ($this->smsService && $billingAccount->customer && $billingAccount->customer->contact_number_primary) {
+            $this->writeLog("  [SMS] Attempting to trigger triggerSMS function...");
+            $this->triggerSMS($billingAccount, 'Disconnected');
+            $this->writeLog("  [SMS] triggerSMS function finished.");
+        } else {
+            $this->writeLog("  [SMS] Skipping SMS (Service null or no primary contact)");
+        }
+
+        if ($this->emailQueueService && $billingAccount->customer && $billingAccount->customer->email_address) {
+            $this->writeLog("  [EMAIL] Attempting to trigger triggerEmail function...");
+            $this->triggerEmail($billingAccount);
+            $this->writeLog("  [EMAIL] triggerEmail function finished.");
+        } else {
+            $this->writeLog("  [EMAIL] Skipping Email (Service null or no email address)");
+        }
+
+        $this->writeLog("  [COMPLETE] Account {$accountNo} charged & set to Inactive" . ($radiusRestricted ? " and restricted via RADIUS" : " (RADIUS restrict queued for retry)"));
+
+        return ['success' => true, 'radius_restricted' => $radiusRestricted];
     }
 
     /**
@@ -603,47 +579,63 @@ class AutoDisconnectService
                     $username = $technicalDetail->username;
                     $this->writeLog("  [INFO] Username: {$username}");
 
-                    // 1. Create pullout service order
+                    // 1. Create pullout service order + set status Inactive atomically, so a
+                    //    failure never leaves a half-created pullout. RADIUS is attempted
+                    //    afterwards (best-effort). No disconnection fee is applied for pullouts.
                     $this->writeLog("  [CREATE] Creating pullout service order...");
-                    $this->createPulloutRequest($billingAccount, $pulloutOffset);
-                    $this->writeLog("  [CREATE] ✓ Pullout service order created");
+                    DB::beginTransaction();
+                    try {
+                        $this->createPulloutRequest($billingAccount, $pulloutOffset);
 
-                    // 2. Restrict user via RADIUS (also creates disconnected_logs entry)
-                    $this->writeLog("  [RADIUS] Restricting user via RADIUS...");
-                    $restrictResult = $this->radiusService->restrictedUser([
-                        'username' => $username,
-                        'accountNumber' => $accountNo,
-                        'remarks' => 'Pullout',
-                        'updatedBy' => 'System'
-                    ]);
+                        $inactiveStatusId = DB::table('billing_status')->where('status_name', 'Inactive')->value('id') ?? 4;
+                        DB::table('billing_accounts')
+                            ->where('id', $billingAccount->id)
+                            ->update([
+                                'billing_status_id' => $inactiveStatusId,
+                                'updated_by' => 'System',
+                                'updated_at' => Carbon::now()
+                            ]);
 
-                    if ($restrictResult['status'] === 'success') {
-                        $this->writeLog("  [RADIUS] ✓ Successfully restricted");
-                    } else {
-                        $reason = $restrictResult['message'] ?? 'Unknown';
-                        $this->writeLog("  [RADIUS] ✗ Restrict failed: " . $reason);
-                        \Log::channel('radiusrelated')->error('[AUTO PULLOUT RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
-                        // Queue the restriction so the RADIUS side is retried once the server recovers.
-                        $this->queueRadiusOperation(
-                            $billingAccount,
-                            $username,
-                            $accountNo,
-                            'restricted_user',
-                            'Pullout',
-                            'RADIUS restrict failed during auto-pullout: ' . $reason
-                        );
+                        DB::commit();
+                    } catch (Throwable $e) {
+                        DB::rollBack();
+                        $this->writeLog("  [ERROR] Pullout DB transaction rolled back for {$accountNo}: " . $e->getMessage());
+                        $this->writeLog("[{$counter}/{$totalCount}] ✗ ERROR");
+                        $errors[] = "Account {$accountNo}: " . $e->getMessage();
+                        $skippedCount++;
+                        continue;
                     }
-
-                    // 3. Update billing status to Inactive
-                    $inactiveStatusId = DB::table('billing_status')->where('status_name', 'Inactive')->value('id') ?? 4;
-                    DB::table('billing_accounts')
-                        ->where('id', $billingAccount->id)
-                        ->update([
-                            'billing_status_id' => $inactiveStatusId,
-                            'updated_by' => 'System',
-                            'updated_at' => Carbon::now()
-                        ]);
+                    $this->writeLog("  [CREATE] ✓ Pullout service order created");
                     $this->writeLog("  [DB] ✓ Billing status updated to Inactive (ID: {$inactiveStatusId})");
+
+                    // 2. Restrict user via RADIUS (best-effort; queued for retry if it fails).
+                    $this->writeLog("  [RADIUS] Restricting user via RADIUS...");
+                    try {
+                        if ($this->isRadiusReachable()) {
+                            $restrictResult = $this->radiusService->restrictedUser([
+                                'username' => $username,
+                                'accountNumber' => $accountNo,
+                                'remarks' => 'Pullout',
+                                'updatedBy' => 'System'
+                            ]);
+
+                            if (($restrictResult['status'] ?? null) === 'success') {
+                                $this->writeLog("  [RADIUS] ✓ Successfully restricted");
+                            } else {
+                                $reason = $restrictResult['message'] ?? 'Unknown';
+                                $this->writeLog("  [RADIUS] ✗ Restrict failed: " . $reason . " — queueing for retry");
+                                \Log::channel('radiusrelated')->error('[AUTO PULLOUT RADIUS FAILURE] Account: ' . $accountNo . ' - Reason: ' . $reason);
+                                $this->queueRadiusOperation($billingAccount, $username, $accountNo, 'restricted_user', 'Pullout', 'RADIUS restrict failed during auto-pullout: ' . $reason);
+                            }
+                        } else {
+                            $this->writeLog("  [RADIUS] Server unreachable — queueing restrict for retry");
+                            $this->queueRadiusOperation($billingAccount, $username, $accountNo, 'restricted_user', 'Pullout', 'RADIUS server unreachable during auto-pullout');
+                        }
+                    } catch (Throwable $e) {
+                        $this->writeLog("  [RADIUS] Exception during restrict: " . $e->getMessage() . " — queueing for retry");
+                        \Log::channel('radiusrelated')->error('[AUTO PULLOUT RADIUS EXCEPTION] Account: ' . $accountNo . ' - ' . $e->getMessage());
+                        $this->queueRadiusOperation($billingAccount, $username, $accountNo, 'restricted_user', 'Pullout', 'RADIUS exception during auto-pullout: ' . $e->getMessage());
+                    }
 
                     // 4. Send SMS notification
                     if ($this->smsService && $billingAccount->customer && $billingAccount->customer->contact_number_primary) {
@@ -1249,4 +1241,3 @@ class AutoDisconnectService
         }
     }
 }
-
