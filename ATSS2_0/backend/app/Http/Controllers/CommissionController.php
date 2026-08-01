@@ -763,21 +763,141 @@ class CommissionController extends Controller
         }
     }
 
+    /**
+     * Onboarded-referral milestone size and the reward paid out for reaching one.
+     * Kept server side so the reward can never be dictated by the client.
+     */
+    private const ACHIEVEMENT_TARGET = 30;
+    private const ACHIEVEMENT_REWARD = 1500.00;
+
+    /** Roles that may read or act on another agent's records. */
+    private const ADMIN_ROLES = ['admin', 'billing', 'superadmin'];
+
+    private function isAdminUser($user): bool
+    {
+        return in_array(strtolower($user->role->role_name ?? ''), self::ADMIN_ROLES, true);
+    }
+
+    private function ensureAchievementClaimsTable(): void
+    {
+        // Fail-safe for deployed servers that predate the migration.
+        if (\Illuminate\Support\Facades\Schema::hasTable('agent_achievement_claims')) {
+            return;
+        }
+
+        \Illuminate\Support\Facades\Schema::create('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) {
+            $table->id();
+            $table->foreignId('agent_id')->constrained('users')->onDelete('cascade');
+            $table->integer('milestone');
+            $table->decimal('amount', 10, 2)->default(1500.00);
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Same tolerant "Referred By" match the web and mobile clients use: an exact email
+     * match, or every word of the agent's name appearing in the referral value.
+     */
+    private function referralBelongsToAgent(?string $referredBy, string $fullName, string $email): bool
+    {
+        $normalize = function ($value): string {
+            $value = mb_strtolower((string) $value);
+            $value = str_replace(['.', ','], ' ', $value);
+            return trim(preg_replace('/\s+/', ' ', $value));
+        };
+
+        $ref = $normalize($referredBy);
+        if ($ref === '') {
+            return false;
+        }
+
+        $em = trim(mb_strtolower($email));
+        if ($em !== '' && $ref === $em) {
+            return true;
+        }
+
+        $fn = $normalize($fullName);
+        if ($fn === '') {
+            return false;
+        }
+        if ($ref === $fn) {
+            return true;
+        }
+
+        $refTokens  = explode(' ', $ref);
+        $nameTokens = array_filter(explode(' ', $fn), fn($t) => mb_strlen($t) >= 2);
+        if (empty($nameTokens)) {
+            return false;
+        }
+
+        foreach ($nameTokens as $token) {
+            if (!in_array($token, $refTokens, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Number of job orders referred by this agent that were successfully onboarded.
+     * "Referred By" lives on the application, so job orders are joined back to it.
+     */
+    private function countOnboardedReferrals($agent): int
+    {
+        $first = trim((string) ($agent->first_name ?? ''));
+        $last  = trim((string) ($agent->last_name ?? ''));
+        $email = trim((string) ($agent->email_address ?? ''));
+        $fullName = trim($first . ' ' . $last);
+
+        if ($fullName === '' && $email === '') {
+            return 0;
+        }
+
+        // Narrow the candidate set in SQL, then apply the exact tolerant match in PHP.
+        $rows = DB::table('job_orders as jo')
+            ->join('applications as a', 'jo.application_id', '=', 'a.id')
+            ->whereIn(DB::raw('LOWER(TRIM(jo.onsite_status))'), ['done', 'completed'])
+            ->whereNotNull('a.referred_by')
+            ->where(function ($q) use ($first, $last, $email) {
+                if ($email !== '') {
+                    $q->orWhere('a.referred_by', $email);
+                }
+                if ($first !== '' || $last !== '') {
+                    $q->orWhere(function ($inner) use ($first, $last) {
+                        if ($first !== '') {
+                            $inner->where('a.referred_by', 'like', '%' . $first . '%');
+                        }
+                        if ($last !== '') {
+                            $inner->where('a.referred_by', 'like', '%' . $last . '%');
+                        }
+                    });
+                }
+            })
+            ->pluck('a.referred_by');
+
+        $count = 0;
+        foreach ($rows as $referredBy) {
+            if ($this->referralBelongsToAgent($referredBy, $fullName, $email)) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
     public function getAchievements(Request $request)
     {
         try {
-            // Ensure table exists (temporary fail-safe for deployed server)
-            if (!\Illuminate\Support\Facades\Schema::hasTable('agent_achievement_claims')) {
-                \Illuminate\Support\Facades\Schema::create('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) {
-                    $table->id();
-                    $table->foreignId('agent_id')->constrained('users')->onDelete('cascade');
-                    $table->integer('milestone');
-                    $table->decimal('amount', 10, 2)->default(1500.00);
-                    $table->timestamps();
-                });
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
-            $agentId = $request->input('agent_id');
+            $this->ensureAchievementClaimsTable();
+
+            // Non-admins can only read their own claims.
+            $agentId = $this->isAdminUser($user) ? $request->input('agent_id') : $user->id;
             if (!$agentId) {
                 return response()->json(['success' => false, 'message' => 'Agent ID required'], 400);
             }
@@ -805,11 +925,47 @@ class CommissionController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
+            $this->ensureAchievementClaimsTable();
+
             $validated = $request->validate([
-                'agent_id'      => 'required|integer',
-                'milestone'     => 'required|integer',
-                'amount'        => 'required|numeric|min:0',
+                'agent_id'      => 'nullable|integer',
+                'milestone'     => 'required|integer|min:1',
             ]);
+
+            // Non-admins can only claim for themselves, whatever agent_id they send.
+            $isAdmin = $this->isAdminUser($user);
+            $agentId = $isAdmin ? ($validated['agent_id'] ?? $user->id) : $user->id;
+
+            $agent = \App\Models\User::find($agentId);
+            if (!$agent) {
+                return response()->json(['success' => false, 'message' => 'Agent not found'], 404);
+            }
+
+            $milestone = (int) $validated['milestone'];
+
+            // Milestones only exist at multiples of the target.
+            if ($milestone % self::ACHIEVEMENT_TARGET !== 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Invalid milestone. Milestones are awarded every ' . self::ACHIEVEMENT_TARGET . ' onboarded referrals.'
+                ], 422);
+            }
+
+            // The milestone must actually have been reached.
+            $onboarded = $this->countOnboardedReferrals($agent);
+            if ($onboarded < $milestone) {
+                return response()->json([
+                    'success' => false,
+                    'message' => "Milestone not reached yet ({$onboarded} of {$milestone} onboarded referrals)."
+                ], 422);
+            }
+
+            // The reward is fixed server side — never taken from the request.
+            $validated = [
+                'agent_id'  => $agentId,
+                'milestone' => $milestone,
+                'amount'    => self::ACHIEVEMENT_REWARD,
+            ];
 
             // Check if already claimed
             $exists = AgentAchievementClaim::where('agent_id', $validated['agent_id'])
@@ -835,7 +991,8 @@ class CommissionController extends Controller
                 'proof_of_payment' => 'System Auto Reward',
                 'type'          => 'achievement',
                 'created_by'    => $user->full_name ?? $user->email_address ?? 'System',
-                'organization_id' => $user->organization_id ?? null,
+                // Credit the record to the agent's organization, not the actor's.
+                'organization_id' => $agent->organization_id ?? null,
             ];
 
             $history = AgentCommissionHistory::create($historyPayload);

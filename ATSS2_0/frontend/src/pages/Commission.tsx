@@ -11,6 +11,7 @@ import BonusPayoutModal from '../modals/BonusPayoutModal';
 import { useAgentStore } from '../store/agentStore';
 import ModalUITemplate from '../modals/ui-modal/ModalUITemplate';
 import { Agent } from '../types/api';
+import { getStoredAgentIdentity } from '../utils/agentReferral';
 
 interface ColumnDefinition {
     key: string;
@@ -214,6 +215,11 @@ const Commission: React.FC = () => {
     const [showBonusModal, setShowBonusModal] = useState(false);
     const [payoutAgent, setPayoutAgent] = useState<Agent | null>(null);
     const { agents, fetchAgents } = useAgentStore();
+
+    // Agents reach this page as their own read-only "History": the backend already scopes
+    // every record to them, and payout creation stays an administrator action.
+    const [isAgentView] = useState<boolean>(() => getStoredAgentIdentity().isAgent);
+    const canManagePayouts = !isAgentView;
     const [columnOrderEarnings, setColumnOrderEarnings] = useState<string[]>(() => {
         const saved = localStorage.getItem('commissionEarningsColumnOrder');
         return saved ? JSON.parse(saved) : earningsColumns.map(c => c.key);
@@ -357,7 +363,8 @@ const Commission: React.FC = () => {
         };
         fetchPalette();
         fetchData();
-        fetchAgents();
+        // The agent roster only feeds the payout modals, which agents never see.
+        if (canManagePayouts) fetchAgents();
 
         const checkDarkMode = () => {
             setIsDarkMode(localStorage.getItem('theme') !== 'light');
@@ -505,6 +512,7 @@ const Commission: React.FC = () => {
     };
 
     const handleOpenPayout = () => {
+        if (!canManagePayouts) return;
         setPayoutAgent(null);
         if (activeTab === 'incentives') {
             setShowIncentiveModal(true);
@@ -642,7 +650,7 @@ const Commission: React.FC = () => {
                         <h2 className={`text-lg font-semibold uppercase ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
                             {activeTab === 'incentives' ? 'INCENTIVES' : activeTab === 'bonus' ? 'BONUS' : 'COMMISSIONS'}
                         </h2>
-                        {activeTab !== 'incentives' && (
+                        {activeTab !== 'incentives' && canManagePayouts && (
                             <button
                                 onClick={handleOpenPayout}
                                 className="px-3 py-1.5 rounded text-white text-sm font-medium flex items-center gap-1.5 transition-colors shadow-sm"
@@ -781,7 +789,7 @@ const Commission: React.FC = () => {
                             />
                         </div>
 
-                        {isMobile && activeTab !== 'incentives' && (
+                        {isMobile && activeTab !== 'incentives' && canManagePayouts && (
                             <button
                                 onClick={handleOpenPayout}
                                 className="p-2 rounded border transition-colors flex-shrink-0 text-white"
@@ -1056,7 +1064,9 @@ const Commission: React.FC = () => {
                 </div>
             )}
 
-            {/* Commission Payout Modal */}
+            {/* Payout modals — administrator-only; agents view this page read-only. */}
+            {canManagePayouts && (
+              <>
             <CommissionPayoutModal
                 isOpen={showPayoutModal}
                 onClose={() => setShowPayoutModal(false)}
@@ -1091,6 +1101,8 @@ const Commission: React.FC = () => {
                 agentId={payoutAgent?.id}
                 agentName={payoutAgent?.team_name}
             />
+              </>
+            )}
         </div>
     );
 };

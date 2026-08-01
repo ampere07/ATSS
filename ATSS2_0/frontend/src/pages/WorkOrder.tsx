@@ -10,6 +10,7 @@ import pusher from '../services/pusherService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import { exportToCSV } from '../utils/exportUtils';
+import { isAgentUser } from '../utils/agentReferral';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -333,7 +334,12 @@ const WorkOrderPage: React.FC = () => {
     }
   };
 
+  // Agents have read-only access to their assigned work orders — they cannot raise new
+  // ones, matching the mobile app where the "add" action is hidden for them.
+  const isAgentView = isAgentUser(userRoleName, userRole);
+
   const handleAddNew = () => {
+    if (isAgentView) return;
     setSelectedWorkOrder(null);
     setShowAssignModal(true);
   };
@@ -372,12 +378,15 @@ const WorkOrderPage: React.FC = () => {
       }
     });
 
-    // Apply role-based filtering for OSP
-    if (userRole === 6) {
+    // Apply role-based filtering for OSP (6) and Agent (4): they only see work orders
+    // assigned to them, matching the mobile app.
+    if (Number(userRole) === 6 || isAgentUser(userRoleName, userRole)) {
       filtered = filtered.filter(wo => {
         // Find if user is assigned - assign_to can be either name or email
-        const targetAssign = (wo.assign_to || '').toLowerCase();
-        return targetAssign === userEmail.toLowerCase() || targetAssign === userName.toLowerCase();
+        const targetAssign = (wo.assign_to || '').toLowerCase().trim();
+        const meEmail = userEmail.toLowerCase().trim();
+        const meName = userName.toLowerCase().trim();
+        return (!!meEmail && targetAssign === meEmail) || (!!meName && targetAssign === meName);
       });
     }
 
@@ -397,7 +406,7 @@ const WorkOrderPage: React.FC = () => {
         checkValue(wo.requested_by)
       );
     });
-  }, [workOrders, userRole, userEmail, userName, searchQuery, currentUserOrgId]);
+  }, [workOrders, userRole, userRoleName, userEmail, userName, searchQuery, currentUserOrgId]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -842,16 +851,18 @@ const WorkOrderPage: React.FC = () => {
                     </div>
                   )}
                 </div>
-                <button
-                  onClick={handleAddNew}
-                  className="px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm flex-shrink-0"
-                  style={{
-                    backgroundColor: colorPalette?.primary || '#7c3aed'
-                  }}
-                >
-                  <Plus className="h-4 w-4" />
-                  <span className="hidden md:inline">Add Work Order</span>
-                </button>
+                {!isAgentView && (
+                  <button
+                    onClick={handleAddNew}
+                    className="px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm flex-shrink-0"
+                    style={{
+                      backgroundColor: colorPalette?.primary || '#7c3aed'
+                    }}
+                  >
+                    <Plus className="h-4 w-4" />
+                    <span className="hidden md:inline">Add Work Order</span>
+                  </button>
+                )}
                 <button
                   onClick={handleExport}
                   disabled={isLoading || filteredWorkOrders.length === 0}

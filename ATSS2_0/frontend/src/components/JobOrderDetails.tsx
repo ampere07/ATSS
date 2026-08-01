@@ -23,6 +23,7 @@ import { userService } from '../services/userService';
 import { User as UserType } from '../types/api';
 import { getBillingRecords, getBillingRecordDetails, BillingDetailRecord } from '../services/billingService';
 import { getAllInventoryItems } from '../services/inventoryItemService';
+import { isAgentUser } from '../utils/agentReferral';
 
 const PlanListDetails = React.lazy(() => import('./PlanListDetails'));
 const UserDetails = React.lazy(() => import('./UserDetails'));
@@ -284,24 +285,25 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
         }
         setUserPermissions(perms);
 
-        const isAgent = role === 'agent' || String(id) === '4';
+        const isAgent = isAgentUser(role, id);
         const isTechnician = role === 'technician' || String(id) === '2';
 
         if (isAgent) {
-          const agentAllowedFields = [
-            'timestamp',
-            'jobOrderNumber',
-            'referredBy',
-            'fullName',
-            'contactNumber',
-            'emailAddress',
-            'fullAddress',
-            'installationFee',
-            'billingStatus',
-            'billingDay',
-            'dateInstalled',
-            'onsiteStatus'
+          // Agents see the customer/visit side of a referral but none of the technical
+          // provisioning details or uploaded documents — the same split the mobile app
+          // applies. Installation fee stays visible because it drives their commission
+          // and is already shown on the agent's Job Order list columns.
+          const agentHiddenFields = [
+            // Technical provisioning
+            'modemRouterSn', 'routerModel', 'lcpnap', 'port', 'vlan', 'username',
+            'ipAddress', 'usageType', 'jobOrderItems',
+            // Attachments & documents
+            'clientSignature', 'setupImage', 'speedtestImage', 'signedContractImage',
+            'boxReadingImage', 'routerReadingImage', 'portLabelImage', 'houseFrontPicture',
+            'clientTagging', 'proofImage', 'proofOfBilling', 'governmentValidId',
+            'secondGovernmentValidId', 'documentAttachment', 'otherIspBill'
           ];
+          const agentAllowedFields = defaultFields.filter(f => !agentHiddenFields.includes(f));
           setFieldOrder(agentAllowedFields);
           const newVisibility: Record<string, boolean> = {};
           defaultFields.forEach(f => {

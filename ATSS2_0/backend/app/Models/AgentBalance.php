@@ -21,6 +21,9 @@ class AgentBalance extends Model
         'quota',
         'incentives_value',
         'remarks',
+        // Credited when an agent claims an onboarded-referral milestone.
+        'achievement',
+        'organization_id',
     ];
 
     public function agent()

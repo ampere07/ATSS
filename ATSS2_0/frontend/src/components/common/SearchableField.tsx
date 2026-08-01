@@ -119,7 +119,7 @@ const SearchableField: React.FC<SearchableFieldProps> = ({
       {isOpen && (
         <div className={`absolute left-0 right-0 top-full mt-1 z-50 rounded-md shadow-2xl border overflow-hidden flex flex-col ${
           isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'
-        }`} style={{ minWidth: '100vw', maxWidth: '300px', width: '100%' }}>
+        }`} style={{ width: '100%' }}>
           <div className="max-h-60 overflow-y-auto custom-scrollbar">
             {hasResults ? (
               groupedOptions ? (

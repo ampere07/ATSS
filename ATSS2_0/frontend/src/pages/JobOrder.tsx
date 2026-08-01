@@ -14,6 +14,7 @@ import apiClient from '../config/api';
 import { exportToCSV } from '../utils/exportUtils';
 import { userService } from '../services/userService';
 import { User } from '../types/api';
+import { agentOwnsReferral, getOnsiteStatus, isActiveOnsiteStatus, isAgentUser } from '../utils/agentReferral';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -113,6 +114,7 @@ const JobOrderPage: React.FC = () => {
   const [userRole, setUserRole] = useState<string>('');
   const [roleId, setRoleId] = useState<string | number | null>(null);
   const [agentName, setAgentName] = useState<string>('');
+  const [agentEmail, setAgentEmail] = useState<string>('');
   const [users, setUsers] = useState<User[]>([]);
   const [isLoadingUsers, setIsLoadingUsers] = useState<boolean>(true);
   const [displayMode, setDisplayMode] = useState<DisplayMode>('table');
@@ -387,7 +389,7 @@ const JobOrderPage: React.FC = () => {
         setUserRole(role);
         setRoleId(id);
 
-        const isAgent = role.toLowerCase() === 'agent' || String(id) === '4';
+        const isAgent = isAgentUser(role, id);
         if (isAgent) {
           setVisibleColumns([
             'timestamp',
@@ -420,6 +422,7 @@ const JobOrderPage: React.FC = () => {
         }
 
         setAgentName(fullName);
+        setAgentEmail(userData.email || userData.email_address || '');
 
         if ((userData.role && userData.role.toLowerCase() === 'technician' || String(userData.role_id) === '2') && userData.email) {
           setTechnicianEmail(userData.email);
@@ -656,17 +659,19 @@ const JobOrderPage: React.FC = () => {
       }
     });
 
-    // Then filter by agent if applicable
-    const isAgent = userRole?.toLowerCase() === 'agent' || String(roleId) === '4';
-    if (isAgent && agentName) {
-      const lowerAgentName = agentName.toLowerCase().trim();
+    // Then filter by agent if applicable.
+    // Agents only see the referrals they own, and only while those referrals are still in
+    // the field (in progress / reschedule). Completed ones live in their History page.
+    // Matching mirrors the mobile app: tolerant of middle names, or an exact email match.
+    if (isAgentUser(userRole, roleId) && (agentName || agentEmail)) {
       return filtered.filter((jo: JobOrder) => {
-        const referredBy = (jo.Referred_By || jo.referred_by || '').toLowerCase().trim();
-        return referredBy === lowerAgentName;
+        const referredBy = jo.Referred_By || jo.referred_by || '';
+        if (!agentOwnsReferral(referredBy, agentName, agentEmail)) return false;
+        return isActiveOnsiteStatus(getOnsiteStatus(jo));
       });
     }
     return filtered;
-  }, [jobOrders, userRole, roleId, agentName, currentUserOrgId]);
+  }, [jobOrders, userRole, roleId, agentName, agentEmail, currentUserOrgId]);
 
   // Update selectedJobOrder with fresh data after refresh
   useEffect(() => {
@@ -1349,14 +1354,18 @@ const JobOrderPage: React.FC = () => {
         setMobileViewMode('list');
       } else {
         const authData = localStorage.getItem('authData');
-        let isTech = false;
+        let landOnList = false;
         if (authData) {
           try {
             const userData = JSON.parse(authData);
-            isTech = userData.role?.toLowerCase() === 'technician' || String(userData.role_id) === '2';
+            const isTech = userData.role?.toLowerCase() === 'technician' || String(userData.role_id) === '2';
+            // Technicians and agents go straight to their records on a phone — the same
+            // as the mobile app, where neither role sees the filter panel first. Agents
+            // can still reach the filters via the toolbar button.
+            landOnList = isTech || isAgentUser(userData.role, userData.role_id);
           } catch {}
         }
-        setMobileViewMode(isTech ? 'list' : 'sidebar');
+        setMobileViewMode(landOnList ? 'list' : 'sidebar');
       }
     };
     handleResize();

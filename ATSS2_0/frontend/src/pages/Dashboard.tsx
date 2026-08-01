@@ -67,6 +67,8 @@ import Support from './Support';
 import LiveMonitor from './LiveMonitor';
 import ConcernConfig from './ConcernConfig';
 import DashboardCustomer from './DashboardCustomer';
+import DashboardAgent from './DashboardAgent';
+import ApplicationForm from './ApplicationForm';
 import Bills from './Bills';
 import Reports from './Reports';
 import TechUsers from './TechUsers';
@@ -102,7 +104,10 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 if (normalizedRole === 'customer' || String(user.role_id) === '3') {
                     return 'customer-dashboard';
                 }
-                if (normalizedRole === 'technician' || String(user.role_id) === '2' || normalizedRole === 'agent' || String(user.role_id) === '4') {
+                if (normalizedRole === 'agent' || String(user.role_id) === '4') {
+                    return 'agent-dashboard';
+                }
+                if (normalizedRole === 'technician' || String(user.role_id) === '2') {
                     return 'job-order';
                 }
                 if (String(user.role_id) === '7' || normalizedRole === 'superadmin') {
@@ -262,6 +267,17 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     onNavigate={(section, tab) => handleSectionChange(section, tab)}
                     autoOpenPayModal={customerAutoOpenPayModal}
                 />;
+            // Agent Routes
+            case 'agent-dashboard':
+                return <DashboardAgent onNavigate={handleSectionChange} />;
+            case 'agent-application':
+                return (
+                    <ApplicationForm
+                        onClose={() => handleSectionChange('agent-dashboard')}
+                        onSubmitted={() => handleSectionChange('agent-dashboard')}
+                    />
+                );
+
             case 'customer-bills':
                 return <Bills initialTab={billsInitialTab} onNavigate={handleSectionChange} />;
             case 'customer-support':
@@ -405,6 +421,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
             default:
                 if (userData && String(userData.role_id) === '3') {
                     return <DashboardCustomer onNavigate={(section, tab) => handleSectionChange(section, tab)} />;
+                }
+                if (userData && (userData.role?.toLowerCase() === 'agent' || String(userData.role_id) === '4')) {
+                    return <DashboardAgent onNavigate={handleSectionChange} />;
                 }
                 return <DashboardContent />;
         }
