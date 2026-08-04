@@ -125,7 +125,8 @@ interface DashboardProps {
 
 const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     usePushNotifications();
-    // Technician live-location tracking (feeds the LiveMonitor widget). Only starts for logged-in technicians.
+    // Technician live-location tracking (feeds the LiveMonitor widget). Only starts for logged-in
+    // technicians, and only after they accept the in-app location disclosure.
     useLocationTracking();
     const [userData, setUserData] = useState<any>(null);
     const [activeSection, setActiveSection] = useState('dashboard');
