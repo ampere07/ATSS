@@ -1,12 +1,15 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
     RefreshCw, Filter, ArrowUp, ArrowDown, ExternalLink,
-    ChevronLeft, ChevronRight, X, Settings2, FileText, Plus, DownloadCloud
+    ChevronLeft, ChevronRight, X, Settings2, FileText, Plus, DownloadCloud,
+    ToggleLeft, ToggleRight, Trash2, Loader2, AlertTriangle
 } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import AddReportModal from '../modals/AddReportModal';
+import TableFunnelFilter, { FunnelColumn } from '../filter/TableFunnelFilter';
+import { useFunnelFilter } from '../filter/useFunnelFilter';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +33,16 @@ interface ReportData {
     last_dispatched_at?: string | null;
 }
 
+interface ModalConfig {
+    isOpen: boolean;
+    type: 'success' | 'error' | 'confirm';
+    title: string;
+    message: string;
+    /** Label for the primary button on a confirm dialog. */
+    confirmLabel?: string;
+    onConfirm?: () => void;
+}
+
 const ALL_COLUMNS = [
     { key: 'id', label: 'ID' },
     { key: 'report_name', label: 'Report Name' },
@@ -44,6 +57,28 @@ const ALL_COLUMNS = [
     { key: 'last_dispatched_at', label: 'Last Sent' },
     { key: 'created_by', label: 'Created By' },
     { key: 'created_at', label: 'Created At' },
+];
+
+/**
+ * One filter entry per column in ALL_COLUMNS, so every column the table can show is filterable.
+ * Keys match exactly - the table renders each cell from row[key] and the filter reads the same
+ * key. The schedule/type columns offer the values present in the loaded reports rather than
+ * requiring a lookup endpoint.
+ */
+const FUNNEL_COLUMNS: FunnelColumn[] = [
+    { key: 'id', label: 'ID', dataType: 'varchar' },
+    { key: 'report_name', label: 'Report Name', dataType: 'varchar' },
+    { key: 'report_type', label: 'Report Type', dataType: 'checklist' },
+    { key: 'report_schedule', label: 'Schedule', dataType: 'checklist' },
+    { key: 'report_time', label: 'Time', dataType: 'varchar' },
+    { key: 'day', label: 'Day', dataType: 'varchar' },
+    { key: 'report_weekday', label: 'Weekday', dataType: 'checklist' },
+    { key: 'report_month', label: 'Month', dataType: 'checklist' },
+    { key: 'send_to', label: 'Send To', dataType: 'varchar' },
+    { key: 'date_range', label: 'Date Range', dataType: 'varchar' },
+    { key: 'last_dispatched_at', label: 'Last Sent', dataType: 'datetime' },
+    { key: 'created_by', label: 'Created By', dataType: 'varchar' },
+    { key: 'created_at', label: 'Created At', dataType: 'datetime' },
 ];
 
 // Weekday and Month are hidden by default: they only apply to some schedules,
@@ -164,6 +199,36 @@ const hasReportsAccess = (): boolean => {
     }
 };
 
+/**
+ * Deleting a report is Super Admin only.
+ *
+ * The role name is compared lower-cased because the login endpoint sends it
+ * that way ("superadmin"); comparing against 'SuperAdmin' elsewhere in the app
+ * silently never matches and leaves only the role_id branch working.
+ *
+ * This hides the control. The route is separately gated server-side, so a user
+ * who forges authData still gets a 403.
+ */
+const isSuperAdmin = (): boolean => {
+    try {
+        const authData = localStorage.getItem('authData');
+        if (!authData) return false;
+        const user = JSON.parse(authData);
+        return String(user.role_id ?? '') === '7'
+            || (user.role ?? '').toLowerCase().trim() === 'superadmin';
+    } catch {
+        return false;
+    }
+};
+
+const errorMessage = (err: any): string => {
+    const status = err?.response?.status;
+    if (status === 401) return 'Your session has expired. Please sign in again.';
+    return err?.response?.data?.message
+        || err?.message
+        || 'An unexpected error occurred. Please try again.';
+};
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 const Reports: React.FC = () => {
@@ -171,12 +236,26 @@ const Reports: React.FC = () => {
     const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
     const [accessDenied] = useState<boolean>(!hasReportsAccess());
+    const [canDelete] = useState<boolean>(isSuperAdmin());
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
     // Data
     const [rows, setRows] = useState<ReportData[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
+
+    // Auto Send Report master switch. null until the setting has loaded, so the
+    // control is never rendered showing a state that may not be the real one.
+    const [autoSend, setAutoSend] = useState<boolean | null>(null);
+    const [isSavingAutoSend, setIsSavingAutoSend] = useState(false);
+    const [deletingId, setDeletingId] = useState<number | null>(null);
+
+    const [modal, setModal] = useState<ModalConfig>({
+        isOpen: false,
+        type: 'success',
+        title: '',
+        message: '',
+    });
 
     // UI state
     const [searchQuery, setSearchQuery] = useState('');
@@ -246,9 +325,121 @@ const Reports: React.FC = () => {
         }
     };
 
+    const fetchSettings = useCallback(async () => {
+        try {
+            const res = await apiClient.get<{
+                success: boolean;
+                data: { auto_send_enabled: boolean };
+            }>('/reports/settings');
+
+            if (res.data?.success) {
+                setAutoSend(Boolean(res.data.data?.auto_send_enabled));
+            }
+        } catch (err) {
+            // Leaving this null hides the toggle rather than showing a state we
+            // cannot vouch for.
+            console.error('Failed to load report settings:', err);
+            setAutoSend(null);
+        }
+    }, []);
+
     useEffect(() => {
-        if (!accessDenied) fetchReports();
-    }, [accessDenied]);
+        if (!accessDenied) {
+            fetchReports();
+            fetchSettings();
+        }
+    }, [accessDenied, fetchSettings]);
+
+    // ── Auto Send Report ───────────────────────────────────────────────────────
+
+    const handleToggleAutoSend = async () => {
+        if (autoSend === null || isSavingAutoSend) return;
+
+        const next = !autoSend;
+        setIsSavingAutoSend(true);
+
+        try {
+            const res = await apiClient.put<{
+                success: boolean;
+                message?: string;
+                data: { auto_send_enabled: boolean };
+            }>('/reports/settings', { auto_send_enabled: next });
+
+            if (!res.data?.success) {
+                throw new Error(res.data?.message || 'Failed to update the setting.');
+            }
+
+            setAutoSend(Boolean(res.data.data?.auto_send_enabled));
+            await fetchReports(true);
+
+            setModal({
+                isOpen: true,
+                type: 'success',
+                title: next ? 'Auto Send Enabled' : 'Auto Send Disabled',
+                message: res.data.message
+                    || (next
+                        ? 'Scheduled reports will be sent automatically.'
+                        : 'Scheduled reports will no longer be sent automatically.'),
+            });
+        } catch (err: any) {
+            setModal({
+                isOpen: true,
+                type: 'error',
+                title: 'Could Not Update Auto Send',
+                message: errorMessage(err),
+            });
+        } finally {
+            setIsSavingAutoSend(false);
+        }
+    };
+
+    // ── Delete (Super Admin only) ──────────────────────────────────────────────
+
+    const performDelete = async (row: ReportData) => {
+        setDeletingId(row.id);
+
+        try {
+            const res = await apiClient.delete<{ success: boolean; message?: string }>(
+                `/reports/${row.id}`
+            );
+
+            if (!res.data?.success) {
+                throw new Error(res.data?.message || 'Failed to delete the report.');
+            }
+
+            await fetchReports(true);
+
+            setModal({
+                isOpen: true,
+                type: 'success',
+                title: 'Report Deleted',
+                message: res.data.message || `"${row.report_name}" has been deleted.`,
+            });
+        } catch (err: any) {
+            setModal({
+                isOpen: true,
+                type: 'error',
+                title: 'Delete Failed',
+                message: errorMessage(err),
+            });
+        } finally {
+            setDeletingId(null);
+        }
+    };
+
+    const requestDelete = (row: ReportData) => {
+        setModal({
+            isOpen: true,
+            type: 'confirm',
+            title: 'Delete this report?',
+            message: `"${row.report_name}" will be removed, along with its delivery history and any emails still waiting to go out.\n\nThis cannot be undone.`,
+            confirmLabel: 'Delete Report',
+            onConfirm: () => {
+                setModal(prev => ({ ...prev, isOpen: false }));
+                void performDelete(row);
+            },
+        });
+    };
 
     // ── Toggle columns ─────────────────────────────────────────────────────────
 
@@ -273,7 +464,7 @@ const Reports: React.FC = () => {
 
     // ── Derived Data ──────────────────────────────────────────────────────────
 
-    const filtered = useMemo(() => {
+    const searched = useMemo(() => {
         let f = rows;
 
         // Search
@@ -310,6 +501,16 @@ const Reports: React.FC = () => {
         }
         return f;
     }, [rows, searchQuery, sortColumn, sortDir]);
+
+    // Applied on the searched set so the counts and the table describe the same rows - the point
+    // Customer.tsx applies its own funnel.
+    const funnel = useFunnelFilter({
+        storageKey: 'reportsFunnelFilters',
+        columns: FUNNEL_COLUMNS,
+        rows: searched,
+    });
+
+    const filtered = funnel.filteredRows;
 
     const paginated = useMemo(() => {
         const start = (currentPage - 1) * itemsPerPage;
@@ -418,6 +619,21 @@ const Reports: React.FC = () => {
                             />
                         </div>
 
+                        <button
+                            onClick={funnel.open}
+                            title={funnel.activeCount > 0
+                                ? `Active Filters:\n${Object.keys(funnel.activeFilters).map(funnel.labelFor).join('\n')}`
+                                : 'Column Filters'}
+                            className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-md transition-colors flex-shrink-0 ${funnel.activeCount > 0
+                                ? 'text-white'
+                                : isDarkMode ? 'text-gray-300 border-gray-600 hover:bg-gray-700' : 'text-gray-600 border-gray-300 hover:bg-gray-100'
+                                }`}
+                            style={funnel.activeCount > 0 ? { backgroundColor: primary, borderColor: primary } : {}}
+                        >
+                            <Filter size={14} />
+                            Filters{funnel.activeCount > 0 ? ` (${funnel.activeCount})` : ''}
+                        </button>
+
                         {/* Column picker */}
                         <div className="relative flex-shrink-0" ref={columnPickerRef}>
                             <button
@@ -460,6 +676,33 @@ const Reports: React.FC = () => {
                             )}
                         </div>
 
+                        {/* Auto Send Report master switch */}
+                        {autoSend !== null && (
+                            <button
+                                onClick={handleToggleAutoSend}
+                                disabled={isSavingAutoSend}
+                                title={autoSend
+                                    ? 'Scheduled reports are being emailed automatically. Click to turn this off.'
+                                    : 'Scheduled reports are NOT being emailed. Click to turn automatic sending back on.'}
+                                className={`flex items-center gap-1.5 px-3 py-2 text-sm border rounded-md transition-colors flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${autoSend
+                                    ? 'text-white'
+                                    : isDarkMode
+                                        ? 'text-amber-300 border-amber-700/60 bg-amber-500/10 hover:bg-amber-500/20'
+                                        : 'text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100'
+                                    }`}
+                                style={autoSend ? { backgroundColor: primary, borderColor: primary } : undefined}
+                            >
+                                {isSavingAutoSend
+                                    ? <Loader2 size={14} className="animate-spin" />
+                                    : autoSend
+                                        ? <ToggleRight size={14} />
+                                        : <ToggleLeft size={14} />}
+                                <span className="whitespace-nowrap">
+                                    Auto Send: {autoSend ? 'On' : 'Off'}
+                                </span>
+                            </button>
+                        )}
+
                         {/* Refresh */}
                         <button
                             onClick={() => fetchReports(true)}
@@ -472,6 +715,22 @@ const Reports: React.FC = () => {
                         </button>
                     </div>
                 </div>
+
+                {/* A disabled master switch is easy to forget about, so it is
+                    stated on the page rather than only in the toolbar pill. */}
+                {autoSend === false && (
+                    <div className={`flex items-start gap-2 px-5 py-2.5 border-b text-xs flex-shrink-0 ${isDarkMode
+                        ? 'bg-amber-500/10 border-amber-800/50 text-amber-200'
+                        : 'bg-amber-50 border-amber-200 text-amber-800'}`}
+                    >
+                        <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+                        <span>
+                            <strong className="font-semibold">Automatic sending is off.</strong>{' '}
+                            The schedules below are saved but no reports are being emailed. Turn
+                            "Auto Send" back on to resume.
+                        </span>
+                    </div>
+                )}
 
                 {/* ── Table area ──────────────────────────────────────────────────────── */}
                 <div className="flex-1 min-h-0 overflow-auto" ref={scrollRef}>
@@ -525,9 +784,9 @@ const Reports: React.FC = () => {
                                             </div>
                                         </th>
                                     ))}
-                                    {/* Action column (Download) */}
+                                    {/* Action column: Download, plus Delete for Super Admin */}
                                     <th className={`sticky top-0 z-20 px-3 py-2.5 text-center font-semibold border-b text-xs ${thCls} whitespace-nowrap`}>
-                                        Download
+                                        {canDelete ? 'Actions' : 'Download'}
                                     </th>
                                 </tr>
                             </thead>
@@ -557,7 +816,7 @@ const Reports: React.FC = () => {
                                                 </td>
                                             ))}
                                             <td className={`px-3 py-2 border-b text-center ${tdCls}`}>
-                                                <div className="flex justify-center">
+                                                <div className="flex justify-center items-center gap-2">
                                                     {row.file_url ? (
                                                         <a
                                                             href={row.file_url}
@@ -574,6 +833,24 @@ const Reports: React.FC = () => {
                                                         </a>
                                                     ) : (
                                                         <span className="text-gray-400 italic text-[11px]">No file</span>
+                                                    )}
+
+                                                    {canDelete && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => requestDelete(row)}
+                                                            disabled={deletingId !== null}
+                                                            title="Delete this report"
+                                                            aria-label={`Delete ${row.report_name}`}
+                                                            className={`p-1.5 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${isDarkMode
+                                                                ? 'border-gray-700 text-red-400 hover:bg-red-500/10 hover:border-red-800'
+                                                                : 'border-gray-300 text-red-500 hover:bg-red-50 hover:border-red-300'
+                                                                }`}
+                                                        >
+                                                            {deletingId === row.id
+                                                                ? <Loader2 size={14} className="animate-spin" />
+                                                                : <Trash2 size={14} />}
+                                                        </button>
                                                     )}
                                                 </div>
                                             </td>
@@ -679,6 +956,62 @@ const Reports: React.FC = () => {
                 onClose={() => setIsAddModalOpen(false)}
                 onSaved={() => fetchReports(true)}
             />
+
+            <TableFunnelFilter
+                {...funnel.panelProps}
+                title="Report Filters"
+                subtitle="Refine your scheduled report results"
+            />
+
+            {/* ── Confirmation / result dialog ─────────────────────────── */}
+            {modal.isOpen && (
+                <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[10000] p-4">
+                    <div className={`border rounded-lg p-6 max-w-md w-full ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
+                        <div className="flex items-start gap-3 mb-4">
+                            {modal.type !== 'success' && (
+                                <div
+                                    className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+                                    style={{ backgroundColor: '#ef444420' }}
+                                >
+                                    <AlertTriangle size={18} stroke="#ef4444" />
+                                </div>
+                            )}
+                            <h3 className={`text-lg font-semibold ${text} ${modal.type !== 'success' ? 'mt-1' : ''}`}>
+                                {modal.title}
+                            </h3>
+                        </div>
+
+                        <p className={`mb-6 text-sm whitespace-pre-line ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                            {modal.message}
+                        </p>
+
+                        <div className="flex items-center justify-end gap-3">
+                            {modal.type === 'confirm' && (
+                                <button
+                                    type="button"
+                                    onClick={() => setModal(prev => ({ ...prev, isOpen: false }))}
+                                    className={`px-4 py-2 rounded text-sm font-medium transition-colors ${isDarkMode
+                                        ? 'bg-gray-700 hover:bg-gray-600 text-white'
+                                        : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                                >
+                                    Cancel
+                                </button>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    if (modal.onConfirm) modal.onConfirm();
+                                    else setModal(prev => ({ ...prev, isOpen: false }));
+                                }}
+                                className="px-4 py-2 text-white rounded text-sm font-medium transition-opacity hover:opacity-90"
+                                style={{ backgroundColor: modal.type === 'confirm' ? '#dc2626' : primary }}
+                            >
+                                {modal.type === 'confirm' ? (modal.confirmLabel ?? 'Confirm') : 'OK'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 };

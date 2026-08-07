@@ -43,3 +43,15 @@ yarn-error.log*
 
 # Laravel specific
 storage/*.key
+
+# ===================
+# Signing credentials / secrets
+# ===================
+
+# App Store Connect API private keys (one-time download, never recoverable)
+*.p8
+
+# Android signing
+*.jks
+*.keystore
+upload_certificate.pem
