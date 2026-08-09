@@ -190,6 +190,10 @@ class ServiceOrderApiController extends Controller
                 $so->contact_number = $c ? $c->contact_number_primary : null;
                 $so->full_address = $c ? trim(($c->address ?? '') . ', ' . ($c->barangay ?? '') . ', ' . ($c->city ?? '') . ', ' . ($c->region ?? '')) : null;
                 $so->contact_address = $c ? $c->address : null;
+                // Address parts returned separately so the Relocation concern can edit them individually
+                $so->barangay = $c ? $c->barangay : null;
+                $so->city = $c ? $c->city : null;
+                $so->region = $c ? $c->region : null;
                 $so->email_address = $c ? $c->email_address : null;
                 $so->house_front_picture_url = $c ? $c->house_front_picture_url : null;
                 $so->plan = $c ? $c->desired_plan : null;
@@ -445,6 +449,10 @@ class ServiceOrderApiController extends Controller
                     'c.contact_number_primary as contact_number',
                     DB::raw("CONCAT(IFNULL(c.address, ''), ', ', IFNULL(c.barangay, ''), ', ', IFNULL(c.city, ''), ', ', IFNULL(c.region, '')) as full_address"),
                     'c.address as contact_address',
+                    // Address parts selected separately so the Relocation concern can edit them individually
+                    'c.barangay',
+                    'c.city',
+                    'c.region',
                     'c.email_address',
                     'c.house_front_picture_url',
                     'c.desired_plan as plan',
@@ -741,6 +749,41 @@ class ServiceOrderApiController extends Controller
                         'customer_id' => $billingAccount->customer_id
                     ]);
                 }
+            }
+
+            // Relocation address fields (customers table). Optional: only the fields actually
+            // sent are written, so an untouched field is never overwritten. Restricted to
+            // Administrator (role 1) and SuperAdmin (role 7) so a technician cannot change a
+            // customer address by posting these directly. The unauthenticated fallback matches
+            // the $isSuperAdmin convention above (these routes carry no auth middleware).
+            // Old/new values are captured by the customers diff logged at the end of update().
+            $canEditCustomerAddress = !$authUser || in_array((int) $roleId, [1, 7], true);
+            $addressFields = ['address', 'barangay', 'city', 'region'];
+
+            if ($canEditCustomerAddress) {
+                $addressUpdate = [];
+                foreach ($addressFields as $addressField) {
+                    if ($request->has($addressField)) {
+                        $addressUpdate[$addressField] = $request->input($addressField);
+                    }
+                }
+
+                if (!empty($addressUpdate)) {
+                    $addressUpdate['updated_at'] = now();
+                    DB::table('customers')
+                        ->where('account_no', $serviceOrder->account_no)
+                        ->update($addressUpdate);
+
+                    Log::info('Updated customer address from service order', [
+                        'account_no' => $serviceOrder->account_no,
+                        'fields' => array_keys($addressUpdate)
+                    ]);
+                }
+            } elseif (count(array_intersect($addressFields, array_keys($request->all()))) > 0) {
+                Log::warning('Blocked customer address update from service order: role not permitted', [
+                    'account_no' => $serviceOrder->account_no,
+                    'role_id' => $roleId
+                ]);
             }
 
             $shouldAddServiceCharge = false;
