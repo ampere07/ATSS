@@ -1,13 +1,52 @@
-# SYNC User Guide — generator
+# SYNC manuals — generator
 
-Regenerates `../SYNC_User_Guide.pdf` from the current source tree, so the guide does not
-drift as the apps change.
+Regenerates the SYNC PDF manuals from the current source tree, so they do not drift as the
+apps change.
 
-The guide is written for the people who use SYNC, not for developers. It contains no
-architecture, no internal names and no notes about how it was produced — just how to work
-each screen. Keep it that way when you edit it.
+| Manual | Output | Built by |
+|---|---|---|
+| SYNC User Guide — every screen, every role | `../SYNC_User_Guide.pdf` | `manual.js` |
+| SYNC Agent Module User Manual — the Agent role only | `../../SYNC_Agent_Module_User_Manual.pdf` | `agent_manual.js` |
+| SYNC Reporting Module User Manual — scheduled reports | `../../SYNC_Reporting_Module_User_Manual.pdf` | `reporting_manual.js` |
 
-## Regenerate
+Both are written for the people who use SYNC, not for developers. They contain no
+architecture, no internal names and no notes about how they were produced — just how to work
+each screen. Keep it that way when you edit them.
+
+## Regenerate the Agent Module manual
+
+```sh
+cd docs/manual-generator
+node agent_manual.js                      # writes ../../SYNC_Agent_Module_User_Manual.pdf
+```
+
+Arguments are optional, in order: output path, document date, version, prepared-by,
+organization. For example:
+
+```sh
+node agent_manual.js ../../SYNC_Agent_Module_User_Manual.pdf "8 August 2026" 1.0 \
+     "Documentation Team" "Your Organization"
+```
+
+`agent_manual.js` is hand-written narrative — it documents only what an Agent account can
+reach, so it is not regenerated from the extracts. When the Agent screens change, edit it.
+
+## Regenerate the Reporting Module manual
+
+```sh
+cd docs/manual-generator
+node reporting_manual.js                  # writes ../../SYNC_Reporting_Module_User_Manual.pdf
+```
+
+Takes the same optional arguments as `agent_manual.js`: output path, date, version,
+prepared-by, organization.
+
+Also hand-written. It documents the Reports screen as Administrators and Super
+Administrators actually see it — note that the shipped screens offer no edit, send-now,
+preview or regenerate control, and the manual says so. Do not add one to the manual
+without adding it to the product first.
+
+## Regenerate the full User Guide
 
 ```sh
 cd docs/manual-generator
@@ -35,7 +74,9 @@ in the page footer.
 | `render.js` | Small flowing-document layout engine over jsPDF: headings, paragraphs, bullets, numbered steps, tables, callouts, running header/footer, and a generated table of contents. |
 | `extract_dialogs.py` | Opens every dialog and pulls its title, each field's label, control type, required marker and choice list, plus the exact wording of every validation message it can show. Falls back to a React Native pattern for the mobile dialogs, which use `<Text>` captions rather than `<label>`. |
 | `screens.js` | The per-screen walkthrough generator used by Parts 10 and 11. Holds the curated one-line purpose for each section, the description of each named button, and the rules that turn a screen's detected capabilities into numbered steps. |
-| `manual.js` | The manual itself — narrative content plus everything built from the two JSON extracts. |
+| `manual.js` | The full User Guide — narrative content plus everything built from the two JSON extracts. |
+| `agent_manual.js` | The Agent Module User Manual. Hand-written, covering only the screens and controls an Agent account can reach. |
+| `reporting_manual.js` | The Reporting Module User Manual. Hand-written, covering scheduled reports for Administrators and Super Administrators. |
 
 ## When the apps change
 

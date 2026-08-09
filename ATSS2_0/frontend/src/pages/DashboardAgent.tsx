@@ -222,7 +222,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
             if (response?.success) {
                 setClaimedMilestones(prev => [...prev, pendingMilestone]);
                 window.alert(
-                    `Reward claimed! ${formatCurrency(ACHIEVEMENT_REWARD)} has been added to your achievement rewards ` +
+                    `Reward claimed! ${formatCurrency(ACHIEVEMENT_REWARD)} has been added to your balance ` +
                     `for hitting ${pendingMilestone} onboards.`
                 );
                 await fetchHistory();
@@ -237,7 +237,10 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
     };
 
     const latestCashouts = useMemo(() => cashouts.slice(0, 5), [cashouts]);
-    const totalBalance = agentBalance + agentIncentives + agentBonus + agentAchievement;
+    // A claimed achievement reward is paid straight into `balance` (the commission
+    // bucket); the `achievement` figure is only a lifetime "rewards earned" total for
+    // the tile below, so it must NOT be added here or the reward is counted twice.
+    const totalBalance = agentBalance + agentIncentives + agentBonus;
 
     const displayName = identity.fullName || 'Agent';
     const initials = displayName.split(' ').filter(Boolean).map(n => n[0]).join('').substring(0, 2).toUpperCase();

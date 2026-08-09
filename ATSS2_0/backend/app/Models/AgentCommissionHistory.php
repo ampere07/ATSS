@@ -22,7 +22,12 @@ class AgentCommissionHistory extends Model
         'commission_id_list',
         'updated_by',
         'updated_at',
-        'approved_by'
+        // Transaction kind: commission / incentives / incentives_payout / Bonus /
+        // Bonus_payout / all / achievement. Must stay fillable — the history tabs
+        // and the +/- sign on the payout list are driven entirely by this column.
+        'type',
+        // The column is `approve_by` (no "d") — see database/db_schema.json.
+        'approve_by'
     ];
     
     public $timestamps = false; // The table has created_at but uses CURRENT_TIMESTAMP, and no updated_at

@@ -77,6 +77,33 @@ class Doc {
     this.outline.push({ level: 1, title, page: d.getNumberOfPages() });
   }
 
+  /** Full-width part divider. Used to separate one audience's chapters from another's. */
+  part(label, title, blurb) {
+    const d = this.d;
+    this.page();
+    this.section = title;
+
+    const bandY = this.y + 40;
+    const bandH = 120;
+    d.setFillColor(...ACCENT);
+    d.rect(M.left, bandY, CONTENT_W, bandH, 'F');
+
+    d.setFont('helvetica', 'bold'); d.setFontSize(9); d.setTextColor(255, 255, 255);
+    d.text(String(label).toUpperCase(), M.left + 22, bandY + 34, { charSpace: 2 });
+
+    d.setFont('helvetica', 'bold'); d.setFontSize(22);
+    const lines = d.splitTextToSize(title, CONTENT_W - 44);
+    let ty = bandY + 66;
+    for (const line of lines) { d.text(line, M.left + 22, ty); ty += 26; }
+
+    this.y = bandY + bandH + 26;
+    if (blurb) {
+      this.text(blurb, { size: 10.5, color: [55, 65, 81] });
+      this.space(8);
+    }
+    this.outline.push({ level: 0, title: `${label} — ${title}`, page: d.getNumberOfPages() });
+  }
+
   h2(title) {
     this.room(58);
     this.space(10);
@@ -227,14 +254,42 @@ class Doc {
   // ── cover, TOC, chrome ────────────────────────────────────────────────────
   cover() {
     const d = this.d;
-    d.setFillColor(...ACCENT);
-    d.rect(0, 0, A4.w, 200, 'F');
-    d.setFont('helvetica', 'bold'); d.setFontSize(34); d.setTextColor(255, 255, 255);
-    d.text(this.meta.title, M.left, 108, { maxWidth: CONTENT_W });
-    d.setFont('helvetica', 'normal'); d.setFontSize(13);
-    d.text(this.meta.subtitle, M.left, 146, { maxWidth: CONTENT_W });
 
-    this.y = 250;
+    // Fit the title on one line if a slightly smaller size will do it — breaking
+    // a title mid-phrase reads as a mistake. Below the floor it is allowed to
+    // wrap, and the banner then grows so the subtitle never prints over it.
+    d.setFont('helvetica', 'bold');
+    let titleSize = 34;
+    for (const size of [34, 32, 30, 28, 26]) {
+      d.setFontSize(size);
+      titleSize = size;
+      if (d.splitTextToSize(this.meta.title, CONTENT_W).length === 1) break;
+    }
+    d.setFontSize(titleSize);
+    const titleLines = d.splitTextToSize(this.meta.title, CONTENT_W);
+    const titleLead = titleSize + 4;
+    const eyebrowH = this.meta.eyebrow ? 30 : 0;
+    const bandH = Math.max(200, 108 + eyebrowH + (titleLines.length - 1) * titleLead + 60);
+
+    d.setFillColor(...ACCENT);
+    d.rect(0, 0, A4.w, bandH, 'F');
+    d.setTextColor(255, 255, 255);
+    let ty = 108;
+
+    // Optional wordmark printed above the title.
+    if (this.meta.eyebrow) {
+      d.setFont('helvetica', 'bold'); d.setFontSize(15);
+      d.text(String(this.meta.eyebrow), M.left, ty, { charSpace: 3 });
+      ty += eyebrowH;
+      d.setFont('helvetica', 'bold'); d.setFontSize(titleSize);
+    }
+
+    for (const line of titleLines) { d.text(line, M.left, ty); ty += titleLead; }
+
+    d.setFont('helvetica', 'normal'); d.setFontSize(13);
+    d.text(this.meta.subtitle, M.left, ty + 4, { maxWidth: CONTENT_W });
+
+    this.y = bandH + 50;
     this.text(this.meta.blurb, { size: 11, color: [55, 65, 81] });
     this.space(24);
     this.table(null, this.meta.facts, { widths: [150, CONTENT_W - 150], fontSize: 9.4 });
@@ -264,10 +319,12 @@ class Doc {
       while (idx < entries.length && y < A4.h - M.bottom - 14) {
         const e = entries[idx++];
         const shownPage = e.page + pages; // body shifted by inserted TOC pages
-        const bold = e.level === 1;
+        const isPart = e.level === 0;
+        const bold = e.level <= 1;
+        if (isPart && y > M.top + 40) y += 10;   // breathing room above a part
         d.setFont('helvetica', bold ? 'bold' : 'normal');
-        d.setFontSize(bold ? 10 : 9.2);
-        d.setTextColor(...(bold ? INK : [75, 85, 99]));
+        d.setFontSize(isPart ? 10.6 : bold ? 10 : 9.2);
+        d.setTextColor(...(isPart ? ACCENT : bold ? INK : [75, 85, 99]));
         const indent = bold ? 0 : 16;
         const label = d.splitTextToSize(e.title, CONTENT_W - indent - 42)[0];
         d.text(label, M.left + indent, y);
@@ -282,7 +339,7 @@ class Doc {
           const dots = '.'.repeat(Math.max(0, Math.floor((endX - startX) / d.getTextWidth('.'))));
           d.text(dots, startX, y);
         }
-        y += bold ? 17 : 13.6;
+        y += isPart ? 19 : bold ? 17 : 13.6;
       }
     }
   }

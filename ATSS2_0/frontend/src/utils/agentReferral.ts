@@ -25,8 +25,11 @@ export const agentOwnsReferral = (referredByRaw: string, fullName: string, email
   const ref = normalizeName(referredByRaw);
   if (!ref) return false;
 
+  // Compare the email against the RAW referral, not the normalized one: normalizeName
+  // turns dots into spaces, so "juan@x.com" would become "juan@x com" and could never
+  // equal the address it came from.
   const em = (email || '').toLowerCase().trim();
-  if (em && ref === em) return true;
+  if (em && (referredByRaw || '').toLowerCase().trim() === em) return true;
 
   const fn = normalizeName(fullName);
   if (!fn) return false;

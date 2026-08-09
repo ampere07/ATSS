@@ -49,7 +49,7 @@ const allColumns = [
 
   { key: 'desiredPlan', label: 'Desired Plan', width: 'min-w-36' },
   { key: 'promo', label: 'Promo', width: 'min-w-28' },
-  { key: 'referredBy', label: 'Referred By', width: 'min-w-32' },
+  { key: 'referredBy', label: 'Referred By', width: 'min-w-32' },                                                                                 
   { key: 'createDate', label: 'Create Date', width: 'min-w-32' },
   { key: 'createTime', label: 'Create Time', width: 'min-w-28' }
 ];

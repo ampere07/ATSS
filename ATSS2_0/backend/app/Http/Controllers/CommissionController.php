@@ -173,7 +173,9 @@ class CommissionController extends Controller
                     'commission_id_list' => $item->commission_id_list,
                     'updated_by' => $item->updated_by,
                     'updated_at' => $item->updated_at,
-                    'approved_by' => $item->approved_by,
+                    // Response key stays `approved_by` (the frontend type), but the
+                    // underlying column is `approve_by`.
+                    'approved_by' => $item->approve_by,
                     'type' => $item->type
                 ];
             });
@@ -257,47 +259,44 @@ class CommissionController extends Controller
                     ->update(['commission_status' => 'Paid']);
             }
 
-            // Update the agent's balance (add if incentives, deduct if incentives_payout or commission payout)
+            // Update the agent's balance.
+            //
+            // `balance`, `incentives`, `bonus` and `achievement` are INDEPENDENT columns —
+            // the agent dashboard shows them as separate tiles ("Commission" is the
+            // `balance` column) and adds them up for Total Balance. So each transaction
+            // type only ever moves its own bucket; touching `balance` as well would
+            // double-count the money.
             $agentBalance = AgentBalance::where('agent_id', $validated['agent_id'])->first();
             if ($agentBalance) {
+                $amount     = (float) $validated['total_amount'];
+                $balance    = max(0, (float) $agentBalance->balance);
+                $incentives = max(0, (float) $agentBalance->incentives);
+                $bonus      = max(0, (float) ($agentBalance->bonus ?? 0));
+
                 if ($validated['type'] === 'incentives') {
-                    $newBalance = (float)$agentBalance->balance + (float)$validated['total_amount'];
-                    $newIncentives = (float)$agentBalance->incentives + (float)$validated['total_amount'];
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'incentives' => $newIncentives
-                    ]);
+                    $agentBalance->update(['incentives' => $incentives + $amount]);
                 } elseif ($validated['type'] === 'incentives_payout') {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $newIncentives = max(0, (float)$agentBalance->incentives - (float)$validated['total_amount']);
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'incentives' => $newIncentives
-                    ]);
+                    $agentBalance->update(['incentives' => max(0, $incentives - $amount)]);
                 } elseif ($validated['type'] === 'Bonus') {
-                    $newBalance = (float)$agentBalance->balance + (float)$validated['total_amount'];
-                    $newBonus = (float)($agentBalance->bonus ?? 0) + (float)$validated['total_amount'];
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'bonus' => $newBonus
-                    ]);
+                    $agentBalance->update(['bonus' => $bonus + $amount]);
                 } elseif ($validated['type'] === 'Bonus_payout') {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $newBonus = max(0, (float)($agentBalance->bonus ?? 0) - (float)$validated['total_amount']);
-                    $agentBalance->update([
-                        'balance' => $newBalance,
-                        'bonus' => $newBonus
-                    ]);
+                    $agentBalance->update(['bonus' => max(0, $bonus - $amount)]);
                 } elseif ($validated['type'] === 'all') {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
+                    // Cash out across every bucket, commission first, then incentives,
+                    // then bonus. Paying the full total empties all three; a partial
+                    // amount drains them in order instead of wiping the remainder.
+                    $fromBalance    = min($amount, $balance);
+                    $fromIncentives = min($amount - $fromBalance, $incentives);
+                    $fromBonus      = min($amount - $fromBalance - $fromIncentives, $bonus);
+
                     $agentBalance->update([
-                        'balance' => $newBalance,
-                        'incentives' => 0,
-                        'bonus' => 0
+                        'balance'    => $balance - $fromBalance,
+                        'incentives' => $incentives - $fromIncentives,
+                        'bonus'      => $bonus - $fromBonus,
                     ]);
                 } else {
-                    $newBalance = max(0, (float)$agentBalance->balance - (float)$validated['total_amount']);
-                    $agentBalance->update(['balance' => $newBalance]);
+                    // 'commission' and anything unrecognised: the commission bucket.
+                    $agentBalance->update(['balance' => max(0, $balance - $amount)]);
                 }
             }
 
@@ -311,6 +310,14 @@ class CommissionController extends Controller
                 'data'    => $history,
                 'updated_job_orders' => count($jobOrderIds),
             ], 201);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            // ValidationException extends \Exception, so without this it would be
+            // swallowed below and reported as a 500 with no field errors.
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -435,19 +442,18 @@ class CommissionController extends Controller
                 'updated_by_user' => $userEmail
             ]);
 
-            // Update the agent's balance (add if Bonus, deduct if Bonus_payout).
+            // Update the agent's bonus bucket (add if Bonus, deduct if Bonus_payout).
+            // `bonus` is its own column, independent of `balance` (the commission
+            // bucket) — a bonus movement must not touch the commission balance.
             $agentBalance = AgentBalance::where('agent_id', $validated['agent_id'])->first();
             if ($agentBalance) {
+                $amount = (float) $validated['total_amount'];
+                $bonus  = max(0, (float) ($agentBalance->bonus ?? 0));
+
                 if ($validated['type'] === 'Bonus') {
-                    $agentBalance->update([
-                        'balance' => (float)$agentBalance->balance + (float)$validated['total_amount'],
-                        'bonus'   => (float)($agentBalance->bonus ?? 0) + (float)$validated['total_amount'],
-                    ]);
+                    $agentBalance->update(['bonus' => $bonus + $amount]);
                 } elseif ($validated['type'] === 'Bonus_payout') {
-                    $agentBalance->update([
-                        'balance' => max(0, (float)$agentBalance->balance - (float)$validated['total_amount']),
-                        'bonus'   => max(0, (float)($agentBalance->bonus ?? 0) - (float)$validated['total_amount']),
-                    ]);
+                    $agentBalance->update(['bonus' => max(0, $bonus - $amount)]);
                 }
             }
 
@@ -458,6 +464,12 @@ class CommissionController extends Controller
                     : 'Bonus payout recorded successfully',
                 'data'    => $history,
             ], 201);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
             return response()->json([
                 'success' => false,
@@ -811,8 +823,11 @@ class CommissionController extends Controller
             return false;
         }
 
+        // Compare the email against the RAW referral, not the normalized one:
+        // $normalize turns dots into spaces, so "juan@x.com" would become
+        // "juan@x com" and could never equal the address it came from.
         $em = trim(mb_strtolower($email));
-        if ($em !== '' && $ref === $em) {
+        if ($em !== '' && trim(mb_strtolower((string) $referredBy)) === $em) {
             return true;
         }
 
@@ -997,16 +1012,21 @@ class CommissionController extends Controller
 
             $history = AgentCommissionHistory::create($historyPayload);
 
-            // Update agent balance (credit the achievement column)
+            // Pay the reward straight into `balance` — the spendable commission bucket —
+            // so a claimed milestone can actually be cashed out through the payout modal.
+            // `achievement` is ALSO credited, but purely as a lifetime "rewards earned"
+            // figure behind the dashboard tile; it is deliberately NOT part of the
+            // agent's Total Balance, otherwise this reward would be counted twice.
             $agentBalance = AgentBalance::where('agent_id', $validated['agent_id'])->first();
             if ($agentBalance) {
                 $agentBalance->update([
-                    'achievement' => (float)($agentBalance->achievement ?? 0) + (float)$validated['amount'],
+                    'balance'     => max(0, (float)$agentBalance->balance) + (float)$validated['amount'],
+                    'achievement' => max(0, (float)($agentBalance->achievement ?? 0)) + (float)$validated['amount'],
                 ]);
             } else {
                 AgentBalance::create([
                     'agent_id' => $validated['agent_id'],
-                    'balance' => 0,
+                    'balance' => (float)$validated['amount'],
                     'commission' => 0,
                     'achievement' => (float)$validated['amount'],
                 ]);
@@ -1033,6 +1053,13 @@ class CommissionController extends Controller
                 'data' => $claim
             ]);
 
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors()
+            ], 422);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json([

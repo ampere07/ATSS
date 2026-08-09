@@ -148,7 +148,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
             const response = await claimAgentAchievement({ agent_id: agentId, milestone: pendingMilestone, amount: 1500 });
             if (response.success) {
                 setClaimedMilestones(prev => [...prev, pendingMilestone]);
-                Alert.alert('Reward Claimed!', `₱1,500 has been added to your achievement rewards for hitting ${pendingMilestone} onboards.`, [{ text: 'OK' }]);
+                Alert.alert('Reward Claimed!', `₱1,500 has been added to your balance for hitting ${pendingMilestone} onboards.`, [{ text: 'OK' }]);
                 fetchHistory();
             } else {
                 Alert.alert('Error', response.message || 'Failed to claim reward.');
@@ -175,6 +175,11 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
     });
 
     const claimButtonColor = colorPalette?.primary || '#ef4444';
+
+    // A claimed achievement reward is paid straight into `balance` (the commission
+    // bucket); the `achievement` figure is only a lifetime "rewards earned" total for
+    // the tile, so it must NOT be added here or the reward is counted twice.
+    const totalBalance = agentBalance + agentIncentives + agentBonus;
 
     const fetchHistory = useCallback(async () => {
         try {
@@ -450,9 +455,9 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
                                         adjustsFontSizeToFit
                                         minimumFontScale={0.5}
                                         allowFontScaling={false}
-                                        style={{ fontWeight: 'bold', color: '#ffffff', fontSize: (agentBalance + agentIncentives + agentBonus + agentAchievement) >= 1000 ? (isMobile ? (isShort ? 32 : 36) : 44) : (isMobile ? (isShort ? 40 : 44) : 52) }}
+                                        style={{ fontWeight: 'bold', color: '#ffffff', fontSize: totalBalance >= 1000 ? (isMobile ? (isShort ? 32 : 36) : 44) : (isMobile ? (isShort ? 40 : 44) : 52) }}
                                     >
-                                        {formatCurrency(agentBalance + agentIncentives + agentBonus + agentAchievement)}
+                                        {formatCurrency(totalBalance)}
                                     </Text>
                                 </View>
                                 <Pressable onPress={() => onNavigate && onNavigate('Application')}>
