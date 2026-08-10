@@ -2,11 +2,20 @@
 # Dependencies
 # ===================
 
-# Node.js
+# Node.js — at any depth, in every sub-project
 node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+.yarn/cache
+.yarn/unplugged
 
-# PHP / Composer
+# PHP / Composer — at any depth, in every sub-project
 vendor/
+**/vendor/
+composer.phar
+auth.json
+.phpunit.result.cache
 
 # ===================
 # Environment files

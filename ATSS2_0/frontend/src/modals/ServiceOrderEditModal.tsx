@@ -13,6 +13,8 @@ import { getAllLCPNAPs, LCPNAP } from '../services/lcpnapService';
 import { routerModelService, RouterModel } from '../services/routerModelService';
 import { getBillingRecordDetails } from '../services/billingService';
 import { technicianService } from '../services/technicianService';
+import { getRegions, getCities, City } from '../services/cityService';
+import { barangayService, Barangay } from '../services/barangayService';
 import SearchableField from '../components/common/SearchableField';
 
 
@@ -84,6 +86,11 @@ interface ServiceOrderEditFormData {
   routerModel: string;
   newPlan: string;
   newLcpnap: string;
+  // Customer address fields, editable only under the Relocation concern
+  address: string;
+  barangay: string;
+  city: string;
+  region: string;
 }
 
 interface ImageFiles {
@@ -126,6 +133,15 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     ? !isTech
     : (currentUser?.role_id === 1 || currentUser?.role_id === 8 || (typeof currentUser?.role === 'string' && ['administrator', 'superadmin', 'super admin', 'headtech'].includes(currentUser.role.toLowerCase())));
 
+  // Relocation address fields are limited to Administrator (role 1) and SuperAdmin (role 7).
+  // isAdministratorOrSuperadmin is deliberately not reused here: it also passes HeadTech (8),
+  // misses SuperAdmin (7), and treats any non-technician as an admin when isTech is provided.
+  const canEditRelocationAddress = !isTechnician && (
+    currentUser?.role_id === 1 ||
+    currentUser?.role_id === 7 ||
+    (typeof currentUser?.role === 'string' && ['administrator', 'superadmin', 'super admin'].includes(currentUser.role.toLowerCase()))
+  );
+
   const [technicians, setTechnicians] = useState<Array<{ name: string; id?: number }>>([]);
   const [technicianUsers, setTechnicianUsers] = useState<Array<{ name: string; email: string }>>([]);
 
@@ -140,6 +156,13 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [routerModels, setRouterModels] = useState<RouterModel[]>([]);
   const [billingStatusId, setBillingStatusId] = useState<number | null>(null);
+
+  // Location lookups for the Relocation address fields
+  const [regions, setRegions] = useState<Array<{ id: number; name: string }>>([]);
+  const [allCities, setAllCities] = useState<City[]>([]);
+  const [allBarangays, setAllBarangays] = useState<Barangay[]>([]);
+  // Snapshot of the customer's address when the modal opened, so only actual edits are sent
+  const [originalAddress, setOriginalAddress] = useState({ address: '', barangay: '', city: '', region: '' });
 
   const [orderItems, setOrderItems] = useState<OrderItem[]>([{ itemId: '', quantity: '' }]);
 
@@ -194,7 +217,11 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     newVlan: '',
     routerModel: '',
     newPlan: '',
-    newLcpnap: ''
+    newLcpnap: '',
+    address: '',
+    barangay: '',
+    city: '',
+    region: ''
   });
 
 
@@ -486,11 +513,28 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       }
     };
 
+    const fetchLocations = async () => {
+      try {
+        const [fetchedRegions, fetchedCities, barangaysRes] = await Promise.all([
+          getRegions(),
+          getCities(),
+          barangayService.getAll()
+        ]);
+
+        setRegions(Array.isArray(fetchedRegions) ? fetchedRegions : []);
+        setAllCities(Array.isArray(fetchedCities) ? fetchedCities : []);
+        setAllBarangays(barangaysRes.success && Array.isArray(barangaysRes.data) ? barangaysRes.data : []);
+      } catch (error) {
+        console.error('Error fetching locations:', error);
+      }
+    };
+
     if (isOpen) {
       fetchTechnicians();
       fetchTechnicianUsers();
       fetchTechnicalDetails();
       fetchConcerns();
+      fetchLocations();
     }
 
 
@@ -606,8 +650,21 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         newNap: '',
         newPort: '',
         newVlan: '',
-        routerModel: ''
+        routerModel: '',
+        address: serviceOrderData.contactAddress || serviceOrderData.contact_address || serviceOrderData.address || '',
+        barangay: serviceOrderData.barangay || '',
+        city: serviceOrderData.city || '',
+        region: serviceOrderData.region || ''
       }));
+
+      // Remember what the customer address looked like on open so the save only
+      // sends the address fields that the user actually changed.
+      setOriginalAddress({
+        address: serviceOrderData.contactAddress || serviceOrderData.contact_address || serviceOrderData.address || '',
+        barangay: serviceOrderData.barangay || '',
+        city: serviceOrderData.city || '',
+        region: serviceOrderData.region || ''
+      });
     }
   }, [serviceOrderData, isOpen, currentUserEmail]);
 
@@ -636,11 +693,32 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       if (field === 'newLcp' || field === 'newNap' || field === 'newLcpnap') {
         newState.newPort = '';
       }
+      // Region -> City -> Barangay cascade: clear the dependent levels when a parent changes
+      if (field === 'region') {
+        newState.city = '';
+        newState.barangay = '';
+      } else if (field === 'city') {
+        newState.barangay = '';
+      }
       return newState;
     });
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: '' }));
     }
+  };
+
+  const getFilteredCities = (): City[] => {
+    if (!formData.region) return [];
+    const selectedRegion = regions.find(reg => reg.name === formData.region);
+    if (!selectedRegion) return [];
+    return allCities.filter(city => city.region_id === selectedRegion.id);
+  };
+
+  const getFilteredBarangays = (): Barangay[] => {
+    if (!formData.city) return [];
+    const selectedCity = allCities.find(city => city.name === formData.city);
+    if (!selectedCity) return [];
+    return allBarangays.filter(brgy => brgy.city_id === selectedCity.id);
   };
 
   const handleImageChange = async (field: keyof ImageFiles, file: File | null) => {
@@ -1067,6 +1145,15 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       const showNewTechDetails = isVisitDone && isMigrateGroup;
       const showNewVlan = isVisitDone && (isMigrateGroup || isUpdateVlan);
 
+      // Relocation address changes (customers table). All four fields are optional, so
+      // only the ones that differ from the values loaded on open are sent.
+      const changedAddressFields: Record<string, string> = {};
+      (['address', 'barangay', 'city', 'region'] as const).forEach(field => {
+        if ((updatedFormData[field] || '') !== (originalAddress[field] || '')) {
+          changedAddressFields[field] = updatedFormData[field] || '';
+        }
+      });
+
       const serviceOrderUpdateData: any = {
         account_no: updatedFormData.accountNo,
         date_installed: updatedFormData.dateInstalled,
@@ -1129,6 +1216,10 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         service_charge: parseFloat(updatedFormData.serviceCharge),
         status: updatedFormData.status,
         ...(updatedFormData.concern === 'Upgrade/Downgrade Plan' ? { new_plan: updatedFormData.newPlan } : {}),
+
+        // Relocation: send only the address fields the user actually changed, so an
+        // untouched field is never written over. The backend logs the old/new values.
+        ...(updatedFormData.concern === 'Relocation' && canEditRelocationAddress ? changedAddressFields : {}),
 
         // Reset the on-site timers when the technician is reassigned so the new
         // technician starts a fresh visit (no inherited start/end time).
@@ -2255,6 +2346,99 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                   required
                   placeholder="Select New Plan"
                 />
+              </div>
+            )}
+
+
+            {formData.concern === 'Relocation' && canEditRelocationAddress && (
+              <div className="mt-4 space-y-4">
+                <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  New customer address. Optional &mdash; leave unchanged if the address is the same.
+                </p>
+
+                <div>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                    }`}>Region</label>
+                  <div className="relative">
+                    <select
+                      value={formData.region}
+                      onChange={(e) => handleInputChange('region', e.target.value)}
+                      className={`w-full px-3 py-2 border rounded focus:outline-none focus-primary appearance-none ${isDarkMode ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-300'
+                        }`}
+                    >
+                      <option value="">Select Region</option>
+                      {formData.region && !regions.some(reg => reg.name === formData.region) && (
+                        <option value={formData.region}>{formData.region}</option>
+                      )}
+                      {regions.map(region => (
+                        <option key={region.id} value={region.name}>{region.name}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className={`absolute right-3 top-2.5 pointer-events-none ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                      }`} size={20} />
+                  </div>
+                </div>
+
+                <div>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                    }`}>City</label>
+                  <div className="relative">
+                    <select
+                      value={formData.city}
+                      onChange={(e) => handleInputChange('city', e.target.value)}
+                      disabled={!formData.region}
+                      className={`w-full px-3 py-2 border rounded focus:outline-none focus-primary appearance-none disabled:opacity-50 disabled:cursor-not-allowed ${isDarkMode ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-300'
+                        }`}
+                    >
+                      <option value="">{formData.region ? 'Select City' : 'Select Region First'}</option>
+                      {formData.city && !getFilteredCities().some(city => city.name === formData.city) && (
+                        <option value={formData.city}>{formData.city}</option>
+                      )}
+                      {getFilteredCities().map(city => (
+                        <option key={city.id} value={city.name}>{city.name}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className={`absolute right-3 top-2.5 pointer-events-none ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                      }`} size={20} />
+                  </div>
+                </div>
+
+                <div>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                    }`}>Barangay</label>
+                  <div className="relative">
+                    <select
+                      value={formData.barangay}
+                      onChange={(e) => handleInputChange('barangay', e.target.value)}
+                      disabled={!formData.city}
+                      className={`w-full px-3 py-2 border rounded focus:outline-none focus-primary appearance-none disabled:opacity-50 disabled:cursor-not-allowed ${isDarkMode ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-300'
+                        }`}
+                    >
+                      <option value="">{formData.city ? 'Select Barangay' : 'Select City First'}</option>
+                      {formData.barangay && !getFilteredBarangays().some(brgy => brgy.barangay === formData.barangay) && (
+                        <option value={formData.barangay}>{formData.barangay}</option>
+                      )}
+                      {getFilteredBarangays().map(brgy => (
+                        <option key={brgy.id} value={brgy.barangay}>{brgy.barangay}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className={`absolute right-3 top-2.5 pointer-events-none ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                      }`} size={20} />
+                  </div>
+                </div>
+
+                <div>
+                  <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                    }`}>Address</label>
+                  <input
+                    type="text"
+                    value={formData.address}
+                    onChange={(e) => handleInputChange('address', e.target.value)}
+                    placeholder="House no., street, subdivision"
+                    className={`w-full px-3 py-2 border rounded focus:outline-none focus-primary ${isDarkMode ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-300'
+                      }`}
+                  />
+                </div>
               </div>
             )}
 

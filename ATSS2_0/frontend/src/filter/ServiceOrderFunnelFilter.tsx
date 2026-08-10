@@ -65,7 +65,7 @@ export const allColumns: Column[] = [
   { key: 'visitBy', label: 'Visit By', dataType: 'varchar' },
   { key: 'visitWith', label: 'Visit With', dataType: 'varchar' },
   { key: 'visitWithOther', label: 'Visit With Other', dataType: 'varchar' },
-  { key: 'visitStatus', label: 'Onsite Status', dataType: 'checklist' },
+  { key: 'visitStatus', label: 'Visit Status', dataType: 'checklist' },
   { key: 'routerModel', label: 'Router Model', dataType: 'checklist' },
   { key: 'dateInstalled', label: 'Date Installed', dataType: 'date' },
   { key: 'ipAddress', label: 'IP', dataType: 'varchar' },
