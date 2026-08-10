@@ -721,6 +721,12 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     return allBarangays.filter(brgy => brgy.city_id === selectedCity.id);
   };
 
+  // The relocation address is only written to the customer record on a Resolved save, so the
+  // form has to say when edits are still pending rather than dropping them silently.
+  const isSupportStatusResolved = String(formData.supportStatus).toLowerCase().trim() === 'resolved';
+  const hasPendingAddressEdits = (['address', 'barangay', 'city', 'region'] as const)
+    .some(field => (formData[field] || '') !== (originalAddress[field] || ''));
+
   const handleImageChange = async (field: keyof ImageFiles, file: File | null) => {
     if (file && activeImageSize && activeImageSize.image_size_value < 100) {
       try {
@@ -1147,6 +1153,13 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
 
       // Relocation address changes (customers table). All four fields are optional, so
       // only the ones that differ from the values loaded on open are sent.
+      //
+      // The write is held back until the ticket is Resolved: while the relocation is still
+      // in progress the customer has not moved yet, so their record must keep the old
+      // address. Only on the save that carries Resolved do the new values get committed.
+      const isRelocationResolved = updatedFormData.concern === 'Relocation'
+        && String(updatedFormData.supportStatus).toLowerCase().trim() === 'resolved';
+
       const changedAddressFields: Record<string, string> = {};
       (['address', 'barangay', 'city', 'region'] as const).forEach(field => {
         if ((updatedFormData[field] || '') !== (originalAddress[field] || '')) {
@@ -1217,9 +1230,10 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         status: updatedFormData.status,
         ...(updatedFormData.concern === 'Upgrade/Downgrade Plan' ? { new_plan: updatedFormData.newPlan } : {}),
 
-        // Relocation: send only the address fields the user actually changed, so an
-        // untouched field is never written over. The backend logs the old/new values.
-        ...(updatedFormData.concern === 'Relocation' && canEditRelocationAddress ? changedAddressFields : {}),
+        // Relocation: send only the address fields the user actually changed, and only once
+        // the ticket is Resolved, so an untouched or still-pending field is never written
+        // over. The backend logs the old/new values.
+        ...(isRelocationResolved && canEditRelocationAddress ? changedAddressFields : {}),
 
         // Reset the on-site timers when the technician is reassigned so the new
         // technician starts a fresh visit (no inherited start/end time).
@@ -2354,7 +2368,15 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
               <div className="mt-4 space-y-4">
                 <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                   New customer address. Optional &mdash; leave unchanged if the address is the same.
+                  Saved to the customer record only when Support Status is <strong>Resolved</strong>.
                 </p>
+
+                {hasPendingAddressEdits && !isSupportStatusResolved && (
+                  <p className="text-xs" style={{ color: colorPalette?.primary || '#7c3aed' }}>
+                    Support Status is &ldquo;{formData.supportStatus || 'not set'}&rdquo;, so these
+                    address changes will not be saved yet. Set Support Status to Resolved to apply them.
+                  </p>
+                )}
 
                 <div>
                   <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'

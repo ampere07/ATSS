@@ -1,10 +1,77 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, ReceiptText, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
+import { useTransactionStore } from '../store/transactionStore';
+import { useTransactionRevertStore } from '../store/transactionRevertStore';
+import { useApplicationStore } from '../store/applicationStore';
+import { useJobOrderStore } from '../store/jobOrderStore';
+import { useServiceOrderStore } from '../store/serviceOrderStore';
+import { useWorkOrderStore } from '../store/workOrderStore';
 
 // Locked role IDs (1-8) use hardcoded allowedRoles; custom roles (9+) use permissions array
 const LOCKED_ROLE_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
+
+// ---------------------------------------------------------------------------
+// Notification badge counts
+//
+// Each badge counts the records in that section that still need action. The status
+// values below are the "unfinished" side of the buckets the section pages already
+// use, and are compared lowercased + trimmed. Anything not listed is treated as a
+// finished/terminal outcome and is not counted.
+// ---------------------------------------------------------------------------
+const UNFINISHED_STATUSES = {
+  // transactions.status — the same 'pending' test that drives TransactionList's approve flow
+  transaction: ['pending'],
+  // transaction_revert.status — 'done' and 'rejected' are terminal
+  revertRequest: ['pending'],
+  // applications.status — terminal: confirmed, cancelled, duplicate, no slot, no facility,
+  // and 'scheduled' (a booked visit is already actioned, so it is not counted).
+  // The store defaults a blank status to 'pending', so blanks are already covered.
+  application: ['pending', 'in progress', 'inprogress'],
+  // job_orders.onsite_status — terminal: done/completed/finish, failed, cancelled.
+  // '' is the Job Order page's "Empty" bucket, i.e. no onsite outcome recorded yet.
+  jobOrder: ['pending', 'in progress', 'inprogress', 'reschedule', ''],
+  // service_orders.support_status — terminal: resolved, failed, cancelled, closed
+  serviceOrder: ['pending', 'open', 'in progress', 'in-progress', 'for visit', 'for-visit', 'for confirmation'],
+  // work_orders.work_status — terminal: completed/done, cancelled, failed, and 'scheduled'
+  // (already actioned, so not counted). A blank status renders as 'Scheduled' in the Work
+  // Order table, so blanks are excluded too — otherwise a row shown as Scheduled would count.
+  workOrder: ['pending', 'in progress', 'inprogress'],
+};
+
+// Count rows whose status field is one of the unfinished values. Tolerates a missing or
+// not-yet-loaded array so a section that failed to load simply reports 0 (badge hidden).
+const countUnfinished = <T,>(rows: T[] | undefined | null, pickStatus: (row: T) => unknown, unfinished: string[]): number => {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce<number>((total, row) => {
+    const value = String(pickStatus(row) ?? '').toLowerCase().trim();
+    return unfinished.includes(value) ? total + 1 : total;
+  }, 0);
+};
+
+// Role test shared by the menu filter and the badge data gate, so both agree on which
+// sections a user can reach. Extracted from filterMenuByRole — same logic, one copy.
+const hasRoleAccess = (allowedRoles: string[] | undefined, userRole?: string, roleId?: number | string | null): boolean => {
+  if (!allowedRoles || allowedRoles.length === 0) return true;
+
+  const normalizedUserRole = userRole ? userRole.toLowerCase().trim() : '';
+  const isTechnician = normalizedUserRole === 'technician' || String(roleId) === '2';
+  const isInventoryStaff = normalizedUserRole === 'inventorystaff' || String(roleId) === '5';
+
+  return allowedRoles.some(role => {
+    const normalizedRole = role.toLowerCase().trim();
+    if (normalizedRole === 'technician') return isTechnician;
+    if (normalizedRole === 'administrator') return normalizedUserRole === 'administrator' || String(roleId) === '1' || String(roleId) === '7';
+    if (normalizedRole === 'admin-only') return normalizedUserRole === 'administrator' || String(roleId) === '1';
+    if (normalizedRole === 'superadmin') return normalizedUserRole === 'superadmin' || String(roleId) === '7';
+    if (normalizedRole === 'headtech') return normalizedUserRole === 'headtech' || String(roleId) === '8';
+    if (normalizedRole === 'osp') return normalizedUserRole === 'Osp'.toLowerCase() || String(roleId) === '6';
+    if (normalizedRole === 'agent') return normalizedUserRole === 'agent' || String(roleId) === '4';
+    if (normalizedRole === 'inventorystaff') return isInventoryStaff;
+    return normalizedRole === normalizedUserRole;
+  });
+};
 
 interface SidebarProps {
   activeSection: string;
@@ -261,6 +328,67 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isCustomRole, numericRoleId]);
 
+  // ---- Notification badges -------------------------------------------------
+  // Read straight from the existing section stores. Zustand re-renders the sidebar when any
+  // of these arrays change, so a badge follows the section's own fetches, polling and
+  // fetchUpdates automatically — no separate data source and no duplicate requests.
+  // All of these hooks sit above the early return below so hook order stays stable.
+  const transactions = useTransactionStore(state => state.transactions);
+  const fetchTransactions = useTransactionStore(state => state.fetchTransactions);
+  const revertRequests = useTransactionRevertStore(state => state.revertRequests);
+  const fetchRevertRequests = useTransactionRevertStore(state => state.fetchRevertRequests);
+  const applications = useApplicationStore(state => state.applications);
+  const fetchApplications = useApplicationStore(state => state.fetchApplications);
+  const jobOrders = useJobOrderStore(state => state.jobOrders);
+  const fetchJobOrders = useJobOrderStore(state => state.fetchJobOrders);
+  const serviceOrders = useServiceOrderStore(state => state.serviceOrders);
+  const fetchServiceOrders = useServiceOrderStore(state => state.fetchServiceOrders);
+  const workOrders = useWorkOrderStore(state => state.workOrders);
+  const fetchWorkOrders = useWorkOrderStore(state => state.fetchWorkOrders);
+
+  // Only pull a section's data if this user can actually open it — keeps a technician from
+  // firing (and being rejected for) the billing endpoints. Custom roles are allowed through
+  // because their permission list may still be loading; a rejected call is caught below.
+  const canSeeSection = useCallback((allowedRoles: string[]) => {
+    if (isCustomRole) return true;
+    return hasRoleAccess(allowedRoles, userRole, roleId);
+  }, [isCustomRole, userRole, roleId]);
+
+  useEffect(() => {
+    if (userRole?.toLowerCase() === 'customer') return;
+
+    // Each store guards its own cache, so these are no-ops once a section has loaded.
+    // Errors are swallowed here and left in the store's error state: a section that cannot
+    // load reports 0 and its badge stays hidden rather than breaking the sidebar.
+    const load = (allowedRoles: string[], run: () => Promise<unknown>) => {
+      if (!canSeeSection(allowedRoles)) return;
+      Promise.resolve(run()).catch(() => { /* store records its own error */ });
+    };
+
+    load(['administrator'], () => fetchTransactions());
+    load(['superadmin', 'administrator'], () => fetchRevertRequests());
+    load(['administrator', 'headtech'], () => fetchApplications());
+    load(['administrator', 'technician', 'agent', 'headtech'], () => fetchJobOrders());
+    load(['administrator', 'technician', 'headtech'], () => fetchServiceOrders());
+    load(['administrator', 'agent', 'Osp', 'headtech'], () => fetchWorkOrders(1, 1000, '', ''));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userRole, roleId, canSeeSection]);
+
+  // Counts keyed by menu item id, recomputed only when the underlying arrays change.
+  const badgeCounts = useMemo<Record<string, number>>(() => ({
+    'transaction-list': countUnfinished(transactions, (row: any) => row?.status, UNFINISHED_STATUSES.transaction),
+    'transactions-revert': countUnfinished(revertRequests, (row: any) => row?.status, UNFINISHED_STATUSES.revertRequest),
+    'application-management': countUnfinished(applications, (row: any) => row?.status, UNFINISHED_STATUSES.application),
+    'job-order': countUnfinished(jobOrders, (row: any) => row?.Onsite_Status ?? row?.onsite_status, UNFINISHED_STATUSES.jobOrder),
+    'service-order': countUnfinished(serviceOrders, (row: any) => row?.supportStatus ?? row?.support_status, UNFINISHED_STATUSES.serviceOrder),
+    'work-order': countUnfinished(workOrders, (row: any) => row?.work_status, UNFINISHED_STATUSES.workOrder),
+  }), [transactions, revertRequests, applications, jobOrders, serviceOrders, workOrders]);
+
+  // A collapsed parent group (e.g. Billing) surfaces the total of its children so counts
+  // hidden inside it are still visible.
+  const groupBadgeCount = (item: MenuItem): number =>
+    (item.children || []).reduce((total, child) => total + (badgeCounts[child.id] || 0) + groupBadgeCount(child), 0);
+
   if (userRole?.toLowerCase() === 'customer') return null;
 
   // Get permissions: from prop first, fallback to localStorage authData, then fetched
@@ -302,8 +430,6 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   // Filter for locked roles: use the hardcoded allowedRoles
   const filterMenuByRole = (items: MenuItem[]): MenuItem[] => {
     const normalizedUserRole = userRole ? userRole.toLowerCase().trim() : '';
-    const isTechnician = normalizedUserRole === 'technician' || String(roleId) === '2';
-    const isInventoryStaff = normalizedUserRole === 'inventorystaff' || String(roleId) === '5';
 
     if (normalizedUserRole === 'customer' || String(roleId) === '3') return [];
 
@@ -314,18 +440,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
       if (item.id === 'organization' && effectiveOrgId && effectiveOrgId !== '0' && effectiveOrgId !== 0) return false;
       if (!item.allowedRoles || item.allowedRoles.length === 0) return true;
 
-      const hasAccess = item.allowedRoles.some(role => {
-        const normalizedRole = role.toLowerCase().trim();
-        if (normalizedRole === 'technician') return isTechnician;
-        if (normalizedRole === 'administrator') return normalizedUserRole === 'administrator' || String(roleId) === '1' || String(roleId) === '7';
-        if (normalizedRole === 'admin-only') return normalizedUserRole === 'administrator' || String(roleId) === '1';
-        if (normalizedRole === 'superadmin') return normalizedUserRole === 'superadmin' || String(roleId) === '7';
-        if (normalizedRole === 'headtech') return normalizedUserRole === 'headtech' || String(roleId) === '8';
-        if (normalizedRole === 'osp') return normalizedUserRole === 'Osp'.toLowerCase() || String(roleId) === '6';
-        if (normalizedRole === 'agent') return normalizedUserRole === 'agent' || String(roleId) === '4';
-        if (normalizedRole === 'inventorystaff') return isInventoryStaff;
-        return normalizedRole === normalizedUserRole;
-      });
+      // Same predicate the badge data gate uses, so menu visibility and badge data agree.
+      const hasAccess = hasRoleAccess(item.allowedRoles, userRole, roleId);
 
       if (hasAccess && item.children) {
         item.children = filterMenuByRole(item.children);
@@ -359,6 +475,21 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   };
 
   const collapsedItems = flattenForCollapsed(filteredMenuItems);
+
+  // Notification badge — hidden entirely at 0, capped at 99+, tinted with the active
+  // palette colour so it matches the rest of the sidebar.
+  const renderBadge = (count: number) => {
+    if (!count || count < 1) return null;
+    return (
+      <span
+        className="ml-2 min-w-[20px] px-1.5 rounded-full text-[10px] font-bold leading-[18px] text-center text-white"
+        style={{ backgroundColor: colorPalette?.primary || '#7c3aed' }}
+        title={`${count} pending`}
+      >
+        {count > 99 ? '99+' : count}
+      </span>
+    );
+  };
 
   // Shared active style
   const activeStyle = {
@@ -404,6 +535,16 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
                     className={`h-5 w-5 ${isActive ? '' : isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}
                     style={isActive ? { color: colorPalette?.primary || '#7c3aed' } : {}}
                   />
+
+                  {/* Icon-only mode: badge overlays the top-right of the icon */}
+                  {(badgeCounts[item.id] || 0) > 0 && (
+                    <span
+                      className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full text-[9px] font-bold text-white flex items-center justify-center"
+                      style={{ backgroundColor: colorPalette?.primary || '#7c3aed' }}
+                    >
+                      {badgeCounts[item.id] > 99 ? '99+' : badgeCounts[item.id]}
+                    </span>
+                  )}
                 </button>
 
                 {/* Floating tooltip */}
@@ -481,13 +622,17 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
             }`}
           style={isCurrentItemActive ? activeStyle : {}}
         >
-          <div className="flex items-center">
-            <IconComponent className={`h-5 w-5 mr-3 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`} />
-            <span>{item.label}</span>
+          <div className="flex items-center min-w-0">
+            <IconComponent className={`h-5 w-5 mr-3 flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`} />
+            <span className="truncate">{item.label}</span>
+            {/* Leaf items show their own count; a collapsed group shows its children's total */}
+            {renderBadge(hasChildren
+              ? (isExpanded ? 0 : groupBadgeCount(item))
+              : (badgeCounts[item.id] || 0))}
           </div>
           {hasChildren && (
             <ChevronRight
-              className={`h-4 w-4 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'} transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+              className={`h-4 w-4 flex-shrink-0 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'} transition-transform ${isExpanded ? 'rotate-90' : ''}`}
             />
           )}
         </button>

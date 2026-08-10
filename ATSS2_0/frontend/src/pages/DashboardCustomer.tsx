@@ -150,6 +150,22 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         };
     }, [fetchCustomerData, customerDetail?.billingAccount?.accountNo]);
 
+    // Derived here, above the loading early-return below, so the Pay Now sync hook that
+    // depends on them keeps a fixed position in the hook order (react-hooks/rules-of-hooks).
+    const balance = customerDetail?.billingAccount?.accountBalance || 0;
+
+    // An outstanding (positive) balance must be settled in full, so Pay Now is pinned to the
+    // balance and locked. At zero or on a credit balance the customer chooses the amount.
+    const isBalancePositive = balance > 0;
+
+    // Keep Pay Now aligned with the balance whenever it changes — first load, a manual
+    // refresh, or a live Pusher balance update — so the locked field is never stale.
+    useEffect(() => {
+        if (isBalancePositive) {
+            setPaymentAmount(balance);
+        }
+    }, [balance, isBalancePositive]);
+
     if (isLoading && !customerDetail) return <div className="p-8 flex justify-center bg-gray-50 min-h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div></div>;
 
     const getStatusColor = (status: string) => {
@@ -167,7 +183,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     const planName = customerDetail?.desiredPlan || 'No Plan';
     const address = customerDetail?.address || 'No Address';
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
-    const balance = customerDetail?.billingAccount?.accountBalance || 0;
+    // balance / isBalancePositive are derived above the early-return further up this component.
 
     // Due Date: read from the latest invoice's due_date (not recalculated from billingDay)
     let dueDateString = 'Upon Receipt';
@@ -489,7 +505,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                                         type="text"
                                         inputMode="decimal"
                                         value={paymentAmount || ''}
+                                        readOnly={isBalancePositive}
                                         onChange={(e) => {
+                                            // Locked to the outstanding balance; ignore any edit attempt.
+                                            if (isBalancePositive) return;
+
                                             const value = e.target.value;
                                             if (value === '' || /^\d*\.?\d*$/.test(value)) {
                                                 const newAmount = value === '' ? 0 : parseFloat(value) || 0;
@@ -506,12 +526,12 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                                         }}
                                         placeholder="0.00"
                                         className={`w-full px-4 py-3 rounded text-lg font-bold border ${paymentAmount > 0 && (paymentAmount < balance || paymentAmount < 1) ? 'border-red-500 ring-red-500' : 'border-gray-300'
-                                            } text-gray-900 focus:outline-none focus:ring-2`}
+                                            } ${isBalancePositive ? 'bg-gray-100 text-gray-600 cursor-not-allowed' : 'text-gray-900'} focus:outline-none focus:ring-2`}
                                         style={{ '--tw-ring-color': paymentAmount > 0 && (paymentAmount < balance || paymentAmount < 1) ? '#ef4444' : (colorPalette?.primary || '#0f172a') } as React.CSSProperties}
                                     />
                                     <div className="text-sm text-right mt-1 text-gray-500">
-                                        {balance > 0 ? (
-                                            <span>Outstanding: ₱{balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</span>
+                                        {isBalancePositive ? (
+                                            <span>Outstanding: ₱{balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })} &mdash; full amount required</span>
                                         ) : (
                                             <span>Minimum: ₱1.00</span>
                                         )}

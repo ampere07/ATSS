@@ -145,6 +145,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const address = customerDetail?.address || 'No Address';
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
     const balance = Number(customerDetail?.billingAccount?.accountBalance || 0);
+
+    // An outstanding (positive) balance must be settled in full, so Pay Now is pinned to the
+    // balance and locked. At zero or on a credit balance the customer chooses the amount.
+    const isBalancePositive = balance > 0;
     const usageType = customerDetail?.technicalDetails?.usageType || 'N/A';
     const emailAddress = customerDetail?.emailAddress || user?.email || 'N/A';
 
@@ -287,6 +291,15 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         const formatted = Math.abs(amount).toFixed(0).replace(/\d(?=(\d{3})+$)/g, '$&,');
         return `₱${isNegative ? '-' : ''}${formatted}`;
     }, []);
+
+    // Keep Pay Now aligned with the balance whenever it changes — first load, a pull-to-refresh,
+    // or a live balance update — so the locked field is never stale. Declared above the loading
+    // early-return below to keep a fixed position in the hook order (rules-of-hooks).
+    useEffect(() => {
+        if (isBalancePositive) {
+            setPaymentAmount(balance);
+        }
+    }, [balance, isBalancePositive]);
 
     if (contextLoading && !customerDetail) return (
         <View style={styles.loadingContainer}>
@@ -754,7 +767,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 <TextInput
                                     keyboardType="decimal-pad"
                                     value={paymentAmount !== undefined && paymentAmount !== null ? paymentAmount.toString() : ''}
+                                    editable={!isBalancePositive}
                                     onChangeText={(value) => {
+                                        // Locked to the outstanding balance; ignore any edit attempt.
+                                        if (isBalancePositive) return;
+
                                         if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
                                             const amount = value === '' || value === '-' ? 0 : parseFloat(value) || 0;
                                             setPaymentAmount(amount);
@@ -767,11 +784,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                         }
                                     }}
                                     placeholder="0.00"
-                                    style={styles.inputField}
+                                    style={[styles.inputField, isBalancePositive && styles.inputFieldReadOnly]}
                                 />
                                 <View style={styles.inputHint}>
                                     <Text style={styles.inputHintText}>
-                                        {balance > 0 ? `Outstanding: ${formatCurrency(balance)}` : 'Minimum: ₱1.00'}
+                                        {isBalancePositive ? `Outstanding: ${formatCurrency(balance)} — full amount required` : 'Minimum: ₱1.00'}
                                     </Text>
                                 </View>
                             </View>
@@ -1055,6 +1072,7 @@ const styles = StyleSheet.create({
     inputWrap: { marginBottom: 32 },
     inputLabel: { fontWeight: '500', marginBottom: 8, color: '#374151', fontSize: 14 },
     inputField: { width: '100%', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 8, fontSize: 16, borderWidth: 1, borderColor: '#d1d5db', color: '#111827', backgroundColor: '#ffffff' },
+    inputFieldReadOnly: { backgroundColor: '#f3f4f6', color: '#4b5563' },
     inputHint: { flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 },
     inputHintText: { fontSize: 12, color: '#6b7280' },
     primaryBtn: { paddingVertical: 12, borderRadius: 50, width: '50%', alignSelf: 'center', alignItems: 'center' },
