@@ -7,11 +7,25 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
 use App\Services\ManualRadiusOperationsService;
 use App\Models\RadiusConfig;
+use App\Support\RadiusRetryPolicy;
 use Carbon\Carbon;
 
+/**
+ * Retry queue for RADIUS operations that could not be applied immediately.
+ *
+ * Each queued operation is attempted up to the configured maximum, waiting a
+ * progressively longer time after each failure (see config/radius.php). The
+ * schedule and the attempt counter live in the database row, not in memory, so
+ * the retry sequence survives an application or worker restart. A retry updates
+ * the existing row rather than inserting a new one, so retrying never duplicates
+ * a job.
+ */
 class RadiusQueueService
 {
     private $logName = 'Radius_Queue';
+
+    /** Statuses that mean a queued operation is still on its way through. */
+    private const ACTIVE_STATUSES = ['pending', 'processing'];
 
     /**
      * Queue a failed RADIUS operation for retry
@@ -20,7 +34,27 @@ class RadiusQueueService
     {
         try {
             $attempt = $data['attempts'] ?? 0;
-            $maxAttempts = $data['max_attempts'] ?? 5;
+            $maxAttempts = $data['max_attempts'] ?? RadiusRetryPolicy::maxAttempts();
+
+            // An identical operation already waiting means this one would be a
+            // duplicate: two rows for the same job would both retry, and the
+            // operation would be applied twice.
+            if (RadiusRetryPolicy::preventsDuplicates()) {
+                $existingId = self::findActiveDuplicate($data);
+
+                if ($existingId !== null) {
+                    self::writeStaticLog(sprintf(
+                        '[SKIPPED] Duplicate suppressed | Existing Job #%s still active | Operation: %s | Source: %s#%s | Account: %s',
+                        $existingId,
+                        $data['operation'],
+                        $data['source_type'],
+                        $data['source_id'],
+                        $data['account_no'] ?? 'N/A'
+                    ));
+
+                    return (int) $existingId;
+                }
+            }
 
             $insertData = [
                 'source_type'     => $data['source_type'],
@@ -46,19 +80,19 @@ class RadiusQueueService
             $success = DB::table('radius_operation_queue')->insert($insertData);
 
             if ($success) {
-                // Static method can't use $this->writeLog, so write directly
-                $timestamp = Carbon::now()->format('Y-m-d H:i:s');
-                $logDir = storage_path('logs/radiusqueue');
-                $logFile = $logDir . '/radius_queue.log';
-                if (!file_exists($logDir)) {
-                    mkdir($logDir, 0755, true);
-                }
-                $msg = "[{$timestamp}] [Radius_Queue] [QUEUED] Operation: {$data['operation']} | Source: {$data['source_type']}#{$data['source_id']} | Account: " . ($data['account_no'] ?? 'N/A');
-                file_put_contents($logFile, $msg . PHP_EOL, FILE_APPEND);
+                self::writeStaticLog(sprintf(
+                    '[QUEUED] Operation: %s | Source: %s#%s | Account: %s | Attempt 1 of %d will run now, then retry after %s',
+                    $data['operation'],
+                    $data['source_type'],
+                    $data['source_id'],
+                    $data['account_no'] ?? 'N/A',
+                    RadiusRetryPolicy::resolveMaxAttempts($maxAttempts),
+                    RadiusRetryPolicy::describeSchedule()
+                ));
 
                 return 1; // Return a truthy integer to satisfy callers expecting an ID
             }
-            
+
             return null;
         } catch (\Exception $e) {
             Log::channel('radiusrelated')->error('[RADIUS QUEUE] Failed to queue operation: ' . $e->getMessage());
@@ -67,30 +101,101 @@ class RadiusQueueService
     }
 
     /**
+     * The id of an operation that is already queued for the same target, or null.
+     *
+     * Matched on the job's identity — the source that raised it, the operation
+     * and the account — rather than the full parameter set, because a second
+     * request to disconnect the same account is the same job however its
+     * parameters were spelled.
+     */
+    private static function findActiveDuplicate(array $data): ?int
+    {
+        $query = DB::table('radius_operation_queue')
+            ->where('source_type', $data['source_type'])
+            ->where('source_id', $data['source_id'])
+            ->where('operation', $data['operation'])
+            ->whereIn('status', self::ACTIVE_STATUSES);
+
+        if (!empty($data['account_no'])) {
+            $query->where('account_no', $data['account_no']);
+        }
+
+        $existing = $query->orderBy('id')->first();
+
+        if (!$existing) {
+            return null;
+        }
+
+        // Tables created without an auto-increment id report no usable id; the
+        // duplicate is still real, so report it as suppressed rather than
+        // inserting a second copy.
+        return isset($existing->id) ? (int) $existing->id : 0;
+    }
+
+    /**
+     * Append a line to the queue log from a static context.
+     */
+    private static function writeStaticLog(string $message): void
+    {
+        $timestamp = Carbon::now()->format('Y-m-d H:i:s');
+        $logDir    = storage_path('logs/radiusqueue');
+        $logFile   = $logDir . '/radius_queue.log';
+
+        if (!file_exists($logDir)) {
+            mkdir($logDir, 0755, true);
+        }
+
+        file_put_contents($logFile, "[{$timestamp}] [Radius_Queue] {$message}" . PHP_EOL, FILE_APPEND);
+    }
+
+    /**
      * Process all pending items in the queue
      * Called by the cron command
      */
-    public function processQueue(int $batchSize = 20): array
+    public function processQueue(?int $batchSize = null): array
     {
+        $batchSize = $batchSize ?? RadiusRetryPolicy::batchSize();
+
         $results = [
             'processed' => 0,
             'succeeded' => 0,
             'failed'    => 0,
             'skipped'   => 0,
+            'reclaimed' => 0,
         ];
+
+        $maxAttempts = RadiusRetryPolicy::maxAttempts();
 
         $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
         $this->writeLog("║         RADIUS QUEUE PROCESSING START                          ║");
         $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
         $startTime = Carbon::now();
         $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
+        $this->writeLog("Retry Policy: up to {$maxAttempts} attempts | delays: " . RadiusRetryPolicy::describeSchedule());
         $this->writeLog("");
 
-        // Fetch pending items that are due for retry
+        // Recover anything a previous worker was holding when it stopped, before
+        // deciding what is due — otherwise those jobs would never be seen again.
+        $results['reclaimed'] = $this->reclaimStaleProcessing();
+
+        // Fetch pending items that are due for retry.
+        //
+        // A row's own max_attempts wins when it holds a usable value, so a job
+        // deliberately queued with a different allowance keeps it. The configured
+        // maximum fills in only where the row has none — rows written by a caller
+        // that set no limit, or by a table built without that default. Rows still
+        // carrying the older, lower allowance are raised to the current one by
+        // the migration that accompanies this policy.
+        $effectiveMax = 'COALESCE(NULLIF(max_attempts, 0), ' . (int) $maxAttempts . ')';
+
         $pendingItems = DB::table('radius_operation_queue')
             ->where('status', 'pending')
-            ->where('next_retry_at', '<=', Carbon::now())
-            ->where('attempts', '<', DB::raw('max_attempts'))
+            ->where(function ($q) {
+                // A row that has never been scheduled is due immediately.
+                $q->whereNull('next_retry_at')
+                  ->orWhere('next_retry_at', '<=', Carbon::now());
+            })
+            ->whereRaw("attempts < {$effectiveMax}")
             ->orderBy('next_retry_at', 'asc')
             ->limit($batchSize)
             ->get();
@@ -111,9 +216,12 @@ class RadiusQueueService
             $counter++;
             $results['processed']++;
 
+            $itemMax     = RadiusRetryPolicy::resolveMaxAttempts(isset($item->max_attempts) ? (int) $item->max_attempts : null);
+            $thisAttempt = (int) $item->attempts + 1;
+
             $this->writeLog("[{$counter}/{$totalCount}] ══════════════════════════════════════════════");
-            $this->writeLog("  [ITEM] ID: {$item->id} | Operation: {$item->operation} | Account: " . ($item->account_no ?? 'N/A'));
-            $this->writeLog("  [ITEM] Source: {$item->source_type}#{$item->source_id} | Attempt: " . ($item->attempts + 1) . "/{$item->max_attempts}");
+            $this->writeLog("  [ITEM] Job #{$item->id} | Operation: {$item->operation} | Account: " . ($item->account_no ?? 'N/A'));
+            $this->writeLog("  [ITEM] Source: {$item->source_type}#{$item->source_id} | Attempt: {$thisAttempt}/{$itemMax}");
 
             // Mark as processing
             DB::table('radius_operation_queue')
@@ -131,17 +239,20 @@ class RadiusQueueService
                 $success = $this->executeOperation($item->operation, $params, $errorMessage);
 
                 if ($success) {
-                    // Mark as success
+                    // Success is terminal: the row leaves 'pending', so the queue
+                    // query can never pick it up again and no further retry is
+                    // scheduled. The attempt counter records what it took.
                     DB::table('radius_operation_queue')
                         ->where('id', $item->id)
                         ->update([
                             'status'       => 'success',
+                            'attempts'     => $thisAttempt,
                             'completed_at' => now(),
                             'updated_at'   => now(),
                         ]);
 
                     $results['succeeded']++;
-                    $this->writeLog("  [RESULT] ✓ SUCCESS");
+                    $this->writeLog("  [RESULT] ✓ SUCCESS on attempt {$thisAttempt}/{$itemMax} — no further retries");
                 } else {
                     $errorMsg = $errorMessage ?? 'Operation returned failure status';
                     $this->markRetryOrFailed($item, $errorMsg);
@@ -166,7 +277,8 @@ class RadiusQueueService
         $this->writeLog("Summary:");
         $this->writeLog("  • Total Processed: {$results['processed']}");
         $this->writeLog("  • Succeeded: {$results['succeeded']}");
-        $this->writeLog("  • Failed: {$results['failed']}");
+        $this->writeLog("  • Failed (retry scheduled or exhausted): {$results['failed']}");
+        $this->writeLog("  • Reclaimed from stopped worker: {$results['reclaimed']}");
         $this->writeLog("  • Duration: {$duration} second(s)");
         $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
         $this->writeLog("");
@@ -314,14 +426,22 @@ class RadiusQueueService
     }
 
     /**
-     * Mark item for retry or as permanently failed
+     * Record the outcome of a failed attempt: schedule the next one, or give up.
+     *
+     * The attempt counter and the scheduled time are both written to the row, so
+     * the retry sequence is held in the database rather than in the worker. A
+     * restart therefore resumes exactly where it left off, and because this
+     * UPDATEs the existing row it can never duplicate the job.
      */
     private function markRetryOrFailed(object $item, string $error): void
     {
-        $newAttempts = $item->attempts + 1;
+        $newAttempts  = (int) $item->attempts + 1;
+        $maxAttempts  = RadiusRetryPolicy::resolveMaxAttempts(isset($item->max_attempts) ? (int) $item->max_attempts : null);
+        $remaining    = RadiusRetryPolicy::attemptsRemaining($newAttempts, $maxAttempts);
 
-        if ($newAttempts >= $item->max_attempts) {
-            // Max attempts reached — mark as failed
+        if (RadiusRetryPolicy::isExhausted($newAttempts, $maxAttempts)) {
+            // Every allowed attempt has now failed. The job stays 'failed' and is
+            // never picked up again by the queue query.
             DB::table('radius_operation_queue')
                 ->where('id', $item->id)
                 ->update([
@@ -331,22 +451,99 @@ class RadiusQueueService
                     'updated_at' => now(),
                 ]);
 
-            $this->writeLog("  [RETRY] ✗ Item #{$item->id} permanently FAILED after {$newAttempts}/{$item->max_attempts} attempts");
-            $this->writeLog("  [RETRY] Last Error: {$error}");
-        } else {
-            // Schedule for next retry (timing controlled by cron frequency in Hestia)
+            $this->writeLog("  [RETRY] ✗ Job #{$item->id} permanently FAILED");
+            $this->writeLog("  [RETRY] Attempt: {$newAttempts}/{$maxAttempts} | Attempts Remaining: 0");
+            $this->writeLog("  [RETRY] Failure Reason: {$error}");
+            $this->writeLog("  [RETRY] No further retries will be scheduled.");
+
+            Log::channel('radiusrelated')->error('[RADIUS QUEUE] Job permanently failed', [
+                'job_id'             => $item->id,
+                'operation'          => $item->operation,
+                'account_no'         => $item->account_no ?? null,
+                'attempt'            => $newAttempts,
+                'max_attempts'       => $maxAttempts,
+                'attempts_remaining' => 0,
+                'failure_reason'     => $error,
+            ]);
+
+            return;
+        }
+
+        // Wait progressively longer after each failure, so a server that is down
+        // is not hammered every minute.
+        $delayMinutes = RadiusRetryPolicy::delayMinutesAfter($newAttempts);
+        $nextRetryAt  = RadiusRetryPolicy::nextRetryAt($newAttempts);
+
+        DB::table('radius_operation_queue')
+            ->where('id', $item->id)
+            ->update([
+                'status'        => 'pending',
+                'attempts'      => $newAttempts,
+                'last_error'    => $error,
+                'next_retry_at' => $nextRetryAt,
+                'updated_at'    => now(),
+            ]);
+
+        $this->writeLog("  [RETRY] Job #{$item->id} scheduled for retry");
+        $this->writeLog("  [RETRY] Attempt: {$newAttempts}/{$maxAttempts} | Attempts Remaining: {$remaining}");
+        $this->writeLog("  [RETRY] Failure Reason: {$error}");
+        $this->writeLog("  [RETRY] Next Attempt: " . $nextRetryAt->format('Y-m-d H:i:s') . " (in {$delayMinutes} minute(s))");
+
+        Log::channel('radiusrelated')->warning('[RADIUS QUEUE] Attempt failed, retry scheduled', [
+            'job_id'             => $item->id,
+            'operation'          => $item->operation,
+            'account_no'         => $item->account_no ?? null,
+            'attempt'            => $newAttempts,
+            'max_attempts'       => $maxAttempts,
+            'attempts_remaining' => $remaining,
+            'failure_reason'     => $error,
+            'retry_delay_minutes' => $delayMinutes,
+            'next_retry_at'      => $nextRetryAt->format('Y-m-d H:i:s'),
+        ]);
+    }
+
+    /**
+     * Return jobs abandoned by a worker that stopped mid-item.
+     *
+     * A row is set to 'processing' before the operation runs. If the worker is
+     * killed at that moment nothing ever clears it, and without this the job
+     * would sit in 'processing' for ever. The attempt counter is deliberately
+     * left alone: the attempt never produced a result, so it does not consume
+     * one of the job's allowed tries.
+     */
+    private function reclaimStaleProcessing(): int
+    {
+        $cutoff = Carbon::now()->subMinutes(RadiusRetryPolicy::staleProcessingMinutes());
+
+        $stale = DB::table('radius_operation_queue')
+            ->where('status', 'processing')
+            ->where('updated_at', '<=', $cutoff)
+            ->get(['id', 'operation', 'account_no', 'attempts']);
+
+        if ($stale->isEmpty()) {
+            return 0;
+        }
+
+        foreach ($stale as $row) {
             DB::table('radius_operation_queue')
-                ->where('id', $item->id)
+                ->where('id', $row->id)
                 ->update([
                     'status'        => 'pending',
-                    'attempts'      => $newAttempts,
-                    'last_error'    => $error,
                     'next_retry_at' => Carbon::now(),
                     'updated_at'    => now(),
                 ]);
 
-            $this->writeLog("  [RETRY] Item #{$item->id} scheduled for retry (attempt {$newAttempts}/{$item->max_attempts})");
+            $this->writeLog("  [RECOVER] Job #{$row->id} was left processing by a stopped worker — returned to the queue (attempts still {$row->attempts})");
+
+            Log::channel('radiusrelated')->warning('[RADIUS QUEUE] Reclaimed stalled job', [
+                'job_id'     => $row->id,
+                'operation'  => $row->operation,
+                'account_no' => $row->account_no ?? null,
+                'attempt'    => $row->attempts,
+            ]);
         }
+
+        return $stale->count();
     }
 
     /**
