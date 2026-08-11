@@ -11,7 +11,7 @@ import { JobOrder } from '../types/jobOrder';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { techInOutService } from '../services/techInOutService';
 import TimeInOutModal from '../modals/TimeInOutModal';
-import { agentOwnsReferral, getOnsiteStatus, isActiveOnsiteStatus } from '../utils/agentReferral';
+import { agentOwnsReferral, isOnOrAfterAgentStartDate } from '../utils/agentReferral';
 
 
 const StatusText = React.memo(({ status, type }: { status?: string | null, type: 'onsite' | 'billing' }) => {
@@ -366,6 +366,15 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   const [userEmail, setUserEmail] = useState<string>('');
   const [userRoleId, setUserRoleId] = useState<number | null>(null);
   const [userFullName, setUserFullName] = useState<string>('');
+  /**
+   * True once the signed-in user has been read from storage.
+   *
+   * Storage is asynchronous here, so the first render has no identity. Without
+   * this gate the role-based filter below sees no role, treats the viewer as
+   * unrestricted, and paints every job order in the organisation for a moment
+   * before replacing it with the agent's own. Nothing is listed until it is set.
+   */
+  const [identityReady, setIdentityReady] = useState(false);
 
   // Debounce search input to avoid recomputing heavy filter on every keystroke
   useEffect(() => {
@@ -427,6 +436,12 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
           }
         } catch (error) { }
       }
+
+      // Set whether or not the read succeeded: a viewer whose identity cannot be
+      // determined is treated as having no role, which shows nothing rather than
+      // leaving the list stuck behind the gate for ever.
+      setIdentityReady(true);
+
       if (paletteResult.status === 'fulfilled') {
         setColorPalette(paletteResult.value);
       }
@@ -476,6 +491,10 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
 
   const filteredJobOrders = useMemo(() => {
+    // Nothing is listed until the signed-in user is known, so a restricted role
+    // never sees records it is not entitled to, even for a single frame.
+    if (!identityReady) return [];
+
     const lowerSearch = debouncedSearch.toLowerCase();
     return jobOrders.filter(jobOrder => {
       const fullName = getClientFullName(jobOrder).toLowerCase();
@@ -490,16 +509,22 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
         userRoleId === 1 || userRoleId === 7 || userRoleId === 8 ||
         userRole.toLowerCase() === 'superadmin' || userRole.toLowerCase() === 'administrator' || userRole.toLowerCase() === 'headtech';
 
-      // Role-based filtering: Agents (role_id 4) only see their own referrals
+      // Role-based filtering: Agents (role_id 4) only see their own referrals.
+      //
+      // Agents see every referral they own, whatever stage it has reached — in
+      // progress, rescheduled, completed or failed — so the page is the full
+      // picture of their own work.
       if (!isSuperUser && (userRole.toLowerCase() === 'agent' || userRoleId === 4)) {
         const referredBy = jobOrder.Referred_By || jobOrder.referred_by || '';
-        const matchesAgent = agentOwnsReferral(referredBy, userFullName, userEmail);
 
-        if (!matchesAgent) return false;
+        // An agent with neither name nor email must see nothing, never
+        // everyone's job orders.
+        if (!userFullName && !userEmail) return false;
 
-        // Agents only see active job orders here (in progress / reschedule).
-        // Completed ("done") ones are shown on the Agent History page instead.
-        if (!isActiveOnsiteStatus(getOnsiteStatus(jobOrder))) return false;
+        if (!agentOwnsReferral(referredBy, userFullName, userEmail)) return false;
+
+        // Agents see recent work only, from the configured start date onwards.
+        if (!isOnOrAfterAgentStartDate(jobOrder)) return false;
       }
 
       // Hide job orders with onsite status "done", "completed", or "failed" after 1 day
@@ -565,7 +590,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
       return true;
     });
-  }, [jobOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, getClientFullName, getClientFullAddress]);
+  }, [jobOrders, debouncedSearch, statusFilter, identityReady, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, getClientFullName, getClientFullAddress]);
 
   const sortedJobOrders = useMemo(() => {
     return [...filteredJobOrders].sort((a, b) => {

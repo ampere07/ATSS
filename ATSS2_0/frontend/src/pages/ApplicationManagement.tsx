@@ -49,7 +49,7 @@ const allColumns = [
 
   { key: 'desiredPlan', label: 'Desired Plan', width: 'min-w-36' },
   { key: 'promo', label: 'Promo', width: 'min-w-28' },
-  { key: 'referredBy', label: 'Referred By', width: 'min-w-32' },                                                                                 
+  { key: 'referredBy', label: 'Referred By', width: 'min-w-32' },
   { key: 'createDate', label: 'Create Date', width: 'min-w-32' },
   { key: 'createTime', label: 'Create Time', width: 'min-w-28' }
 ];
@@ -1409,8 +1409,8 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
                   <button
                     onClick={() => setMobileViewMode('sidebar')}
                     className={`md:hidden p-2 rounded-lg border transition-colors flex items-center justify-center flex-shrink-0 ${isDarkMode
-                        ? 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
-                        : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                      ? 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700'
+                      : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
                       }`}
                     title="Back to Filters"
                   >

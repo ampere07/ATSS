@@ -77,6 +77,7 @@ import TeamAgent from './teamAgent';
 import Roles from './roles';
 import Commission from './Commission';
 import AgentPayout from './AgentPayout';
+import AgentInvoice from './AgentInvoice';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { roleService } from '../services/userService';
 
@@ -377,6 +378,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <Commission />;
             case 'agent-payout':
                 return <AgentPayout />;
+            case 'agent-invoices':
+                return <AgentInvoice />;
             // case 'application-visit':
             //     return <ApplicationVisit />;
             case 'location-list':

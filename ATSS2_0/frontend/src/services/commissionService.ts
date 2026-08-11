@@ -58,8 +58,15 @@ export interface AgentCommissionHistoryResponse {
     message?: string;
     data: any[];
     total?: number;
-    /** Commission bucket of the agent's balance. */
+    /** The agent's spendable balance, where a claimed achievement reward lands. */
     balance?: number;
+    /**
+     * Commission earned from approved job orders — agent_balance.commission_value.
+     *
+     * Not to be confused with agent_balance.commission, which is the RATE one
+     * referral pays and is a setting rather than money in hand.
+     */
+    commission_value?: number;
     incentives?: number;
     bonus?: number;
     achievement?: number;
@@ -104,7 +111,9 @@ export const agentPortalService = {
     },
 
     // Claim an onboard milestone. The reward amount is re-derived server side.
-    claimAchievement: async (payload: { agent_id: number; milestone: number }): Promise<AgentClaimResponse> => {
+    // `type` names the tier being claimed ('weekly' / 'monthly'); the milestone
+    // is sent alongside it so an older server can still resolve the tier.
+    claimAchievement: async (payload: { agent_id: number; type?: string; milestone: number }): Promise<AgentClaimResponse> => {
         const response = await apiClient.post<AgentClaimResponse>('/commissions/achievements', payload);
         return response.data;
     },

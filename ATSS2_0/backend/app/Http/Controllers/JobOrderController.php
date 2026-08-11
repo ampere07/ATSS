@@ -1307,7 +1307,35 @@ class JobOrderController extends Controller
                 ]);
             }
 
+            // Settle the referring agent: mark the job order Paid, credit the
+            // commission, and record the rates it was settled at so a later
+            // change to either setting cannot restate it.
+            //
+            // Inside the transaction deliberately — if anything after this
+            // fails, the credit rolls back with the approval rather than
+            // leaving an agent paid for a job order that was never approved.
+            // A job order already carrying agent_paid_at is left alone, so
+            // approving twice cannot pay twice.
+            $agentPayment = app(\App\Services\JobOrderAgentPaymentService::class)
+                ->settle($jobOrder, $actionUserEmail);
+
             DB::commit();
+
+            if ($agentPayment['paid']) {
+                \Log::info('Job Order Approval - agent settled', [
+                    'job_order_id'    => $id,
+                    'agent_id'        => $agentPayment['agent_id'],
+                    'commission'      => $agentPayment['commission'],
+                    'incentive_value' => $agentPayment['incentive_value'],
+                ]);
+            } elseif ($agentPayment['reason'] !== '') {
+                // Not an error: a job order with no identifiable referring
+                // agent is still a valid approval.
+                \Log::info('Job Order Approval - agent not settled', [
+                    'job_order_id' => $id,
+                    'reason'       => $agentPayment['reason'],
+                ]);
+            }
 
             // Create Activity Log using helper
             ActivityLog::log(

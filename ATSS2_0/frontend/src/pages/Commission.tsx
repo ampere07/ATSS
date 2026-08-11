@@ -12,6 +12,7 @@ import { useAgentStore } from '../store/agentStore';
 import ModalUITemplate from '../modals/ui-modal/ModalUITemplate';
 import { Agent } from '../types/api';
 import { getStoredAgentIdentity } from '../utils/agentReferral';
+import apiClient from '../config/api';
 
 interface ColumnDefinition {
     key: string;
@@ -34,7 +35,11 @@ const payoutColumns: ColumnDefinition[] = [
     { key: 'ref_number', label: 'Ref Number', minWidth: 150 },
     { key: 'total_amount', label: 'Total Amount', minWidth: 150 },
     { key: 'commission_id_list', label: 'Job Orders', minWidth: 200 },
-    { key: 'created_by', label: 'Processed By', minWidth: 150 },
+    // Who raised the record, and who signed it off. Paired deliberately, the
+    // same way the Transaction List shows them.
+    { key: 'created_by', label: 'Created By', minWidth: 180 },
+    { key: 'status', label: 'Status', minWidth: 120 },
+    { key: 'approved_by', label: 'Approved By', minWidth: 180 },
 ];
 
 const incentivesColumns: ColumnDefinition[] = [
@@ -42,8 +47,34 @@ const incentivesColumns: ColumnDefinition[] = [
     { key: 'ref_number', label: 'Ref Number', minWidth: 150 },
     { key: 'type', label: 'Type', minWidth: 120 },
     { key: 'total_amount', label: 'Total Amount', minWidth: 150 },
-    { key: 'created_by', label: 'Processed By', minWidth: 150 },
+    { key: 'created_by', label: 'Created By', minWidth: 180 },
+    { key: 'status', label: 'Status', minWidth: 120 },
+    { key: 'approved_by', label: 'Approved By', minWidth: 180 },
 ];
+
+/**
+ * Reconcile a saved column order with the columns that exist today.
+ *
+ * The order each user arranges is remembered in their browser, so a column
+ * added later would never appear for anyone who has already used the page.
+ * Keys that no longer exist are dropped and new ones appended, which keeps a
+ * user's arrangement intact while still surfacing new columns.
+ */
+const mergeColumnOrder = (saved: string | null, columns: ColumnDefinition[]): string[] => {
+    const valid = columns.map(c => c.key);
+    if (!saved) return valid;
+
+    try {
+        const parsed = JSON.parse(saved);
+        if (!Array.isArray(parsed)) return valid;
+
+        const merged = parsed.filter((key: string) => valid.includes(key));
+        valid.forEach(key => { if (!merged.includes(key)) merged.push(key); });
+        return merged;
+    } catch {
+        return valid;
+    }
+};
 
 // Auto-awarded quota incentives (from the agent_incentive_history table / cron).
 const incentiveHistoryColumns: ColumnDefinition[] = [
@@ -193,6 +224,9 @@ const Commission: React.FC = () => {
 
     const [selectedRecord, setSelectedRecord] = useState<CommissionData | PayoutHistoryData | null>(null);
     const [showDetails, setShowDetails] = useState(false);
+    // True while an approve/reject request is in flight, so the buttons cannot be
+    // pressed twice and apply a payout more than once.
+    const [approvalPending, setApprovalPending] = useState(false);
 
     // Column Visibility State
     const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
@@ -220,39 +254,30 @@ const Commission: React.FC = () => {
     // every record to them, and payout creation stays an administrator action.
     const [isAgentView] = useState<boolean>(() => getStoredAgentIdentity().isAgent);
     const canManagePayouts = !isAgentView;
-    const [columnOrderEarnings, setColumnOrderEarnings] = useState<string[]>(() => {
-        const saved = localStorage.getItem('commissionEarningsColumnOrder');
-        return saved ? JSON.parse(saved) : earningsColumns.map(c => c.key);
-    });
-    const [columnOrderPayouts, setColumnOrderPayouts] = useState<string[]>(() => {
-        const saved = localStorage.getItem('commissionPayoutColumnOrder');
-        return saved ? JSON.parse(saved) : payoutColumns.map(c => c.key);
-    });
-    const [columnOrderIncentives, setColumnOrderIncentives] = useState<string[]>(() => {
+    const [columnOrderEarnings, setColumnOrderEarnings] = useState<string[]>(
+        () => mergeColumnOrder(localStorage.getItem('commissionEarningsColumnOrder'), earningsColumns)
+    );
+    const [columnOrderPayouts, setColumnOrderPayouts] = useState<string[]>(
+        () => mergeColumnOrder(localStorage.getItem('commissionPayoutColumnOrder'), payoutColumns)
+    );
+    const [columnOrderIncentives, setColumnOrderIncentives] = useState<string[]>(
         // New key (v2): the Incentives tab now lists agent_incentive_history rows,
         // so the old saved order (ref_number/type/total_amount) no longer applies.
-        const saved = localStorage.getItem('commissionIncentivesColumnOrderV2');
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            // Keep only known keys and append any new ones.
-            const valid = incentiveHistoryColumns.map(c => c.key);
-            const filtered = parsed.filter((k: string) => valid.includes(k));
-            valid.forEach(k => { if (!filtered.includes(k)) filtered.push(k); });
-            return filtered;
-        }
-        return incentiveHistoryColumns.map(c => c.key);
-    });
+        () => mergeColumnOrder(localStorage.getItem('commissionIncentivesColumnOrderV2'), incentiveHistoryColumns)
+    );
 
     const [columnOrderBonus, setColumnOrderBonus] = useState<string[]>(() => {
         const saved = localStorage.getItem('commissionBonusColumnOrder');
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            if (!parsed.includes('type')) {
-                parsed.splice(2, 0, 'type');
-            }
-            return parsed;
+        if (!saved) return incentivesColumns.map(c => c.key);
+
+        // Type was introduced after the order was first saved, and belongs next
+        // to the reference number rather than appended at the end.
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && !parsed.includes('type')) {
+            parsed.splice(2, 0, 'type');
         }
-        return incentivesColumns.map(c => c.key);
+
+        return mergeColumnOrder(JSON.stringify(parsed), incentivesColumns);
     });
 
     // Close dropdown on outside click
@@ -595,6 +620,45 @@ const Commission: React.FC = () => {
     const handleRowClick = (record: CommissionData | PayoutHistoryData) => {
         setSelectedRecord(record);
         setShowDetails(true);
+    };
+
+    /**
+     * Approve or reject a pending payout.
+     *
+     * The approver is never sent from here — the server records the signed-in
+     * user, exactly as it does when a transaction is approved. Bonus records
+     * live in their own ledger, so they use their own endpoint.
+     */
+    const handleApproval = async (record: any, action: 'approve' | 'reject') => {
+        if (approvalPending) return;
+
+        const isBonus = activeTab === 'bonus';
+        const base = isBonus ? '/commissions/bonus-history' : '/commissions/history';
+        // Spelled out rather than interpolated, so each endpoint can be found by
+        // searching for it.
+        const url = action === 'approve'
+            ? `${base}/${record.id}/approve`
+            : `${base}/${record.id}/reject`;
+
+        setApprovalPending(true);
+        try {
+            const res = await apiClient.post<{ success: boolean; message?: string }>(url);
+
+            if (!res.data?.success) {
+                throw new Error(res.data?.message || `Failed to ${action} the payout.`);
+            }
+
+            // Reload so the status, approver and the agent's balances all reflect
+            // what the approval just did.
+            await fetchData();
+            setShowDetails(false);
+            setSelectedRecord(null);
+        } catch (err: any) {
+            const message = err?.response?.data?.message || err?.message || `Failed to ${action} the payout.`;
+            window.alert(message);
+        } finally {
+            setApprovalPending(false);
+        }
     };
 
     const handlePrevious = () => {
@@ -980,11 +1044,15 @@ const Commission: React.FC = () => {
                                                         {colKey === 'id' ? (
                                                             <span className={`font-mono font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>{val}</span>
                                                         ) : colKey === 'status' ? (
-                                                            <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${val === 'Paid'
+                                                            // Approval state, using the same reading as the Transaction List:
+                                                            // settled states in green, awaiting action in amber, declined in red.
+                                                            <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${(val === 'Paid' || val === 'Approved')
                                                                 ? isDarkMode ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-green-100 text-green-700'
-                                                                : isDarkMode ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-amber-100 text-amber-700'
+                                                                : val === 'Rejected'
+                                                                    ? isDarkMode ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-red-100 text-red-700'
+                                                                    : isDarkMode ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-amber-100 text-amber-700'
                                                                 }`}>
-                                                                {val}
+                                                                {val || 'Pending'}
                                                             </span>
                                                         ) : colKey === 'type' ? (
                                                             <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${row.type === 'incentives_payout'
@@ -1057,6 +1125,16 @@ const Commission: React.FC = () => {
                         data={selectedRecord}
                         type={activeTab}
                         isMobile={isMobile}
+                        approvalPending={approvalPending}
+                        // Approving is what applies a payout, so it is offered only
+                        // to the roles that may manage payouts — agents view this
+                        // page read-only and never see these controls.
+                        onApprove={canManagePayouts && (activeTab === 'payouts' || activeTab === 'bonus')
+                            ? (record) => handleApproval(record, 'approve')
+                            : undefined}
+                        onReject={canManagePayouts && (activeTab === 'payouts' || activeTab === 'bonus')
+                            ? (record) => handleApproval(record, 'reject')
+                            : undefined}
                         onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
                         onPrevious={currentData.findIndex(r => r.id === (selectedRecord as any).id) > 0 ? handlePrevious : undefined}
                         onNext={currentData.findIndex(r => r.id === (selectedRecord as any).id) < currentData.length - 1 ? handleNext : undefined}

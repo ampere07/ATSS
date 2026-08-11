@@ -64,6 +64,24 @@ Route::get('/commissions/bonus-history', [CommissionController::class, 'getBonus
 Route::post('/commissions/bonus-history', [CommissionController::class, 'storeBonusHistory']);
 Route::get('/commissions/achievements', [CommissionController::class, 'getAchievements']);
 Route::post('/commissions/achievements', [CommissionController::class, 'storeAchievement']);
+// Payout approval, following the transaction pattern: a payout is recorded as
+// Pending and only moves the agent's balance once it is approved here. The
+// approver is taken from the signed-in user, never from the request body.
+Route::post('/commissions/history/{id}/approve', [CommissionController::class, 'approveHistory'])->whereNumber('id');
+Route::post('/commissions/history/{id}/reject', [CommissionController::class, 'rejectHistory'])->whereNumber('id');
+Route::post('/commissions/bonus-history/{id}/approve', [CommissionController::class, 'approveBonus'])->whereNumber('id');
+Route::post('/commissions/bonus-history/{id}/reject', [CommissionController::class, 'rejectBonus'])->whereNumber('id');
+
+// ── Weekly agent referral invoices ──────────────────────────────────────────
+// Every one of these is scoped to what the signed-in user may see inside the
+// controller: an agent sees their team's invoices, or their own when they have
+// no team; an administrator sees their organisation's; a superadmin sees all.
+// "generate" is registered before "{id}" so it is not read as an id.
+Route::get('/agent-invoices', [\App\Http\Controllers\AgentInvoiceController::class, 'index']);
+Route::post('/agent-invoices/generate', [\App\Http\Controllers\AgentInvoiceController::class, 'generate']);
+Route::get('/agent-invoices/{id}', [\App\Http\Controllers\AgentInvoiceController::class, 'show'])->whereNumber('id');
+Route::get('/agent-invoices/{id}/pdf', [\App\Http\Controllers\AgentInvoiceController::class, 'pdf'])->whereNumber('id');
+Route::patch('/agent-invoices/{id}/status', [\App\Http\Controllers\AgentInvoiceController::class, 'updateStatus'])->whereNumber('id');
 Route::post('/reports', [ReportController::class , 'store']);
 Route::get('/reports/options', [ReportController::class , 'options']);
 // Registered before the /reports/{id} routes below, which have no numeric

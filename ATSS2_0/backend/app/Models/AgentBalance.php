@@ -14,7 +14,10 @@ class AgentBalance extends Model
     protected $fillable = [
         'agent_id',
         'balance',
+        // The RATE one referral pays — a setting, not a total.
         'commission',
+        // What the agent has EARNED in commission from approved job orders.
+        'commission_value',
         'incentives',
         'Bonus',
         'bonus',
