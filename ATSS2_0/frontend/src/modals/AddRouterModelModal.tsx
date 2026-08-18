@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, User, Calendar } from 'lucide-react';
-import { API_BASE_URL } from '../config/api';
+import { API_BASE_URL, authFetch } from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 
 interface RouterModel {
@@ -151,7 +151,7 @@ const AddRouterModelModal: React.FC<AddRouterModelModalProps> = ({
 
       const method = editingRouter ? 'PUT' : 'POST';
 
-      const response = await fetch(url, {
+      const response = await authFetch(url, {
         method,
         headers: {
           'Accept': 'application/json',

@@ -41,6 +41,27 @@ return [
     'pdf_folder' => 'agent-invoices',
 
     /*
+    | How many referred customers the first page of the PDF carries.
+    |
+    | Page one gives most of its height to the header artwork and the banner, so
+    | it holds fewer rows than the pages after it. Left to itself Dompdf fills
+    | page one to the paper's edge and then finds the totals block will not fit
+    | — and that block cannot be split — so it moves the whole thing to page two
+    | and leaves a hand's depth of white space behind.
+    |
+    | Capping page one is what avoids that: the rows that would have caused the
+    | overflow start page two instead, and the totals follow them.
+    */
+    'first_page_rows' => env('AGENT_INVOICE_FIRST_PAGE_ROWS', 10),
+
+    /*
+    | How many rows each page after the first carries.
+    |
+    | Those pages have no header artwork, so they fit more.
+    */
+    'rows_per_page' => env('AGENT_INVOICE_ROWS_PER_PAGE', 18),
+
+    /*
     | Only referrals installed on or after the agent programme start date are
     | ever billed. Shared with incentives and achievements so all three agree
     | about which referrals count — see config/agent.php.

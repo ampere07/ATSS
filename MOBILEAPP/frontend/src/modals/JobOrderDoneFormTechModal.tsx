@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
 import SignatureScreen from 'react-native-signature-canvas';
 import * as ExpoFileSystem from 'expo-file-system/legacy';
+import { saveImagesToGallery } from '../utils/saveImagesToGallery';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Settings, Camera, X, ChevronDown, Search, Check, ChevronLeft, MapPin, CheckCircle, AlertCircle, XCircle } from 'lucide-react-native';
@@ -62,6 +63,7 @@ import LocationPicker from '../components/LocationPicker';
 import { pppoeService, UsernamePattern } from '../services/pppoeService';
 import ImagePreview from '../components/ImagePreview';
 import { SearchablePicker, SearchablePickerTrigger } from '../components/SearchablePicker';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface JobOrderDoneFormTechModalProps {
   isOpen: boolean;
@@ -212,6 +214,13 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 }) => {
   const insets = useSafeAreaInsets();
   const isDarkMode = false;
+  const { can, ready: permissionsReady } = usePermissions();
+
+  // Reading /applications/{id} needs the application-management key, which the
+  // technician opening this form does not hold. The prefill below already falls
+  // back to the job order's own values when the application is missing, so the
+  // request only ever bought a 403 — the fallback is the outcome either way.
+  const canReadApplication = permissionsReady && can('application-management');
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(() => settingsColorPaletteService.getActiveSync());
 
   useEffect(() => {
@@ -919,7 +928,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     const fetchApplicationData = async () => {
       try {
         const applicationId = jobOrderData.application_id || jobOrderData.Application_ID;
-        if (applicationId) {
+        if (applicationId && canReadApplication) {
           const appResponse = await apiClient.get<{ success: boolean; application: any }>(
             `/applications/${applicationId}`,
             { signal: controller.signal }
@@ -954,7 +963,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     return () => {
       controller.abort();
     };
-  }, [isOpen, jobOrderData?.id, jobOrderData?.JobOrder_ID]);
+  }, [isOpen, jobOrderData?.id, jobOrderData?.JobOrder_ID, canReadApplication]);
 
   const handleInputChange = useCallback((field: keyof JobOrderDoneFormData, value: string | File | null) => {
     let finalValue = value;
@@ -1359,10 +1368,16 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         imageFormData.append('folder_name', folderName);
 
         let hasImages = false;
+        // The same photos, kept so a copy can be filed on the technician's own
+        // phone before any of this is sent. Collected here rather than listed
+        // again below so the two can never drift apart.
+        const galleryItems: { field: string; uri?: string | null }[] = [];
+
         const safeAppendImage = (fieldName: string, fileObj: any) => {
           if (!fileObj) return;
           const fileName = fileObj.name || `${fieldName}_${Date.now()}.jpg`;
           imageFormData.append(fieldName, fileObj, fileName);
+          galleryItems.push({ field: fieldName, uri: fileObj.uri });
           hasImages = true;
         };
 
@@ -1381,6 +1396,17 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         if (updatedFormData.onsiteStatus === 'Failed' || updatedFormData.onsiteStatus === 'Reschedule') {
           safeAppendImage('proof_image', formData.proofImage);
         }
+
+        // Keep a copy on the phone BEFORE anything is uploaded, so a failed
+        // upload or a lost connection cannot leave the technician with no
+        // record of the visit. Filed as "<field>, <first name> <last name>".
+        //
+        // Awaited so the copies exist before the request starts, but never
+        // allowed to throw: the submission matters more than the keepsake.
+        await saveImagesToGallery(
+          galleryItems,
+          `${firstName} ${fullLastName}`.trim()
+        );
 
         if (hasImages) {
 
@@ -1681,11 +1707,6 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
   };
 
   const fullName = useMemo(() => `${jobOrderData?.First_Name || jobOrderData?.first_name || ''} ${jobOrderData?.Middle_Initial || jobOrderData?.middle_initial || ''} ${jobOrderData?.Last_Name || jobOrderData?.last_name || ''}`.trim(), [jobOrderData?.id, jobOrderData?.JobOrder_ID, jobOrderData?.First_Name, jobOrderData?.Last_Name]);
-
-  const jobOrderIdentifier = useMemo(() => {
-    const idStr = String(jobOrderData?.JobOrder_ID || jobOrderData?.id || '');
-    return fullName ? `${fullName}_JO_${idStr}` : `JO_${idStr}`;
-  }, [fullName, jobOrderData?.id, jobOrderData?.JobOrder_ID]);
 
   const selectedLcpnap = useMemo(() => {
     const safeLcpnaps = Array.isArray(lcpnaps) ? lcpnaps : [];
@@ -3339,7 +3360,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             onUpload={(file) => handleImageUpload('boxReadingImage', file)}
                             error={errors.boxReadingImage}
                             colorPrimary={colorPalette?.primary || '#7c3aed'}
-                            jobOrderName={jobOrderIdentifier}
+                            saveToGalleryOnCapture={false}
                           />
 
                           <ImagePreview
@@ -3349,7 +3370,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             onUpload={(file) => handleImageUpload('routerReadingImage', file)}
                             error={errors.routerReadingImage}
                             colorPrimary={colorPalette?.primary || '#7c3aed'}
-                            jobOrderName={jobOrderIdentifier}
+                            saveToGalleryOnCapture={false}
                           />
 
                           {(formData.connectionType === 'Antenna' || formData.connectionType === 'Local') && (
@@ -3360,7 +3381,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                               onUpload={(file) => handleImageUpload('portLabelImage', file)}
                               error={errors.portLabelImage}
                               colorPrimary={colorPalette?.primary || '#7c3aed'}
-                              jobOrderName={jobOrderIdentifier}
+                              saveToGalleryOnCapture={false}
                             />
                           )}
 
@@ -3371,7 +3392,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             onUpload={(file) => handleImageUpload('clientTaggingImage', file)}
                             error={errors.clientTaggingImage}
                             colorPrimary={colorPalette?.primary || '#7c3aed'}
-                            jobOrderName={jobOrderIdentifier}
+                            saveToGalleryOnCapture={false}
                           />
 
                           <ImagePreview
@@ -3381,7 +3402,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             onUpload={(file) => handleImageUpload('setupImage', file)}
                             error={errors.setupImage}
                             colorPrimary={colorPalette?.primary || '#7c3aed'}
-                            jobOrderName={jobOrderIdentifier}
+                            saveToGalleryOnCapture={false}
                           />
 
                           <ImagePreview
@@ -3391,7 +3412,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             onUpload={(file) => handleImageUpload('signedContractImage', file)}
                             error={errors.signedContractImage}
                             colorPrimary={colorPalette?.primary || '#7c3aed'}
-                            jobOrderName={jobOrderIdentifier}
+                            saveToGalleryOnCapture={false}
                           />
 
                           <View style={styles.inputGroup}>
@@ -3738,7 +3759,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                             onUpload={(file) => handleImageUpload('proofImage', file)}
                             error={errors.proofImage}
                             colorPrimary={colorPalette?.primary || '#7c3aed'}
-                            jobOrderName={jobOrderIdentifier}
+                            saveToGalleryOnCapture={false}
                           />
                         </View>
                       )}

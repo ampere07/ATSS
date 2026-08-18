@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, TextInput, Pressable, ScrollView, Dimensions, RefreshControl, StyleSheet, Modal, DeviceEventEmitter } from 'react-native';
+import { View, Text, TextInput, Pressable, ScrollView, Dimensions, RefreshControl, StyleSheet, Modal, DeviceEventEmitter, Alert } from 'react-native';
 import { FileText, Search, X, Menu, RefreshCw, ArrowLeft, Filter, Check } from 'lucide-react-native';
 import { FlashList } from '@shopify/flash-list';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -7,6 +7,11 @@ import ServiceOrderDetails from '../components/ServiceOrderDetails';
 import { useServiceOrderContext, type ServiceOrder } from '../contexts/ServiceOrderContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { Picker } from '@react-native-picker/picker';
+import {
+  buildTechnicianLockedServiceOrderIds,
+  isTechnicianUser,
+  sortServiceOrdersForTechnician
+} from '../utils/technicianServiceOrderAccess';
 
 // Location grouping removed as per user request
 
@@ -102,27 +107,33 @@ const StatusText = React.memo(({ status, type }: { status?: string, type: 'suppo
 const ServiceOrderCard = React.memo(({
   serviceOrder,
   isSelected,
+  isLocked,
   onPress,
   userRole,
   userRoleId
 }: {
   serviceOrder: ServiceOrder,
   isSelected: boolean,
+  isLocked: boolean,
   onPress: (so: ServiceOrder) => void,
   userRole: string,
   userRoleId: number | null
 }) => (
   <Pressable
+    // A locked card opens like any other: the technician may read the service
+    // order in full. The lock only governs starting the job, which the details
+    // screen gates on the administrator's Enable.
     onPress={() => onPress(serviceOrder)}
     style={[so.cardRow, {
-      backgroundColor: isSelected ? '#f3f4f6' : 'transparent',
-      borderColor: '#e5e7eb'
+      backgroundColor: isLocked ? '#f9fafb' : (isSelected ? '#f3f4f6' : 'transparent'),
+      borderColor: '#e5e7eb',
+      opacity: isLocked ? 0.45 : 1
     }]}
   >
     <View style={so.cardInner}>
       <View style={so.cardLeft}>
         <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
-          <Text style={[so.cardName, { color: '#111827', marginBottom: 0 }]}>{serviceOrder.fullName}</Text>
+          <Text style={[so.cardName, { color: isLocked ? '#6b7280' : '#111827', marginBottom: 0 }]}>{serviceOrder.fullName}</Text>
           {isWorkStarted(serviceOrder) && (
             <View style={{ backgroundColor: '#dcfce7', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
               <Text style={{ color: '#15803d', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' }}>
@@ -130,8 +141,15 @@ const ServiceOrderCard = React.memo(({
               </Text>
             </View>
           )}
+          {isLocked && (
+            <View style={{ backgroundColor: '#e5e7eb', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+              <Text style={{ color: '#4b5563', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' }}>
+                Locked
+              </Text>
+            </View>
+          )}
         </View>
-        <Text style={[so.cardSub, { color: '#4b5563' }]} numberOfLines={2}>
+        <Text style={[so.cardSub, { color: isLocked ? '#9ca3af' : '#4b5563' }]} numberOfLines={2}>
           {formatDate(serviceOrder.timestamp)} | {serviceOrder.fullAddress}
         </Text>
       </View>
@@ -328,18 +346,25 @@ const ServiceOrderPage: React.FC = () => {
     concern: item => item.concern || '',
   };
 
+  /**
+   * Technicians only — deliberately narrower than the `isTechnician` used by the
+   * filter below, which also covers agents. The queue ordering and the lock are
+   * for the role that actually works the visits.
+   */
+  const isTechnicianOnly = useMemo(() => isTechnicianUser(userRole, userRoleId), [userRole, userRoleId]);
+
   const filteredServiceOrders = useMemo(() => {
     const isTechnician = userRole.toLowerCase() === 'technician' || userRoleId === 2 ||
       userRole.toLowerCase() === 'agent' || userRoleId === 4;
 
-    const isSuperUser = 
+    const isSuperUser =
       userRoleId === 1 || userRoleId === 7 || userRoleId === 8 ||
       userRole.toLowerCase() === 'superadmin' || userRole.toLowerCase() === 'administrator' || userRole.toLowerCase() === 'headtech';
 
     const lowerSearch = debouncedSearch.toLowerCase();
     const isSearchEmpty = lowerSearch === '';
 
-    return serviceOrders
+    const matched = serviceOrders
       .filter(serviceOrder => {
         // Hide resolved service orders for technicians
         if (!isSuperUser && isTechnician && (userRole.toLowerCase() === 'technician' || userRoleId === 2)) {
@@ -382,20 +407,42 @@ const ServiceOrderPage: React.FC = () => {
         }
 
         return true;
-      })
-      .sort((a, b) => {
-        const activeA = isWorkStarted(a) ? 1 : 0;
-        const activeB = isWorkStarted(b) ? 1 : 0;
-
-        if (activeA !== activeB) {
-          return activeB - activeA; // Started/active ones first
-        }
-
-        const timeA = a.rawUpdatedAt ? new Date(a.rawUpdatedAt).getTime() : (a.timestamp ? new Date(a.timestamp).getTime() : 0);
-        const timeB = b.rawUpdatedAt ? new Date(b.rawUpdatedAt).getTime() : (b.timestamp ? new Date(b.timestamp).getTime() : 0);
-        return timeB - timeA;
       });
-  }, [serviceOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail]);
+
+    // Technicians read their list in the order they work it: In Progress oldest
+    // first, then other active work, with Done / Reschedule / Failed at the end.
+    if (isTechnicianOnly) {
+      return sortServiceOrdersForTechnician(matched);
+    }
+
+    // Every other role keeps the existing started-first, newest-first ordering.
+    return matched.sort((a, b) => {
+      const activeA = isWorkStarted(a) ? 1 : 0;
+      const activeB = isWorkStarted(b) ? 1 : 0;
+
+      if (activeA !== activeB) {
+        return activeB - activeA; // Started/active ones first
+      }
+
+      const timeA = a.rawUpdatedAt ? new Date(a.rawUpdatedAt).getTime() : (a.timestamp ? new Date(a.timestamp).getTime() : 0);
+      const timeB = b.rawUpdatedAt ? new Date(b.rawUpdatedAt).getTime() : (b.timestamp ? new Date(b.timestamp).getTime() : 0);
+      return timeB - timeA;
+    });
+  }, [serviceOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, isTechnicianOnly]);
+
+  /**
+   * The service orders a technician may not open yet.
+   *
+   * Built from the technician's whole assigned set — the API already scopes
+   * `serviceOrders` to them — and NOT from the filtered/paginated view, so
+   * searching or filtering can never change which record counts as their next
+   * one.
+   */
+  const technicianLockedIds = useMemo(() => {
+    if (!isTechnicianOnly) return new Set<string>();
+    return buildTechnicianLockedServiceOrderIds(serviceOrders);
+  }, [isTechnicianOnly, serviceOrders]);
+
 
   const shouldPaginate = true; // Consistently paginate for all roles to prevent UI jumping
 
@@ -588,6 +635,7 @@ const ServiceOrderPage: React.FC = () => {
                     <ServiceOrderCard
                       serviceOrder={serviceOrder}
                       isSelected={selectedServiceOrder?.id === serviceOrder.id}
+                      isLocked={technicianLockedIds.has(String(serviceOrder.id))}
                       onPress={!isTablet ? handleMobileRowClick : handleRowClick}
                       userRole={userRole}
                       userRoleId={userRoleId}

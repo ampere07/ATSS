@@ -16,6 +16,10 @@ class Kernel extends HttpKernel
     protected $middleware = [
         // \App\Http\Middleware\TrustHosts::class,
         \App\Http\Middleware\TrustProxies::class,
+        // First in the stack so its RESPONSE half runs last, after every cookie
+        // has been added. Sanctum forces session.same_site back to 'lax' on
+        // every API request, so the cookies can only be corrected here.
+        \App\Http\Middleware\ConfigureCrossSiteCookies::class,
         \App\Http\Middleware\HandleCorsManually::class,  // Use custom CORS handler
         \App\Http\Middleware\PreventRequestsDuringMaintenance::class,
         \Illuminate\Foundation\Http\Middleware\ValidatePostSize::class,
@@ -43,6 +47,11 @@ class Kernel extends HttpKernel
             \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
             'throttle:api',
             \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            // Authorization for every API endpoint, from the table in
+            // App\Support\ApiPermissionMap. Last in the group so the session
+            // Sanctum starts above is available to it, and so a request that is
+            // refused has already been rate limited.
+            \App\Http\Middleware\ApiAccessControl::class,
         ],
     ];
 
@@ -59,6 +68,7 @@ class Kernel extends HttpKernel
         'can' => \Illuminate\Auth\Middleware\Authorize::class,
         'guest' => \App\Http\Middleware\RedirectIfAuthenticated::class,
         'password.confirm' => \Illuminate\Auth\Middleware\RequirePassword::class,
+        'permission' => \App\Http\Middleware\EnsurePermission::class,
         'role' => \App\Http\Middleware\EnsureUserHasRole::class,
         'signed' => \App\Http\Middleware\ValidateSignature::class,
         'throttle' => \Illuminate\Routing\Middleware\ThrottleRequests::class,

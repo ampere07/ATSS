@@ -1,16 +1,14 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, ReceiptText, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
-import { roleService } from '../services/userService';
 import { useTransactionStore } from '../store/transactionStore';
 import { useTransactionRevertStore } from '../store/transactionRevertStore';
 import { useApplicationStore } from '../store/applicationStore';
 import { useJobOrderStore } from '../store/jobOrderStore';
 import { useServiceOrderStore } from '../store/serviceOrderStore';
 import { useWorkOrderStore } from '../store/workOrderStore';
-
-// Locked role IDs (1-8) use hardcoded allowedRoles; custom roles (9+) use permissions array
-const LOCKED_ROLE_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
+import { usePermissions } from '../hooks/usePermissions';
+import { ROLE } from '../config/permissions';
 
 // ---------------------------------------------------------------------------
 // Notification badge counts
@@ -50,29 +48,6 @@ const countUnfinished = <T,>(rows: T[] | undefined | null, pickStatus: (row: T) 
   }, 0);
 };
 
-// Role test shared by the menu filter and the badge data gate, so both agree on which
-// sections a user can reach. Extracted from filterMenuByRole — same logic, one copy.
-const hasRoleAccess = (allowedRoles: string[] | undefined, userRole?: string, roleId?: number | string | null): boolean => {
-  if (!allowedRoles || allowedRoles.length === 0) return true;
-
-  const normalizedUserRole = userRole ? userRole.toLowerCase().trim() : '';
-  const isTechnician = normalizedUserRole === 'technician' || String(roleId) === '2';
-  const isInventoryStaff = normalizedUserRole === 'inventorystaff' || String(roleId) === '5';
-
-  return allowedRoles.some(role => {
-    const normalizedRole = role.toLowerCase().trim();
-    if (normalizedRole === 'technician') return isTechnician;
-    if (normalizedRole === 'administrator') return normalizedUserRole === 'administrator' || String(roleId) === '1' || String(roleId) === '7';
-    if (normalizedRole === 'admin-only') return normalizedUserRole === 'administrator' || String(roleId) === '1';
-    if (normalizedRole === 'superadmin') return normalizedUserRole === 'superadmin' || String(roleId) === '7';
-    if (normalizedRole === 'headtech') return normalizedUserRole === 'headtech' || String(roleId) === '8';
-    if (normalizedRole === 'osp') return normalizedUserRole === 'Osp'.toLowerCase() || String(roleId) === '6';
-    if (normalizedRole === 'agent') return normalizedUserRole === 'agent' || String(roleId) === '4';
-    if (normalizedRole === 'inventorystaff') return isInventoryStaff;
-    return normalizedRole === normalizedUserRole;
-  });
-};
-
 interface SidebarProps {
   activeSection: string;
   onSectionChange: (section: string) => void;
@@ -85,12 +60,27 @@ interface SidebarProps {
   permissions?: string[] | null;
 }
 
+/**
+ * A menu entry.
+ *
+ * `id` doubles as the permission key and as the section Dashboard renders —
+ * one name for the checkbox in Role Management, the entry here, and the case in
+ * the switch. A parent group has no key of its own and is listed whenever any
+ * of its children is.
+ *
+ * `onlyRoles` / `exceptRoles` exist for the two entries that appear twice under
+ * different labels: an agent sees their own payout history as "History" at the
+ * top level, while an administrator reaches the same page as "Pay Out/In" inside
+ * the Agent group. Both users hold the same key, so the key alone cannot choose
+ * between the two presentations.
+ */
 interface MenuItem {
   id: string;
   label: string;
   icon: React.ElementType;
   children?: MenuItem[];
-  allowedRoles?: string[];
+  onlyRoles?: number[];
+  exceptRoles?: number[];
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLogout, isCollapsed, userRole, roleId, organizationId, userEmail, permissions }) => {
@@ -99,7 +89,6 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [currentDateTime, setCurrentDateTime] = useState('');
   const [tooltipItem, setTooltipItem] = useState<{ id: string; label: string; y: number } | null>(null);
-  const [fetchedPermissions, setFetchedPermissions] = useState<string[] | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -150,126 +139,126 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     };
   }, []);
 
+  // Every entry is listed for everyone; what a role may open is decided by the
+  // permission table, not here. An entry appears when its id is a key the role
+  // holds, and a group appears when at least one of its children does.
   const menuItems: MenuItem[] = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['administrator', 'superadmin'] },
+    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     // Agent portal landing page — mirrors the mobile app's agent-dashboard tab.
-    { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['agent'] },
-    { id: 'live-monitor', label: 'Monitoring', icon: Activity, allowedRoles: ['superadmin', 'administrator'] },
+    { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'live-monitor', label: 'Monitoring', icon: Activity },
     {
       id: 'billing',
       label: 'Billing',
       icon: CreditCard,
-      allowedRoles: ['administrator', 'customer'],
       children: [
-        { id: 'customer', label: 'Customer', icon: User, allowedRoles: ['administrator', 'headtech'] },
-        { id: 'transaction-list', label: 'Transaction List', icon: Receipt, allowedRoles: ['administrator'] },
-        { id: 'transactions-revert', label: 'Revert Requests', icon: RefreshCw, allowedRoles: ['superadmin', 'administrator'] },
-        { id: 'payment-portal', label: 'Payment Portal', icon: DollarSign, allowedRoles: ['administrator'] },
-        { id: 'soa', label: 'Statements', icon: FileText, allowedRoles: ['administrator'] },
-        { id: 'invoice', label: 'Invoice', icon: Receipt, allowedRoles: ['administrator'] },
-        { id: 'overdue', label: 'Overdue', icon: Clock, allowedRoles: ['administrator'] },
-        { id: 'so-charge', label: 'SO Charge', icon: DollarSign, allowedRoles: ['administrator'] },
-        { id: 'dc-notice', label: 'DC Notice', icon: AlertTriangle, allowedRoles: ['administrator'] },
-        { id: 'mass-rebate', label: 'Rebates', icon: DollarSign, allowedRoles: ['administrator'] },
-        // { id: 'staggered-payment', label: 'Staggered', icon: Calendar, allowedRoles: ['administrator'] },
-        { id: 'discounts', label: 'Discounts', icon: Tag, allowedRoles: ['administrator'] }
+        { id: 'customer', label: 'Customer', icon: User },
+        { id: 'transaction-list', label: 'Transaction List', icon: Receipt },
+        { id: 'transactions-revert', label: 'Revert Requests', icon: RefreshCw },
+        { id: 'payment-portal', label: 'Payment Portal', icon: DollarSign },
+        { id: 'soa', label: 'Statements', icon: FileText },
+        { id: 'invoice', label: 'Invoice', icon: Receipt },
+        { id: 'overdue', label: 'Overdue', icon: Clock },
+        { id: 'so-charge', label: 'SO Charge', icon: DollarSign },
+        { id: 'dc-notice', label: 'DC Notice', icon: AlertTriangle },
+        { id: 'mass-rebate', label: 'Rebates', icon: DollarSign },
+        // { id: 'staggered-payment', label: 'Staggered', icon: Calendar },
+        { id: 'discounts', label: 'Discounts', icon: Tag }
       ]
     },
-    { id: 'application-management', label: 'Application', icon: FileCheck, allowedRoles: ['administrator', 'headtech'] },
-    { id: 'job-order', label: 'Job Order', icon: Wrench, allowedRoles: ['administrator', 'technician', 'agent', 'headtech'] },
-    { id: 'service-order', label: 'Service Order', icon: Wrench, allowedRoles: ['administrator', 'technician', 'headtech'] },
-    { id: 'work-order', label: 'Work Order', icon: Wrench, allowedRoles: ['administrator', 'agent', 'Osp', 'headtech'] },
-    { id: 'lcp-nap-location', label: 'LCP/NAP Location', icon: MapPinned, allowedRoles: ['administrator', 'technician', 'Osp', 'headtech'] },
-    { id: 'sms-blast', label: 'SMS Blast', icon: MessageSquare, allowedRoles: ['administrator'] },
-    { id: 'reports', label: 'Reports', icon: FileText, allowedRoles: ['administrator', 'superadmin'] },
+    { id: 'application-management', label: 'Application', icon: FileCheck },
+    { id: 'job-order', label: 'Job Order', icon: Wrench },
+    { id: 'service-order', label: 'Service Order', icon: Wrench },
+    { id: 'work-order', label: 'Work Order', icon: Wrench },
+    { id: 'lcp-nap-location', label: 'LCP/NAP Location', icon: MapPinned },
+    { id: 'sms-blast', label: 'SMS Blast', icon: MessageSquare },
+    { id: 'reports', label: 'Reports', icon: FileText },
     // An agent's own payout/incentive/bonus history. Read-only and scoped server side to
     // the signed-in agent — same entry the mobile app exposes as "History".
-    { id: 'commission', label: 'History', icon: ReceiptText, allowedRoles: ['agent'] },
+    { id: 'commission', label: 'History', icon: ReceiptText, onlyRoles: [ROLE.AGENT] },
     // An agent's own weekly referral invoices. Scoped server side to their team,
     // or to themselves when they belong to none, so this entry can never show
     // another team's documents.
-    { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['agent'] },
+    { id: 'agent-invoices', label: 'Invoices', icon: FileText, onlyRoles: [ROLE.AGENT] },
     {
       id: 'agent-group',
       label: 'Agent',
       icon: UserCheck,
-      allowedRoles: ['administrator', 'superadmin'],
+      // An agent has the two entries above instead; without this they would see
+      // a one-child "Agent" group duplicating them.
+      exceptRoles: [ROLE.AGENT],
       children: [
-        { id: 'commission', label: 'Pay Out/In', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'team-agent', label: 'Team Agents', icon: Users, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'agent-management', label: 'Agent Management', icon: User, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign, allowedRoles: ['administrator', 'superadmin'] },
+        { id: 'commission', label: 'Pay Out/In', icon: DollarSign },
+        { id: 'team-agent', label: 'Team Agents', icon: Users },
+        { id: 'agent-management', label: 'Agent Management', icon: User },
+        { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign },
         // Weekly referral invoices, one per team and one per solo agent. The
         // page is scoped server side, so an agent reaching it sees only their
         // own team's invoices.
-        { id: 'agent-invoices', label: 'Invoices', icon: FileText, allowedRoles: ['administrator', 'superadmin'] }
+        { id: 'agent-invoices', label: 'Invoices', icon: FileText }
       ]
     },
     {
       id: 'inventory-group',
       label: 'Inventory',
       icon: Package,
-      allowedRoles: ['administrator', 'inventorystaff'],
       children: [
-        { id: 'inventory', label: 'Inventory', icon: Package, allowedRoles: ['administrator', 'inventorystaff'] },
-        { id: 'inventory-category-list', label: 'Inventory Category List', icon: List, allowedRoles: ['administrator', 'inventorystaff'] }
+        { id: 'inventory', label: 'Inventory', icon: Package },
+        { id: 'inventory-category-list', label: 'Inventory Category List', icon: List }
       ]
     },
     {
       id: 'technical',
       label: 'Configurations',
       icon: Network,
-      allowedRoles: ['superadmin', 'headtech'],
       children: [
-        { id: 'promo-list', label: 'Promo', icon: Tag, allowedRoles: ['superadmin'] },
-        { id: 'plan-list', label: 'Plan', icon: List, allowedRoles: ['superadmin'] },
-        { id: 'location-list', label: 'Location', icon: MapPin, allowedRoles: ['superadmin', 'headtech'] },
-        { id: 'lcp', label: 'LCP', icon: Network, allowedRoles: ['superadmin', 'headtech'] },
-        { id: 'nap', label: 'NAP', icon: Network, allowedRoles: ['superadmin', 'headtech'] },
-        { id: 'usage-type', label: 'Usage Type', icon: Activity, allowedRoles: ['superadmin'] },
-        { id: 'vlan-config', label: 'VLAN Config', icon: Network, allowedRoles: ['superadmin'] },
-        { id: 'payment-method', label: 'Payment Method', icon: CreditCard, allowedRoles: ['superadmin'] },
-        { id: 'work-category', label: 'Work Category', icon: Wrench, allowedRoles: ['superadmin'] },
-        { id: 'radius-config', label: 'Radius Config', icon: MapPin, allowedRoles: ['superadmin'] },
-        { id: 'smart-olt', label: 'SmartOLT Config', icon: Network, allowedRoles: ['superadmin'] },
-        { id: 'sms-config', label: 'SMS Config', icon: MessageSquare, allowedRoles: ['superadmin'] },
-        { id: 'sms-template', label: 'SMS Template', icon: MessageSquare, allowedRoles: ['superadmin'] },
-        { id: 'email-templates', label: 'Email Templates', icon: FileText, allowedRoles: ['superadmin'] },
-        { id: 'pppoe-setup', label: 'PPPoE Setup', icon: Router, allowedRoles: ['superadmin'] },
-        { id: 'concern-config', label: 'Concern Config', icon: AlertCircle, allowedRoles: ['superadmin'] },
-        { id: 'billing-config', label: 'Billing Configurations', icon: Receipt, allowedRoles: ['superadmin'] }
+        { id: 'promo-list', label: 'Promo', icon: Tag },
+        { id: 'plan-list', label: 'Plan', icon: List },
+        { id: 'location-list', label: 'Location', icon: MapPin },
+        { id: 'lcp', label: 'LCP', icon: Network },
+        { id: 'nap', label: 'NAP', icon: Network },
+        { id: 'usage-type', label: 'Usage Type', icon: Activity },
+        { id: 'vlan-config', label: 'VLAN Config', icon: Network },
+        { id: 'payment-method', label: 'Payment Method', icon: CreditCard },
+        { id: 'work-category', label: 'Work Category', icon: Wrench },
+        { id: 'radius-config', label: 'Radius Config', icon: MapPin },
+        { id: 'smart-olt', label: 'SmartOLT Config', icon: Network },
+        { id: 'sms-config', label: 'SMS Config', icon: MessageSquare },
+        { id: 'sms-template', label: 'SMS Template', icon: MessageSquare },
+        { id: 'email-templates', label: 'Email Templates', icon: FileText },
+        { id: 'pppoe-setup', label: 'PPPoE Setup', icon: Router },
+        { id: 'concern-config', label: 'Concern Config', icon: AlertCircle },
+        { id: 'billing-config', label: 'Billing Configurations', icon: Receipt }
       ]
     },
     {
       id: 'users',
       label: 'Users',
       icon: Users,
-      allowedRoles: ['superadmin'],
       children: [
-        { id: 'user-management', label: 'Users Management', icon: User, allowedRoles: ['superadmin'] },
-        { id: 'tech-users', label: 'Tech Users', icon: Wrench, allowedRoles: ['superadmin'] },
-        { id: 'team-agent', label: 'Team Agents', icon: Users, allowedRoles: ['superadmin'] }
-        // { id: 'organization', label: 'Organization', icon: Building, allowedRoles: ['superadmin'] },
-        // { id: 'roles', label: 'Roles', icon: Shield, allowedRoles: ['superadmin'] }
+        { id: 'user-management', label: 'Users Management', icon: User },
+        { id: 'tech-users', label: 'Tech Users', icon: Wrench },
+        { id: 'team-agent', label: 'Team Agents', icon: Users },
+        { id: 'organization', label: 'Organization', icon: Building },
+        { id: 'roles', label: 'Roles', icon: Shield }
       ]
     },
     {
       id: 'logs-category',
       label: 'Logs',
       icon: FileBarChart,
-      allowedRoles: ['administrator'],
       children: [
-        { id: 'disconnected-logs', label: 'Disconnected Logs', icon: AlertTriangle, allowedRoles: ['administrator'] },
-        { id: 'reconnection-logs', label: 'Reconnection Logs', icon: FileBarChart, allowedRoles: ['administrator'] },
-        { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquare, allowedRoles: ['administrator'] },
-        { id: 'email-logs', label: 'Email Logs', icon: FileText, allowedRoles: ['administrator'] },
-        { id: 'data-logs', label: 'Data Logs', icon: FileText, allowedRoles: ['administrator', 'superadmin'] },
-        { id: 'smart-olt-logs', label: 'Smart OLT Logs', icon: Network, allowedRoles: ['superadmin'] },
-        { id: 'radius-logs', label: 'Radius Logs', icon: Activity, allowedRoles: ['superadmin'] },
-        { id: 'system-logs', label: 'System Logs', icon: FileText, allowedRoles: ['superadmin'] }
+        { id: 'disconnected-logs', label: 'Disconnected Logs', icon: AlertTriangle },
+        { id: 'reconnection-logs', label: 'Reconnection Logs', icon: FileBarChart },
+        { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquare },
+        { id: 'email-logs', label: 'Email Logs', icon: FileText },
+        { id: 'data-logs', label: 'Data Logs', icon: FileText },
+        { id: 'smart-olt-logs', label: 'Smart OLT Logs', icon: Network },
+        { id: 'radius-logs', label: 'Radius Logs', icon: Activity },
+        { id: 'system-logs', label: 'System Logs', icon: FileText }
       ]
     },
-    { id: 'settings', label: 'Settings', icon: Settings, allowedRoles: ['superadmin'] },
+    { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   // Auto-expand the parent of the active section
@@ -284,57 +273,15 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection]);
 
-  // Determine if this is a custom role (not one of the 8 locked roles)
-  const numericRoleId = roleId ? Number(roleId) : 0;
-  const isCustomRole = numericRoleId > 0 && !LOCKED_ROLE_IDS.includes(numericRoleId);
-
-  // Fetch permissions from API for custom roles if not available from props/localStorage
-  useEffect(() => {
-    if (!isCustomRole || !numericRoleId) return;
-
-    // Check if we already have permissions from props or localStorage
-    if (permissions && Array.isArray(permissions) && permissions.length > 0) return;
-    try {
-      const authData = JSON.parse(localStorage.getItem('authData') || '{}');
-      if (authData.permissions && Array.isArray(authData.permissions) && authData.permissions.length > 0) return;
-    } catch (e) { /* ignore */ }
-
-    // Fetch the role to get permissions
-    const fetchRolePermissions = async () => {
-      try {
-        const response = await roleService.getRoleById(numericRoleId);
-        if (response.success && response.data) {
-          let perms: string[] = [];
-          const rawPerms = response.data.permissions;
-          if (Array.isArray(rawPerms)) {
-            perms = rawPerms;
-          } else if (typeof rawPerms === 'string') {
-            try {
-              const parsed = JSON.parse(rawPerms);
-              perms = Array.isArray(parsed) ? parsed : [];
-            } catch (e) {
-              perms = rawPerms.split(',').map(p => p.trim()).filter(Boolean);
-            }
-          }
-
-          if (perms.length > 0) {
-            setFetchedPermissions(perms);
-            // Also update localStorage so we don't need to fetch again
-            try {
-              const authData = JSON.parse(localStorage.getItem('authData') || '{}');
-              authData.permissions = perms;
-              localStorage.setItem('authData', JSON.stringify(authData));
-            } catch (e) { /* ignore */ }
-          }
-        }
-      } catch (err) {
-        console.error('Failed to fetch role permissions:', err);
-      }
-    };
-
-    fetchRolePermissions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isCustomRole, numericRoleId]);
+  // What this user may open. Seeded roles are answered from the role table and
+  // custom roles from the list the server sent at sign-in; either way the menu
+  // and Dashboard's section guard read the same answer, so an entry can never
+  // be listed for a page that then refuses to open.
+  //
+  // The `permissions` prop is still accepted for callers that pass one — it is
+  // written into authData by Dashboard, which is where this reads it from — and
+  // Dashboard owns the one fetch needed when a custom role's list is missing.
+  const { can, roleId: numericRoleId, isCustomer } = usePermissions();
 
   // ---- Notification badges -------------------------------------------------
   // Read straight from the existing section stores. Zustand re-renders the sidebar when any
@@ -354,33 +301,29 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   const workOrders = useWorkOrderStore(state => state.workOrders);
   const fetchWorkOrders = useWorkOrderStore(state => state.fetchWorkOrders);
 
-  // Only pull a section's data if this user can actually open it — keeps a technician from
-  // firing (and being rejected for) the billing endpoints. Custom roles are allowed through
-  // because their permission list may still be loading; a rejected call is caught below.
-  const canSeeSection = useCallback((allowedRoles: string[]) => {
-    if (isCustomRole) return true;
-    return hasRoleAccess(allowedRoles, userRole, roleId);
-  }, [isCustomRole, userRole, roleId]);
-
   useEffect(() => {
-    if (userRole?.toLowerCase() === 'customer') return;
+    if (isCustomer) return;
 
+    // Only pull a section's data if this user can actually open it — a
+    // technician must not fire (and be refused) the billing endpoints. Same
+    // permission key the menu entry and the page itself use.
+    //
     // Each store guards its own cache, so these are no-ops once a section has loaded.
     // Errors are swallowed here and left in the store's error state: a section that cannot
     // load reports 0 and its badge stays hidden rather than breaking the sidebar.
-    const load = (allowedRoles: string[], run: () => Promise<unknown>) => {
-      if (!canSeeSection(allowedRoles)) return;
+    const load = (permission: string, run: () => Promise<unknown>) => {
+      if (!can(permission)) return;
       Promise.resolve(run()).catch(() => { /* store records its own error */ });
     };
 
-    load(['administrator'], () => fetchTransactions());
-    load(['superadmin', 'administrator'], () => fetchRevertRequests());
-    load(['administrator', 'headtech'], () => fetchApplications());
-    load(['administrator', 'technician', 'agent', 'headtech'], () => fetchJobOrders());
-    load(['administrator', 'technician', 'headtech'], () => fetchServiceOrders());
-    load(['administrator', 'agent', 'Osp', 'headtech'], () => fetchWorkOrders(1, 1000, '', ''));
+    load('transaction-list', () => fetchTransactions());
+    load('transactions-revert', () => fetchRevertRequests());
+    load('application-management', () => fetchApplications());
+    load('job-order', () => fetchJobOrders());
+    load('service-order', () => fetchServiceOrders());
+    load('work-order', () => fetchWorkOrders(1, 1000, '', ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userRole, roleId, canSeeSection]);
+  }, [can, isCustomer]);
 
   // Counts keyed by menu item id, recomputed only when the underlying arrays change.
   const badgeCounts = useMemo<Record<string, number>>(() => ({
@@ -397,70 +340,46 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   const groupBadgeCount = (item: MenuItem): number =>
     (item.children || []).reduce((total, child) => total + (badgeCounts[child.id] || 0) + groupBadgeCount(child), 0);
 
-  if (userRole?.toLowerCase() === 'customer') return null;
+  // A customer has no admin sidebar at all; their portal is its own layout.
+  if (isCustomer) return null;
 
-  // Get permissions: from prop first, fallback to localStorage authData, then fetched
-  const effectivePermissions: string[] = (() => {
-    if (permissions && Array.isArray(permissions) && permissions.length > 0) return permissions;
-    try {
-      const authData = JSON.parse(localStorage.getItem('authData') || '{}');
-      if (authData.permissions && Array.isArray(authData.permissions) && authData.permissions.length > 0) return authData.permissions;
-    } catch (e) { /* ignore */ }
-    if (fetchedPermissions && fetchedPermissions.length > 0) return fetchedPermissions;
-    return [];
-  })();
+  /**
+   * The menu this user gets.
+   *
+   * One pass for every kind of role. What used to be two functions — one
+   * walking a per-item allowedRoles list for the eight seeded roles, another
+   * walking the permissions array for custom ones — disagreed in ways that
+   * showed: the Billing group's own allowedRoles hid children that listed a
+   * role the group did not, so an entry could be granted and still never
+   * appear. There is now one rule, and it is the same key the page itself
+   * checks.
+   */
+  const filterMenu = (items: MenuItem[]): MenuItem[] =>
+    items.reduce<MenuItem[]>((acc, item) => {
+      if (item.onlyRoles && !item.onlyRoles.includes(numericRoleId)) return acc;
+      if (item.exceptRoles && item.exceptRoles.includes(numericRoleId)) return acc;
 
-  // Filter for custom roles: check if item.id is in the permissions array
-  const filterMenuByPermissions = (items: MenuItem[]): MenuItem[] => {
-    if (effectivePermissions.length === 0) return [];
-
-    return items.reduce<MenuItem[]>((acc, item) => {
-      const effectiveUserData = JSON.parse(localStorage.getItem('authData') || '{}');
-      const effectiveOrgId = organizationId || effectiveUserData.organization?.id || effectiveUserData.organization_id;
-      if (item.id === 'organization' && effectiveOrgId && effectiveOrgId !== '0' && effectiveOrgId !== 0) return acc;
+      // Organization is a multi-tenant control: it belongs to the global
+      // SuperAdmin, not to a user who sits inside one organization.
+      if (item.id === 'organization') {
+        const effectiveUserData = JSON.parse(localStorage.getItem('authData') || '{}');
+        const effectiveOrgId = organizationId || effectiveUserData.organization?.id || effectiveUserData.organization_id;
+        if (effectiveOrgId && effectiveOrgId !== '0' && effectiveOrgId !== 0) return acc;
+      }
 
       if (item.children && item.children.length > 0) {
-        // For parent groups, filter children by permissions
-        const filteredChildren = filterMenuByPermissions(item.children);
-        if (filteredChildren.length > 0) {
-          acc.push({ ...item, children: filteredChildren });
-        }
-      } else {
-        // Leaf item: check if its id is in the permissions
-        if (effectivePermissions.includes(item.id)) {
-          acc.push(item);
-        }
+        // A group is worth showing only if something inside it is.
+        const children = filterMenu(item.children);
+        if (children.length > 0) acc.push({ ...item, children });
+        return acc;
       }
+
+      if (can(item.id)) acc.push(item);
+
       return acc;
     }, []);
-  };
 
-  // Filter for locked roles: use the hardcoded allowedRoles
-  const filterMenuByRole = (items: MenuItem[]): MenuItem[] => {
-    const normalizedUserRole = userRole ? userRole.toLowerCase().trim() : '';
-
-    if (normalizedUserRole === 'customer' || String(roleId) === '3') return [];
-
-    return items.filter(item => {
-      const effectiveUserData = JSON.parse(localStorage.getItem('authData') || '{}');
-      const effectiveOrgId = organizationId || effectiveUserData.organization?.id || effectiveUserData.organization_id;
-
-      if (item.id === 'organization' && effectiveOrgId && effectiveOrgId !== '0' && effectiveOrgId !== 0) return false;
-      if (!item.allowedRoles || item.allowedRoles.length === 0) return true;
-
-      // Same predicate the badge data gate uses, so menu visibility and badge data agree.
-      const hasAccess = hasRoleAccess(item.allowedRoles, userRole, roleId);
-
-      if (hasAccess && item.children) {
-        item.children = filterMenuByRole(item.children);
-        if (item.children.length === 0) return false;
-      }
-
-      return hasAccess;
-    });
-  };
-
-  const filteredMenuItems = isCustomRole ? filterMenuByPermissions(menuItems) : filterMenuByRole(menuItems);
+  const filteredMenuItems = filterMenu(menuItems);
 
   const toggleExpanded = (itemId: string) => {
     setExpandedItems(prev =>

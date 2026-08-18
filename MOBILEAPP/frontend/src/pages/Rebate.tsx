@@ -30,6 +30,7 @@ import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { BillingDetailRecord } from '../types/billing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { usePermissions } from '../hooks/usePermissions';
 
 // Force light mode per RN migration conventions
 const isDarkMode = false;
@@ -217,13 +218,10 @@ const Rebate: React.FC = () => {
     fetchRebateData();
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   const fetchRebateData = async (silent = false) => {
     try {

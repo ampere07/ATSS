@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Role, ApiResponse } from '../types/api';
 import { roleService } from '../services/userService';
 import ModalUITemplate, { useModalTheme } from './ui-modal/ModalUITemplate';
+import { ACTIONS, labelFor, parsePermissions, permissionGroups } from '../config/permissions';
 
 interface RoleModalProps {
   isOpen: boolean;
@@ -10,103 +11,16 @@ interface RoleModalProps {
   role?: Role | null;
 }
 
-const SYSTEM_PAGES = [
-  { id: 'dashboard', label: 'Dashboard' },
-  { id: 'live-monitor', label: 'Monitoring' },
-  { id: 'customer', label: 'Customer' },
-  { id: 'transaction-list', label: 'Transaction List' },
-  { id: 'transactions-revert', label: 'Revert Requests' },
-  { id: 'payment-portal', label: 'Payment Portal' },
-  { id: 'soa', label: 'Statements' },
-  { id: 'invoice', label: 'Invoice' },
-  { id: 'overdue', label: 'Overdue' },
-  { id: 'so-charge', label: 'SO Charge' },
-  { id: 'dc-notice', label: 'DC Notice' },
-  { id: 'mass-rebate', label: 'Rebates' },
-  { id: 'staggered-payment', label: 'Staggered' },
-  { id: 'discounts', label: 'Discounts' },
-  { id: 'application-management', label: 'Application' },
-  { id: 'job-order', label: 'Job Order' },
-  { id: 'service-order', label: 'Service Order' },
-  { id: 'work-order', label: 'Work Order' },
-  { id: 'lcp-nap-location', label: 'LCP/NAP Location' },
-  { id: 'sms-blast', label: 'SMS Blast' },
-  { id: 'inventory', label: 'Inventory' },
-  { id: 'inventory-category-list', label: 'Inventory Category List' },
-  { id: 'promo-list', label: 'Promo' },
-  { id: 'plan-list', label: 'Plan' },
-  { id: 'location-list', label: 'Location' },
-  { id: 'lcp', label: 'LCP' },
-  { id: 'nap', label: 'NAP' },
-  { id: 'usage-type', label: 'Usage Type' },
-  { id: 'vlan-config', label: 'VLAN Config' },
-  { id: 'payment-method', label: 'Payment Method' },
-  { id: 'work-category', label: 'Work Category' },
-  { id: 'radius-config', label: 'Radius Config' },
-  { id: 'smart-olt', label: 'SmartOLT Config' },
-  { id: 'sms-config', label: 'SMS Config' },
-  { id: 'sms-template', label: 'SMS Template' },
-  { id: 'email-templates', label: 'Email Templates' },
-  { id: 'pppoe-setup', label: 'PPPoE Setup' },
-  { id: 'concern-config', label: 'Concern Config' },
-  { id: 'billing-config', label: 'Billing Configurations' },
-  { id: 'user-management', label: 'Users Management' },
-  { id: 'tech-users', label: 'Tech Users' },
-  { id: 'team-agent', label: 'Team Agents' },
-  { id: 'organization', label: 'Organization' },
-  { id: 'roles', label: 'Roles Management' },
-  { id: 'disconnected-logs', label: 'Disconnected Logs' },
-  { id: 'reconnection-logs', label: 'Reconnection Logs' },
-  { id: 'sms-logs', label: 'SMS Logs' },
-  { id: 'email-logs', label: 'Email Logs' },
-  { id: 'smart-olt-logs', label: 'Smart OLT Logs' },
-  { id: 'radius-logs', label: 'Radius Logs' },
-  { id: 'system-logs', label: 'System Logs' },
-  { id: 'settings', label: 'Settings' },
-];
-
-const JOB_ORDER_SUB_PERMISSIONS = [
-  { id: 'job-order.approve', label: 'Approve' },
-  { id: 'job-order.failed', label: 'Failed' },
-  { id: 'job-order.tech-edit', label: 'Tech Edit' },
-  { id: 'job-order.admin-edit', label: 'Admin Edit' },
-  { id: 'job-order.attachment', label: 'Attachment' },
-];
-
-const CUSTOMER_SUB_PERMISSIONS = [
-  { id: 'customer.so-request', label: 'SO Request' },
-  { id: 'customer.details-edit', label: 'Details Edit' },
-  { id: 'customer.attachment', label: 'Attachment' },
-  { id: 'customer.transact', label: 'Transact' },
-];
-
-const TRANSACTION_SUB_PERMISSIONS = [
-  { id: 'transaction-list.batch-approve', label: 'Batch Approve' },
-  { id: 'transaction-list.approve', label: 'Approve' },
-  { id: 'transaction-list.revert-request', label: 'Revert Request' },
-];
-
-const REBATE_SUB_PERMISSIONS = [
-  { id: 'mass-rebate.add', label: 'Add Rebate' },
-];
-
-const STAGGERED_SUB_PERMISSIONS = [
-  { id: 'staggered-payment.add', label: 'Add Staggered' },
-];
-
-const DISCOUNT_SUB_PERMISSIONS = [
-  { id: 'discounts.add', label: 'Add Discount' },
-];
-
-const APPLICATION_SUB_PERMISSIONS = [
-  { id: 'application-management.move-to-jo', label: 'Move to JO' },
-  { id: 'application-management.quick-status', label: 'Quick Status' },
-];
-
-const SERVICE_ORDER_SUB_PERMISSIONS = [
-  { id: 'service-order.tech-edit', label: 'Tech Edit' },
-  { id: 'service-order.admin-edit', label: 'Admin Edit' },
-];
+/**
+ * Pages and their sub actions come from config/permissions.ts.
+ *
+ * They used to be a list maintained here by hand, which meant a page added to
+ * the app was invisible to Role Management until somebody remembered to add it
+ * a second time — Reports, Monitoring, the Agent pages and Data Logs had all
+ * been added and none could be granted to a custom role. Reading the catalog
+ * means the modal can never fall behind it again.
+ */
+const PERMISSION_GROUPS = permissionGroups();
 
 const RoleForm: React.FC<{
   formData: any;
@@ -166,110 +80,43 @@ const RoleForm: React.FC<{
               <div className="text-center">Access</div>
               <div></div>
             </div>
-            <div className="max-h-[300px] overflow-y-auto divide-y divide-gray-200 dark:divide-gray-700">
-              {SYSTEM_PAGES.map((page) => (
-                <React.Fragment key={page.id}>
-                  <div className={`grid grid-cols-[1.5fr_80px_2fr] px-4 py-3 items-center transition-colors`}>
-                    <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{page.label}</div>
-                    <div className="flex justify-center">
-                      <input
-                        type="checkbox"
-                        checked={selectedPermissions.includes(page.id)}
-                        onChange={(e) => handlePermissionChange(page.id, e.target.checked)}
-                        className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                      />
-                    </div>
-                    <div className="flex items-center gap-x-6">
-                      {page.id === 'job-order' && JOB_ORDER_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'customer' && CUSTOMER_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'transaction-list' && TRANSACTION_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'mass-rebate' && REBATE_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'staggered-payment' && STAGGERED_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'discounts' && DISCOUNT_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'application-management' && APPLICATION_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                      {page.id === 'service-order' && SERVICE_ORDER_SUB_PERMISSIONS.map((sub) => (
-                        <div key={sub.id} className="flex flex-col items-center gap-1.5">
-                          <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{sub.label}</span>
-                          <input
-                            type="checkbox"
-                            checked={selectedPermissions.includes(sub.id)}
-                            onChange={(e) => handlePermissionChange(sub.id, e.target.checked)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
-                          />
-                        </div>
-                      ))}
-                    </div>
+            <div className="max-h-[360px] overflow-y-auto divide-y divide-gray-200 dark:divide-gray-700">
+              {PERMISSION_GROUPS.map((group) => (
+                <React.Fragment key={group.label}>
+                  {/* Section header — the same grouping the sidebar uses, so a
+                      role is ticked in the shape it will be navigated in. */}
+                  <div className={`px-4 py-2 text-[11px] font-bold uppercase tracking-wider ${isDarkMode ? 'bg-gray-800/60 text-gray-500' : 'bg-gray-50 text-gray-400'}`}>
+                    {group.label}
                   </div>
+
+                  {group.pages.map((pageId) => (
+                    <div key={pageId} className="grid grid-cols-[1.5fr_80px_2fr] px-4 py-3 items-center transition-colors">
+                      <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{labelFor(pageId)}</div>
+                      <div className="flex justify-center">
+                        <input
+                          type="checkbox"
+                          checked={selectedPermissions.includes(pageId)}
+                          onChange={(e) => handlePermissionChange(pageId, e.target.checked)}
+                          className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
+                        />
+                      </div>
+                      <div className="flex items-center gap-x-6">
+                        {(ACTIONS[pageId] || []).map((actionId) => (
+                          <div key={actionId} className="flex flex-col items-center gap-1.5">
+                            <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                              {labelFor(actionId)}
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={selectedPermissions.includes(actionId)}
+                              onChange={(e) => handlePermissionChange(actionId, e.target.checked)}
+                              className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </React.Fragment>
               ))}
             </div>
@@ -300,21 +147,9 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
           description: role.description || '',
         });
         
-        // Handle permissions (could be array from Laravel or string from legacy)
-        let perms: string[] = [];
-        if (role.permissions) {
-          if (Array.isArray(role.permissions)) {
-            perms = role.permissions;
-          } else if (typeof role.permissions === 'string') {
-            try {
-              const parsed = JSON.parse(role.permissions);
-              perms = Array.isArray(parsed) ? parsed : [];
-            } catch (e) {
-              perms = role.permissions.split(',').map(p => p.trim()).filter(Boolean);
-            }
-          }
-        }
-        setSelectedPermissions(perms);
+        // Array from Laravel's cast, or a JSON / comma-separated string on a
+        // row written before that cast existed.
+        setSelectedPermissions(parsePermissions(role.permissions));
       } else {
         setFormData({
           role_name: '',

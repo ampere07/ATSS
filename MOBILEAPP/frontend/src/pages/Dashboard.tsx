@@ -24,6 +24,10 @@ import DisconnectionLogs from './DisconnectionLogs';
 import ReconnectionLogs from './ReconnectionLogs';
 import Sidebar from './Sidebar';
 import DashboardContent from '../components/DashboardContent';
+import AccessDenied from '../components/AccessDenied';
+import apiClient from '../config/api';
+import { usePermissions } from '../hooks/usePermissions';
+import { homeSectionFor, permissionForSection } from '../config/permissions';
 // import UserManagement from './UserManagement';
 // import OrganizationManagement from './OrganizationManagement';
 // import { BillingProvider } from '../contexts/BillingContext';
@@ -130,6 +134,9 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
     useLocationTracking();
     const [userData, setUserData] = useState<any>(null);
     const [activeSection, setActiveSection] = useState('dashboard');
+    // Permissions for the signed-in user. `userData` is loaded below; passing it
+    // in means this does not read AsyncStorage a second time.
+    const { can, home, ready: permissionsReady } = usePermissions(userData);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -157,22 +164,40 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     const user = JSON.parse(authData);
                     setUserData(user);
 
-                    // Use the initialized user data if available
-                    if (user.role === 'customer') {
-                        setActiveSection('customer-dashboard');
-                    } else if (user.role?.toLowerCase() === 'agent') {
-                        setActiveSection('agent-dashboard');
-                    } else if (String(user.role_id) === '6' || user.role?.toLowerCase() === 'osp') {
-                        setActiveSection('work-order');
-                    } else if (user.role === 'technician' || String(user.role_id) === '4') {
-                        setActiveSection('job-order');
-                    } else if (user.role?.toLowerCase() === 'inventorystaff' || String(user.role_id) === '5') {
-                        setActiveSection('inventory');
-                    } else if (user.role?.toLowerCase() === 'headtech' || String(user.role_id) === '7' || String(user.role_id) === '8') {
-                        setActiveSection('applicationManagement');
+                    // Where this role lands, from the shared table.
+                    //
+                    // The ladder this replaced had drifted: it read role_id 4
+                    // (Agent) as "technician" and role_id 7 (SuperAdmin) as
+                    // "headtech", so an agent whose role name was missing landed
+                    // on Job Order and a SuperAdmin landed on Application
+                    // Management instead of the dashboard.
+                    setActiveSection(homeSectionFor(user));
+
+                    // Reconcile against the server, which is the authority on
+                    // what this role holds. The stored list is a snapshot taken
+                    // at sign-in; asking once per launch means a role edited
+                    // while somebody is signed in takes effect on their next
+                    // launch rather than their next sign-in.
+                    //
+                    // Failure is not fatal — the stored list, or the role table
+                    // for a seeded role, carries on being used.
+                    try {
+                        const response = await apiClient.get<{
+                            success: boolean;
+                            data: { permissions: string[]; home: string | null };
+                        }>('/me/permissions');
+
+                        const fresh = response.data?.data;
+
+                        if (response.data?.success && Array.isArray(fresh?.permissions)) {
+                            const updated = { ...user, permissions: fresh.permissions, home: fresh.home };
+                            setUserData(updated);
+                            await AsyncStorage.setItem('authData', JSON.stringify(updated));
+                            setActiveSection(homeSectionFor(updated));
+                        }
+                    } catch (err) {
+                        console.error('Failed to refresh permissions:', err);
                     }
-
-
                 }
             } catch (error) {
                 console.error('Error parsing user data:', error);
@@ -220,7 +245,20 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         }
     }, [width]);
 
+    /**
+     * The section guard.
+     *
+     * There is no URL to type here, but a section is still reachable from more
+     * than the tab bar — a push notification's deep link, a button on another
+     * screen, a restored session — so the check belongs at the point the
+     * section is rendered rather than at the point it is listed. It is the same
+     * key the API will demand a moment later.
+     */
     const content = useMemo(() => {
+        if (permissionsReady && !can(permissionForSection(activeSection))) {
+            return <AccessDenied section={activeSection} onGoHome={() => handleSectionChange(home)} />;
+        }
+
         switch (activeSection) {
             // Customer Routes
             case 'customer-dashboard':
@@ -306,7 +344,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
             case 'live-monitor':
                 return <LiveMonitor />;
             case 'applicationManagement':
-                return <ApplicationManagement />;
+                return <ApplicationManagement onNavigate={handleSectionChange} onLogout={onLogout} />;
             case 'applicationVisit':
                 return <ApplicationVisit />;
             case 'activity-logs':
@@ -389,7 +427,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <DashboardContent />;
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeSection, billsInitialTab, userData?.role_id, onLogout, handleSectionChange]);
+    }, [activeSection, billsInitialTab, userData?.role_id, onLogout, handleSectionChange, can, permissionsReady, home]);
 
     const handleSearch = (query: string) => {
         setSearchQuery(query);

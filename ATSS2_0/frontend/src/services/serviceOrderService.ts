@@ -152,6 +152,26 @@ export const updateServiceOrder = async (id: string, serviceOrderData: Partial<S
   }
 };
 
+/**
+ * Release a service order to its technician ahead of their queue.
+ *
+ * Administrator-only on the server, so the flag cannot be flipped by the
+ * technician whose queue it governs.
+ */
+export const enableServiceOrderForTechnician = async (id: string | number) => {
+  try {
+    const idStr = id.toString();
+    const authData = localStorage.getItem('authData');
+    const currentUser = authData ? JSON.parse(authData) : null;
+    const payload = currentUser?.email ? { updated_by_user: currentUser.email } : {};
+    const response = await apiClient.post<ApiResponse<any>>(`/service-orders/${idStr}/enable-technician`, payload);
+    return response.data;
+  } catch (error) {
+    console.error('Error enabling service order for technician:', error);
+    throw error;
+  }
+};
+
 export const deleteServiceOrder = async (id: string) => {
   try {
     const response = await apiClient.delete<ApiResponse<void>>(`/service-orders/${id}`);

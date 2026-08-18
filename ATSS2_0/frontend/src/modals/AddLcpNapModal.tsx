@@ -3,6 +3,7 @@ import { X, Camera, MapPin } from 'lucide-react';
 import { API_BASE_URL } from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { getActiveImageSize, resizeImage, ImageSizeSetting } from '../services/imageSettingsService';
+import { authFetch } from '../config/api';
 
 interface AddLcpNapModalProps {
   isOpen: boolean;
@@ -147,9 +148,9 @@ const AddLcpNapModal: React.FC<AddLcpNapModalProps> = ({
   const loadDropdownData = async () => {
     try {
       const [lcpResponse, napResponse, regionsResponse] = await Promise.all([
-        fetch(`${API_BASE_URL}/lcp`),
-        fetch(`${API_BASE_URL}/nap`),
-        fetch(`${API_BASE_URL}/locations/regions`)
+        authFetch(`${API_BASE_URL}/lcp`),
+        authFetch(`${API_BASE_URL}/nap`),
+        authFetch(`${API_BASE_URL}/locations/regions`)
       ]);
 
       const lcpData = await lcpResponse.json();
@@ -173,7 +174,7 @@ const AddLcpNapModal: React.FC<AddLcpNapModalProps> = ({
 
     setIsLoadingLocations(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/locations/regions/${regionId}/cities`);
+      const response = await authFetch(`${API_BASE_URL}/locations/regions/${regionId}/cities`);
       const data = await response.json();
       if (data.success) setCities(data.data || []);
     } catch (error) {
@@ -191,7 +192,7 @@ const AddLcpNapModal: React.FC<AddLcpNapModalProps> = ({
 
     setIsLoadingLocations(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/locations/cities/${cityId}/barangays`);
+      const response = await authFetch(`${API_BASE_URL}/locations/cities/${cityId}/barangays`);
       const data = await response.json();
       if (data.success) setBarangays(data.data || []);
     } catch (error) {
@@ -326,7 +327,7 @@ const AddLcpNapModal: React.FC<AddLcpNapModalProps> = ({
 
       const method = editingItem ? 'PUT' : 'POST';
 
-      const response = await fetch(url, {
+      const response = await authFetch(url, {
         method,
         headers: {
           'Accept': 'application/json',

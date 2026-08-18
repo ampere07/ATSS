@@ -142,6 +142,7 @@ class JobOrderController extends Controller
                         'start_time' => $jobOrder->start_time,
                         'end_time' => $jobOrder->end_time,
                         'technicians' => $jobOrder->technicians,
+                        'technician_enabled' => (bool) $jobOrder->technician_enabled,
                     ];
                 });
 
@@ -192,6 +193,9 @@ class JobOrderController extends Controller
                     'start_time' => $jobOrder->start_time,
                     'end_time' => $jobOrder->end_time,
                     'technicians' => $jobOrder->technicians,
+                    // Drives the technician queue lock on both clients: the list
+                    // greys out newer job orders unless this says otherwise.
+                    'technician_enabled' => (bool) $jobOrder->technician_enabled,
                     'usage_type' => $jobOrder->usage_type,
                     'connection_type' => $jobOrder->connection_type,
                     'router_model' => $jobOrder->router_model,
@@ -471,7 +475,24 @@ class JobOrderController extends Controller
             }
 
             $jobOrder = $query->with('lcpnapLocation')->findOrFail($id);
-            
+
+            // A technician works their queue oldest first. Enforced here as well
+            // as in the UI so the lock cannot be stepped over by calling the API
+            // directly with a newer job order's id.
+            if ($this->isJobOrderLockedForTechnician($jobOrder, $currentUser)) {
+                DB::rollBack();
+
+                \Log::warning('JobOrder Update blocked: locked for technician', [
+                    'id' => $id,
+                    'user_email' => $currentUser->email ?? null,
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This job order is locked. Finish the job order at the top of your list first, or ask an administrator to enable this one.',
+                ], 403);
+            }
+
             $generateCredentials = $request->input('generate_credentials', false);
             
             // Auto-generate credentials if pppoe_username is provided but pppoe_password is empty
@@ -1013,6 +1034,65 @@ class JobOrderController extends Controller
         }
     }
 
+    /**
+     * Settle the referring agent for a job order being approved, if there is one
+     * and if the settlement service is available.
+     *
+     * Three outcomes, deliberately treated differently:
+     *
+     *   • No referral recorded — a job order nobody referred is a perfectly
+     *     ordinary approval (walk-ins and direct sign-ups). Skipped without
+     *     reaching for the service at all.
+     *   • The service cannot be resolved — that means the class is missing from
+     *     THIS deployment, not that anything is wrong with the job order. Nothing
+     *     has been written at that point, so the approval carries on and the gap
+     *     is logged as an error for whoever deploys. The row keeps a null
+     *     agent_paid_at, so it stays eligible to be settled once the deployment
+     *     catches up; blocking every approval instead would be far worse.
+     *   • A failure INSIDE settle() stays fatal on purpose: it runs in the
+     *     approval's transaction, and a half-applied credit must roll back with
+     *     it rather than leave an agent's balance wrong.
+     *
+     * @return array{paid: bool, reason: string, agent_id: ?int,
+     *               commission: float, incentive_value: float}
+     */
+    private function settleReferringAgent(JobOrder $jobOrder, ?string $actionBy): array
+    {
+        $skipped = static fn (string $reason): array => [
+            'paid'            => false,
+            'reason'          => $reason,
+            'agent_id'        => null,
+            'commission'      => 0.0,
+            'incentive_value' => 0.0,
+        ];
+
+        // Resolved exactly the way JobOrderAgentPaymentService::referringAgent()
+        // does, including the fallback read, so this pre-check cannot disagree
+        // with the service about whether a referral exists.
+        $referredBy = optional($jobOrder->application)->referred_by;
+        if (!$referredBy && $jobOrder->application_id) {
+            $referredBy = DB::table('applications')->where('id', $jobOrder->application_id)->value('referred_by');
+        }
+
+        if (trim((string) $referredBy) === '') {
+            return $skipped('no referred_by on the application');
+        }
+
+        try {
+            $service = app(\App\Services\JobOrderAgentPaymentService::class);
+        } catch (\Throwable $e) {
+            \Log::error('Job Order Approval - agent settlement unavailable, approving without it', [
+                'job_order_id' => $jobOrder->getKey(),
+                'exception'    => get_class($e),
+                'error'        => $e->getMessage(),
+            ]);
+
+            return $skipped('settlement service unavailable');
+        }
+
+        return $service->settle($jobOrder, $actionBy);
+    }
+
     public function approve($id): JsonResponse
     {
         try {
@@ -1316,8 +1396,7 @@ class JobOrderController extends Controller
             // leaving an agent paid for a job order that was never approved.
             // A job order already carrying agent_paid_at is left alone, so
             // approving twice cannot pay twice.
-            $agentPayment = app(\App\Services\JobOrderAgentPaymentService::class)
-                ->settle($jobOrder, $actionUserEmail);
+            $agentPayment = $this->settleReferringAgent($jobOrder, $actionUserEmail);
 
             DB::commit();
 
@@ -1692,8 +1771,18 @@ class JobOrderController extends Controller
             }
 
             $jobOrder = JobOrder::findOrFail($id);
+
+            // Same oldest-first queue rule as update(): a technician cannot attach
+            // work to a job order they are not allowed to open yet.
+            if ($this->isJobOrderLockedForTechnician($jobOrder, auth()->user())) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This job order is locked. Finish the job order at the top of your list first, or ask an administrator to enable this one.',
+                ], 403);
+            }
+
             $applicationId = $jobOrder->application_id ?? $jobOrder->Application_ID;
-            
+
             if (!$applicationId) {
                 return response()->json([
                     'success' => false,
@@ -2162,6 +2251,211 @@ class JobOrderController extends Controller
                 'error'   => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Release a job order to its technician ahead of their queue.
+     *
+     * Technicians work oldest first: only the oldest job order still open to them
+     * is actionable, everything newer is greyed out. An administrator calls this
+     * to unlock one specific job order early. Restricted to administrators by the
+     * `role` middleware on the route — the flag is not fillable, so this is the
+     * only way it can be set.
+     */
+    public function enableForTechnician(Request $request, $id): JsonResponse
+    {
+        try {
+            $query = JobOrder::query();
+            $currentUser = auth()->user();
+            if ($currentUser) {
+                if ($currentUser->organization_id) {
+                    $query->where('organization_id', $currentUser->organization_id);
+                } else {
+                    $query->whereNull('organization_id');
+                }
+            }
+
+            $jobOrder = $query->findOrFail($id);
+
+            // Already released — answer successfully with the current state rather
+            // than writing an audit entry for a no-op.
+            if ($jobOrder->technician_enabled) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'This job order is already enabled for the technician.',
+                    'data' => [
+                        'id' => $jobOrder->id,
+                        'technician_enabled' => true,
+                    ],
+                ]);
+            }
+
+            $performedBy = $request->input('updated_by_user_email')
+                ?? optional($currentUser)->email_address
+                ?? optional($currentUser)->email
+                ?? 'System';
+
+            $jobOrder->technician_enabled = true;
+            $jobOrder->updated_by_user_email = $performedBy;
+            $jobOrder->save();
+
+            AuditTrailLog::create([
+                'old_details' => [
+                    'type' => 'joborders',
+                    'id' => $jobOrder->id,
+                    'data' => ['technician_enabled' => false],
+                ],
+                'new_details' => [
+                    'type' => 'joborders',
+                    'id' => $jobOrder->id,
+                    'data' => ['technician_enabled' => true],
+                ],
+                'created_by_user' => $performedBy,
+                'updated_by_user' => $performedBy,
+            ]);
+
+            ActivityLog::log(
+                'Job Order Enabled For Technician',
+                "Job Order #{$jobOrder->id} unlocked for technician access by {$performedBy}",
+                'info',
+                [
+                    'user_email' => $performedBy,
+                    'resource_type' => 'JobOrder',
+                    'resource_id' => $jobOrder->id,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Job order enabled for technician access.',
+                'data' => [
+                    'id' => $jobOrder->id,
+                    'technician_enabled' => true,
+                ],
+            ]);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Job order not found',
+            ], 404);
+        } catch (\Exception $e) {
+            \Log::error('Failed to enable job order for technician', [
+                'job_order_id' => $id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to enable job order for technician',
+                'error' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Is this job order locked for the signed-in user because it is not their
+     * next one in the queue?
+     *
+     * Only ever true for technicians. A job order is open when any of these hold:
+     *   • it heads the queue of work still assigned to them — the oldest In
+     *     Progress job order, or the oldest other active one when they have none
+     *     in progress, or the oldest rescheduled one when that is all that is
+     *     left. A reschedule sorts last, so it reaches the head only when there
+     *     is no active work in front of it;
+     *   • an administrator enabled it (technician_enabled);
+     *   • they have already started it and not yet closed it — a job in flight
+     *     must never become unreachable;
+     *   • it is finished, failed or cancelled: nothing is left to act on.
+     *
+     * A rescheduled job order is deliberately NOT open on its status alone. It
+     * stays out of the queue's way, so it never blocks the work behind it, but
+     * picking it back up is an administrator's call — otherwise a reschedule
+     * would be the one status a technician could always act on, whatever else
+     * they had waiting, which is how a rescheduled job order came to be editable
+     * while its own Start button was still locked.
+     *
+     * A job order that is not part of the technician's own assigned queue is left
+     * alone: this restriction governs the order of their own work, and must not
+     * start blocking records reached some other way.
+     */
+    private function isJobOrderLockedForTechnician(JobOrder $jobOrder, $currentUser): bool
+    {
+        if (!$currentUser || (int) $currentUser->role_id !== Role::TECHNICIAN) {
+            return false;
+        }
+
+        if ($jobOrder->technician_enabled) {
+            return false;
+        }
+
+        $onsiteStatus = strtolower(trim((string) $jobOrder->onsite_status));
+        if (in_array($onsiteStatus, JobOrder::TECHNICIAN_QUEUE_CLOSED_ONSITE_STATUSES, true)) {
+            return false;
+        }
+
+        // Already in flight for this technician. A zero date counts as unset, the
+        // same way the two clients read these columns.
+        $isTimeSet = static function ($value): bool {
+            $normalised = strtolower(trim((string) $value));
+            return !in_array($normalised, ['', '0000-00-00 00:00:00', 'not set', '-', 'none', 'null'], true);
+        };
+
+        if ($isTimeSet($jobOrder->start_time) && !$isTimeSet($jobOrder->end_time)) {
+            return false;
+        }
+
+        $technicianEmail = $currentUser->email ?? $currentUser->email_address ?? null;
+        if (!$technicianEmail) {
+            return false;
+        }
+
+        // The technician's open queue, in the order the two clients paint their
+        // list: In Progress first, then other active work, then deferred work
+        // last, oldest first within each band on the job order's own timestamp
+        // falling back to the row's creation date. So the head of this list is
+        // the row that appears at the top of the technician's screen.
+        //
+        // Deferred work is ranked here rather than excluded with the finished
+        // work. Sorting last is what keeps it from taking the slot away from
+        // active work; excluding it made it neither next nor locked.
+        //
+        // Membership of THIS list is also what decides whether the job order is
+        // one of theirs to queue at all. Testing ownership separately would mean
+        // two comparisons of the same email that can disagree — and a
+        // disagreement fails open, because an empty queue never blocks.
+        $inProgressFirst = sprintf(
+            "CASE WHEN LOWER(TRIM(COALESCE(onsite_status, ''))) IN ('%s') THEN 0 ELSE 1 END",
+            implode("', '", JobOrder::TECHNICIAN_IN_PROGRESS_ONSITE_STATUSES)
+        );
+
+        $deferredLast = sprintf(
+            "CASE WHEN LOWER(TRIM(COALESCE(onsite_status, ''))) IN ('%s') THEN 1 ELSE 0 END",
+            implode("', '", JobOrder::TECHNICIAN_QUEUE_DEFERRED_ONSITE_STATUSES)
+        );
+
+        $queue = JobOrder::where('assigned_email', $technicianEmail)
+            ->whereNotIn(
+                DB::raw("LOWER(TRIM(COALESCE(onsite_status, '')))"),
+                JobOrder::TECHNICIAN_QUEUE_CLOSED_ONSITE_STATUSES
+            )
+            ->when($currentUser->organization_id, function ($q) use ($currentUser) {
+                $q->where('organization_id', $currentUser->organization_id);
+            }, function ($q) {
+                $q->whereNull('organization_id');
+            })
+            ->orderBy(DB::raw($deferredLast))
+            ->orderBy(DB::raw($inProgressFirst))
+            ->orderBy(DB::raw('COALESCE(`timestamp`, `created_at`)'))
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id);
+
+        // Not part of their own queue — leave the existing behaviour alone.
+        if (!$queue->contains((int) $jobOrder->id)) {
+            return false;
+        }
+
+        return $queue->first() !== (int) $jobOrder->id;
     }
 
     /**

@@ -78,8 +78,11 @@ import Roles from './roles';
 import Commission from './Commission';
 import AgentPayout from './AgentPayout';
 import AgentInvoice from './AgentInvoice';
+import AccessDenied from '../components/AccessDenied';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
-import { roleService } from '../services/userService';
+import { usePermissions } from '../hooks/usePermissions';
+import { homeSectionFor, permissionForSection, permissionsAllow } from '../config/permissions';
+import apiClient from '../config/api';
 
 interface DashboardProps {
     onLogout: () => void;
@@ -96,46 +99,21 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         }
     });
 
+    // Where this user lands. The per-role ladder this replaced repeated the role
+    // table a third time and had no answer for a custom role beyond "the first
+    // key in the array", which could be a sub action. homeSectionFor uses the
+    // landing page the server named, falling back to the role's own.
     const [activeSection, setActiveSection] = useState(() => {
         try {
             const authData = localStorage.getItem('authData');
-            if (authData) {
-                const user = JSON.parse(authData);
-                const normalizedRole = user.role?.toLowerCase().replace(/\s+/g, '') || '';
-                if (normalizedRole === 'customer' || String(user.role_id) === '3') {
-                    return 'customer-dashboard';
-                }
-                if (normalizedRole === 'agent' || String(user.role_id) === '4') {
-                    return 'agent-dashboard';
-                }
-                if (normalizedRole === 'technician' || String(user.role_id) === '2') {
-                    return 'job-order';
-                }
-                if (String(user.role_id) === '7' || normalizedRole === 'superadmin') {
-                    return 'dashboard';
-                }
-                if (normalizedRole === 'administrator' || String(user.role_id) === '1') {
-                    return 'dashboard';
-                }
-                if (String(user.role_id) === '8' || normalizedRole === 'headtech') {
-                    return 'application-management';
-                }
-                if (normalizedRole === 'osp' || String(user.role_id) === '6') {
-                    return 'work-order';
-                }
-                if (normalizedRole === 'inventorystaff' || String(user.role_id) === '5') {
-                    return 'inventory';
-                }
-                // Custom roles (role_id > 8): land on the first page in their permissions
-                if (user.role_id > 8 && user.permissions && Array.isArray(user.permissions) && user.permissions.length > 0) {
-                    return user.permissions[0];
-                }
-            }
+            return homeSectionFor(authData ? JSON.parse(authData) : null);
         } catch (e) {
             console.error(e);
+            return 'dashboard';
         }
-        return 'dashboard';
     });
+
+    const { can, home } = usePermissions();
 
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -200,50 +178,66 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         };
     }, []);
 
-    // Fetch permissions from API for custom roles if not available in authData
+    /**
+     * Reconcile this session's permissions against the server.
+     *
+     * The list stored at sign-in is a snapshot. Asking once per load means a
+     * role edited while somebody is signed in takes effect on their next load
+     * rather than their next sign-in, and it is the server's answer rather than
+     * the client's copy of the role table — so a custom role whose list never
+     * reached the client (the mobile app used to drop it at login) still gets
+     * one.
+     *
+     * A failure here is not fatal: the stored list, or the role table for a
+     * seeded role, carries on being used.
+     */
     useEffect(() => {
         if (!userData || !userData.role_id) return;
-        const rid = Number(userData.role_id);
-        if (rid <= 8) return; // Locked role, skip
 
-        // Check if permissions are already available
-        if (userData.permissions && Array.isArray(userData.permissions) && userData.permissions.length > 0) return;
+        let cancelled = false;
 
-        const fetchRolePermissions = async () => {
+        const reconcile = async () => {
             try {
-                const response = await roleService.getRoleById(rid);
-                if (response.success && response.data) {
-                    let perms: string[] = [];
-                    const rawPerms = response.data.permissions;
-                    if (Array.isArray(rawPerms)) {
-                        perms = rawPerms;
-                    } else if (typeof rawPerms === 'string') {
-                        try {
-                            const parsed = JSON.parse(rawPerms);
-                            perms = Array.isArray(parsed) ? parsed : [];
-                        } catch (e) {
-                            perms = rawPerms.split(',').map(p => p.trim()).filter(Boolean);
-                        }
-                    }
+                const response = await apiClient.get<{
+                    success: boolean;
+                    data: { permissions: string[]; home: string | null };
+                }>('/me/permissions');
 
-                    if (perms.length > 0) {
-                        // Update userData state
-                        const updatedUser = { ...userData, permissions: perms };
-                        setUserData(updatedUser);
-                        // Update localStorage
-                        localStorage.setItem('authData', JSON.stringify(updatedUser));
-                        // Navigate to the first allowed page if currently on dashboard (default)
-                        if (activeSection === 'dashboard') {
-                            setActiveSection(perms[0]);
-                        }
-                    }
-                }
+                if (cancelled || !response.data?.success) return;
+
+                const { permissions, home: serverHome } = response.data.data;
+                if (!Array.isArray(permissions)) return;
+
+                const stored = Array.isArray(userData.permissions) ? userData.permissions : [];
+                const unchanged =
+                    stored.length === permissions.length &&
+                    stored.every((key: string) => permissions.includes(key)) &&
+                    userData.home === serverHome;
+
+                if (unchanged) return;
+
+                const updatedUser = { ...userData, permissions, home: serverHome };
+                setUserData(updatedUser);
+                localStorage.setItem('authData', JSON.stringify(updatedUser));
+                // usePermissions elsewhere in the tree listens for this; a
+                // `storage` event only fires in other tabs.
+                window.dispatchEvent(new Event('auth-changed'));
+
+                // If the section on screen is no longer this role's to open,
+                // move rather than leave them staring at a refusal.
+                setActiveSection(current =>
+                    permissionsAllow(permissions, permissionForSection(current))
+                        ? current
+                        : homeSectionFor(updatedUser)
+                );
             } catch (err) {
-                console.error('Failed to fetch role permissions for custom role:', err);
+                console.error('Failed to refresh permissions:', err);
             }
         };
 
-        fetchRolePermissions();
+        reconcile();
+
+        return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [userData?.role_id]);
 
@@ -260,7 +254,30 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         fetchColorPalette();
     }, []);
 
+    /**
+     * The section guard.
+     *
+     * This is the app's route protection. There is no URL router here — a
+     * section is a piece of state — but the state is reachable from more than
+     * the sidebar: a deep link handed to onNavigate, a restored session, a
+     * button on another page. Checking here rather than in the sidebar means
+     * the check holds however the section was chosen, and it is the same key
+     * the API will demand a moment later.
+     */
     const renderContent = () => {
+        if (!can(permissionForSection(activeSection))) {
+            return (
+                <AccessDenied
+                    section={activeSection}
+                    onGoHome={() => handleSectionChange(home)}
+                />
+            );
+        }
+
+        return renderSection();
+    };
+
+    const renderSection = () => {
         switch (activeSection) {
             // Customer Routes
             case 'customer-dashboard':

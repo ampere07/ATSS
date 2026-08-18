@@ -674,8 +674,14 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
         jobOrderUpdateData.visit_by = null;
         jobOrderUpdateData.visit_with = null;
         jobOrderUpdateData.visit_with_other = null;
-        jobOrderUpdateData.onsite_remarks = null;
-        jobOrderUpdateData.status_remarks = null;
+        // The remarks deliberately survive. Setting a job order back to In
+        // Progress clears the technical and installation data because the
+        // install is being redone — but onsite_remarks and status_remarks are
+        // the written record of what happened last time, and that is exactly
+        // what whoever picks the job up next needs to read.
+        // status_remarks is simply left out of the payload, so the value
+        // already on the row stays untouched; onsite_remarks is sent from the
+        // form, which loaded it from the record.
         jobOrderUpdateData.setup_image_url = null;
         jobOrderUpdateData.speedtest_image_url = null;
         jobOrderUpdateData.box_reading_image_url = null;
@@ -1025,6 +1031,13 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
                 {errors.status && <p className="text-red-500 text-xs mt-1">{errors.status}</p>}
               </div>
 
+                {/*
+                  Team names are group headings here, not choices. A referral has
+                  to name one agent: referred_by is what the commission is settled
+                  against when the job order is approved, and a team name matches
+                  no agent, so it would silently leave the referral unpaid. Teams
+                  stay searchable — typing one still lists its members to pick from.
+                */}
                 <SearchableField
                   label="Referred By"
                   value={formData.referredBy}
@@ -1033,7 +1046,7 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
                   optionLabelKey="name"
                   isDarkMode={isDarkMode}
                   placeholder="Search Agent..."
-                  isHeaderSelectable={true}
+                  isHeaderSelectable={false}
                 />
 
             </div>

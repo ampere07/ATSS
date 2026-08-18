@@ -3,6 +3,7 @@ import { Alert, Keyboard, DeviceEventEmitter } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as ImagePicker from 'expo-image-picker';
 import * as ExpoFileSystem from 'expo-file-system/legacy';
+import { saveImagesToGallery } from '../utils/saveImagesToGallery';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
@@ -607,6 +608,42 @@ export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onCl
         boxReadingImageFile: 'box_reading_image_url',
         portLabelImageFile: 'speedtest_image_url'
       };
+
+      // What each photo is called in the gallery. The form's own keys carry a
+      // "File" suffix that means nothing to a technician looking through their
+      // camera roll, so each one is given the plain name of the thing it is a
+      // picture of.
+      const galleryFieldNames: Record<string, string> = {
+        timeInFile: 'time_in_image',
+        modemSetupFile: 'modem_setup_image',
+        timeOutFile: 'time_out_image',
+        clientSignatureFile: 'client_signature_image',
+        proofImageFile: 'proof_image',
+        setupImageFile: 'setup_image',
+        routerReadingImageFile: 'router_reading_image',
+        boxReadingImageFile: 'box_reading_image',
+        portLabelImageFile: 'port_label_image'
+      };
+
+      // Keep a copy on the phone BEFORE anything is uploaded, so a failed
+      // upload or a lost connection cannot leave the technician with no record
+      // of the visit. Filed as "<field>, <first name> <last name>".
+      //
+      // Awaited so the copies exist before the first request goes out, but
+      // never allowed to throw: the submission matters more than the keepsake.
+      await saveImagesToGallery(
+        Object.keys(fileKeyMap).map(fKey => ({
+          field: galleryFieldNames[fKey] || fKey,
+          uri: (imageFiles as any)[fKey]?.uri
+        })),
+        String(
+          serviceOrderData?.full_name
+          || serviceOrderData?.fullName
+          || finalData?.fullName
+          || ''
+        ).trim()
+      );
+
       for (const [fKey, aKey] of Object.entries(fileKeyMap)) {
         const asset = (imageFiles as any)[fKey];
         if (asset) {

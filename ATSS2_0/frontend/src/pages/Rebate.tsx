@@ -10,6 +10,7 @@ import { exportToCSV } from '../utils/exportUtils';
 import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { BillingDetailRecord } from '../types/billing';
+import { usePermissions } from '../hooks/usePermissions';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -154,13 +155,10 @@ const Rebate: React.FC = () => {
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   const formatDate = (dateStr?: string, includeTime: boolean = false): string => {
     if (!dateStr) return 'No date';

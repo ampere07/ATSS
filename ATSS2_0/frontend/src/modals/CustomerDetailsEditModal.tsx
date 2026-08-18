@@ -1280,6 +1280,13 @@ const CustomerDetailsEditModal: React.FC<CustomerDetailsEditModalProps> = ({
                   </div>
                 </div>
 
+                {/*
+                  Team names are group headings here, not choices. A referral has
+                  to name one agent: referred_by is what the commission is settled
+                  against when the job order is approved, and a team name matches
+                  no agent, so it would silently leave the referral unpaid. Teams
+                  stay searchable — typing one still lists its members to pick from.
+                */}
                 <SearchableField
                   label="Referred By"
                   value={formData.referredBy}
@@ -1288,7 +1295,7 @@ const CustomerDetailsEditModal: React.FC<CustomerDetailsEditModalProps> = ({
                   optionLabelKey="name"
                   isDarkMode={isDarkMode}
                   placeholder="Search Agent..."
-                  isHeaderSelectable={true}
+                  isHeaderSelectable={false}
                 />
 
                 <ImagePreview

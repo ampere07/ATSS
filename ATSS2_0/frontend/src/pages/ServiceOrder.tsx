@@ -12,6 +12,12 @@ import apiClient from '../config/api';
 import { exportToCSV } from '../utils/exportUtils';
 import { userService } from '../services/userService';
 import { User } from '../types/api';
+import {
+  buildTechnicianLockedServiceOrderIds,
+  isTechnicianUser,
+  sortServiceOrdersForTechnician,
+  TECHNICIAN_LOCKED_MESSAGE
+} from '../utils/technicianServiceOrderAccess';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -295,6 +301,12 @@ const ServiceOrderPage: React.FC = () => {
         setRoleId(userData.role_id || null);
         if (userData.role && userData.role.toLowerCase() === 'technician' && userData.email) {
           setTechnicianEmail(userData.email);
+        }
+        // Technicians land on their queue in the order they are expected to work
+        // it, which the presort applies when no column sort is set. Clicking a
+        // column header still sorts, for them as for everyone else.
+        if (isTechnicianUser(userData.role, userData.role_id)) {
+          setSortColumn(null);
         }
       } catch (error) {
         console.error('Error parsing auth data:', error);
@@ -843,6 +855,23 @@ const ServiceOrderPage: React.FC = () => {
     };
   }, [globalFilteredServiceOrders, barangays]);
 
+  const isTechnician = isTechnicianUser(userRole, roleId);
+
+  /**
+   * The service orders a technician may not open yet.
+   *
+   * Built from their whole accessible set — the API already scopes it to them —
+   * and NOT from the filtered or paginated view, so searching, filtering or
+   * paging can never change which record counts as their next one.
+   */
+  const technicianLockedIds = useMemo(() => {
+    if (!isTechnician) return new Set<string>();
+    return buildTechnicianLockedServiceOrderIds(serviceOrders);
+  }, [isTechnician, serviceOrders]);
+
+  const isServiceOrderLocked = (serviceOrder: ServiceOrder): boolean =>
+    technicianLockedIds.has(String(serviceOrder.id));
+
   const filteredServiceOrders = useMemo(() => {
     let filtered = globalFilteredServiceOrders.filter(serviceOrder => {
       if (selectedLocation === 'all') return true;
@@ -888,23 +917,30 @@ const ServiceOrderPage: React.FC = () => {
       return false;
     });
 
-    filtered.sort((a, b) => {
-      // 1. Prioritize 'timestamp' as requested, fallback to 'createdAt'
-      const dateA = a.timestamp || a.createdAt || '';
-      const dateB = b.timestamp || b.createdAt || '';
-      
-      const timeA = dateA ? new Date(dateA).getTime() : 0;
-      const timeB = dateB ? new Date(dateB).getTime() : 0;
-      
-      if (!isNaN(timeA) && !isNaN(timeB) && timeA !== timeB) {
-        return timeB - timeA;
-      }
-      
-      // 2. Fallback to ID comparison (numeric logic to ensure latest ID is first)
-      const idA = parseInt(String(a.id).replace(/\D/g, '')) || 0;
-      const idB = parseInt(String(b.id).replace(/\D/g, '')) || 0;
-      return idB - idA;
-    });
+    // Technicians read their list in the order they work it: In Progress oldest
+    // first, then other active work, with Done / Reschedule / Failed at the end.
+    // Every other role keeps the newest-first default untouched.
+    if (isTechnician) {
+      filtered = sortServiceOrdersForTechnician(filtered);
+    } else {
+      filtered.sort((a, b) => {
+        // 1. Prioritize 'timestamp' as requested, fallback to 'createdAt'
+        const dateA = a.timestamp || a.createdAt || '';
+        const dateB = b.timestamp || b.createdAt || '';
+
+        const timeA = dateA ? new Date(dateA).getTime() : 0;
+        const timeB = dateB ? new Date(dateB).getTime() : 0;
+
+        if (!isNaN(timeA) && !isNaN(timeB) && timeA !== timeB) {
+          return timeB - timeA;
+        }
+
+        // 2. Fallback to ID comparison (numeric logic to ensure latest ID is first)
+        const idA = parseInt(String(a.id).replace(/\D/g, '')) || 0;
+        const idB = parseInt(String(b.id).replace(/\D/g, '')) || 0;
+        return idB - idA;
+      });
+    }
 
     if (sortColumn) {
       filtered = [...filtered].sort((a, b) => {
@@ -936,7 +972,7 @@ const ServiceOrderPage: React.FC = () => {
     }
 
     return filtered;
-  }, [globalFilteredServiceOrders, selectedLocation, sortColumn, sortDirection, barangays, getVal]);
+  }, [globalFilteredServiceOrders, selectedLocation, sortColumn, sortDirection, barangays, getVal, isTechnician]);
 
   // Derived paginated records
   const paginatedServiceOrders = useMemo(() => {
@@ -1911,13 +1947,22 @@ const ServiceOrderPage: React.FC = () => {
               ) : displayMode === 'card' ? (
                 paginatedServiceOrders.length > 0 ? (
                   <div className="space-y-0">
-                    {paginatedServiceOrders.map((serviceOrder) => (
+                    {paginatedServiceOrders.map((serviceOrder) => {
+                      const locked = isServiceOrderLocked(serviceOrder);
+                      return (
                       <div
                         key={serviceOrder.id}
-                        onClick={() => handleRowClick(serviceOrder)}
-                        className={`px-4 py-3 cursor-pointer transition-colors border-b ${isDarkMode
-                          ? `hover:bg-gray-800 border-gray-800 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-800' : ''}`
-                          : `hover:bg-gray-100 border-gray-200 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-100' : ''}`
+                        onClick={() => {
+                          if (locked) return;
+                          handleRowClick(serviceOrder);
+                        }}
+                        title={locked ? TECHNICIAN_LOCKED_MESSAGE : undefined}
+                        aria-disabled={locked}
+                        className={`px-4 py-3 transition-colors border-b ${locked
+                          ? `cursor-not-allowed opacity-50 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`
+                          : `cursor-pointer ${isDarkMode
+                            ? `hover:bg-gray-800 border-gray-800 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-800' : ''}`
+                            : `hover:bg-gray-100 border-gray-200 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-100' : ''}`}`
                           }`}
                       >
                         <div className="flex items-start justify-between">
@@ -1925,6 +1970,11 @@ const ServiceOrderPage: React.FC = () => {
                             <div className={`font-medium text-sm mb-1 flex items-center space-x-2 ${isDarkMode ? 'text-white' : 'text-gray-900'
                               }`}>
                               <span>{serviceOrder.fullName}</span>
+                              {locked && (
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+                                  Locked
+                                </span>
+                              )}
                               {viewers[String(serviceOrder.id)] && viewers[String(serviceOrder.id)].length > 0 && (
                                 <div className="flex flex-wrap gap-1 ml-1 flex-shrink-0">
                                   {viewers[String(serviceOrder.id)].map((username: string) => (
@@ -1952,7 +2002,8 @@ const ServiceOrderPage: React.FC = () => {
                           </div>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className={`text-center py-12 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
@@ -2013,14 +2064,23 @@ const ServiceOrderPage: React.FC = () => {
                       </thead>
                       <tbody>
                         {paginatedServiceOrders.length > 0 ? (
-                          paginatedServiceOrders.map((serviceOrder) => (
+                          paginatedServiceOrders.map((serviceOrder) => {
+                            const locked = isServiceOrderLocked(serviceOrder);
+                            return (
                             <tr
                               key={serviceOrder.id}
-                              className={`border-b cursor-pointer transition-colors ${isDarkMode
-                                ? `border-gray-800 hover:bg-gray-900 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-800' : ''}`
-                                : `border-gray-200 hover:bg-gray-100 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-100' : ''}`
+                              className={`border-b transition-colors ${locked
+                                ? `cursor-not-allowed opacity-50 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`
+                                : `cursor-pointer ${isDarkMode
+                                  ? `border-gray-800 hover:bg-gray-900 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-800' : ''}`
+                                  : `border-gray-200 hover:bg-gray-100 ${selectedServiceOrder?.id === serviceOrder.id ? 'bg-gray-100' : ''}`}`
                                 }`}
-                              onClick={() => handleRowClick(serviceOrder)}
+                              title={locked ? TECHNICIAN_LOCKED_MESSAGE : undefined}
+                              aria-disabled={locked}
+                              onClick={() => {
+                                if (locked) return;
+                                handleRowClick(serviceOrder);
+                              }}
                             >
                               {filteredColumns.map((column, index) => (
                                 <td
@@ -2034,13 +2094,19 @@ const ServiceOrderPage: React.FC = () => {
                                     maxWidth: columnWidths[column.key] ? `${columnWidths[column.key]}px` : undefined
                                   }}
                                 >
-                                  <div className="truncate">
-                                    {renderCellValue(serviceOrder, column.key)}
+                                  <div className="truncate flex items-center justify-between">
+                                    <span className="truncate">{renderCellValue(serviceOrder, column.key)}</span>
+                                    {column.key === 'fullName' && locked && (
+                                      <span className={`ml-2 flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+                                        Locked
+                                      </span>
+                                    )}
                                   </div>
                                 </td>
                               ))}
                             </tr>
-                          ))
+                            );
+                          })
                         ) : (
                           <tr>
                             <td colSpan={filteredColumns.length} className={`px-4 py-12 text-center border-b ${isDarkMode ? 'text-gray-400 border-gray-800' : 'text-gray-600 border-gray-200'
@@ -2143,6 +2209,7 @@ const ServiceOrderPage: React.FC = () => {
         <div className="fixed inset-0 z-50 md:relative md:inset-auto md:z-auto md:flex-shrink-0 md:overflow-hidden">
           <ServiceOrderDetails
             serviceOrder={selectedServiceOrder}
+            isTechnicianLocked={isServiceOrderLocked(selectedServiceOrder)}
             onClose={() => setSelectedServiceOrder(null)}
             onRefresh={fetchUpdates}
             isMobile={isMobile}

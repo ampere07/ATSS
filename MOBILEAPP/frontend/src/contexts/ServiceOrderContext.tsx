@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getServiceOrders, ServiceOrderData } from '../services/serviceOrderService';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface ServiceOrder {
     id: string;
@@ -65,6 +66,9 @@ interface ServiceOrder {
     routerReadingImageUrl?: string;
     boxReadingImageUrl?: string;
     speedtestImageUrl?: string;
+    // Whether an administrator released this service order to the technician
+    // ahead of their queue. Locked (false) until they do.
+    technicianEnabled?: boolean;
 }
 
 interface ServiceOrderContextType {
@@ -160,11 +164,19 @@ const transformServiceOrder = (order: ServiceOrderData): ServiceOrder => {
         setupImageUrl: order.setup_image_url || '',
         routerReadingImageUrl: order.router_reading_image_url || '',
         boxReadingImageUrl: order.box_reading_image_url || '',
-        speedtestImageUrl: order.speedtest_image_url || ''
+        speedtestImageUrl: order.speedtest_image_url || '',
+        // Read straight off the column so the technician lock always reflects
+        // the database. MySQL hands tinyint back as 1/0 or "1"/"0".
+        technicianEnabled: (order as any).technician_enabled === true
+            || (order as any).technician_enabled === 1
+            || (order as any).technician_enabled === '1'
     };
 };
 
 export const ServiceOrderProvider: React.FC<ServiceOrderProviderProps> = ({ children }) => {
+    // Mounted for every role by Dashboard, but /service-orders is a staff collection.
+    // A customer session used to fetch it on mount and take a 403.
+    const { can, ready: permissionsReady } = usePermissions();
     const [serviceOrders, setServiceOrders] = useState<ServiceOrder[]>([]);
     const ordersRef = React.useRef<ServiceOrder[]>([]);
     const fetchingRef = React.useRef<boolean>(false);
@@ -264,10 +276,13 @@ export const ServiceOrderProvider: React.FC<ServiceOrderProviderProps> = ({ chil
 
     // Initial fetch effect
     useEffect(() => {
+        // Wait for the keys to load, then only fetch for a user who may read service orders.
+        if (!permissionsReady || !can('service-order')) return;
+
         if (ordersRef.current.length === 0 && !fetchingRef.current) {
             fetchServiceOrders(1, false, false);
         }
-    }, [fetchServiceOrders]);
+    }, [fetchServiceOrders, permissionsReady, can]);
 
     return (
         <ServiceOrderContext.Provider

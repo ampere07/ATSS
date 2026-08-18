@@ -105,7 +105,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           full_name: response.data.user.full_name,
           role: response.data.user.role,
           role_id: response.data.user.role_id,
+          // The role's effective keys, as the server resolved them — a seeded
+          // role's included, not just a custom role's stored list.
           permissions: response.data.user.permissions || null,
+          // The section this role lands on. Kept so the client does not have to
+          // infer it from the first key in the list.
+          home: response.data.user.home || null,
           organization: response.data.user.organization
         };
         onLogin(userData);

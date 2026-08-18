@@ -11,6 +11,7 @@ import ModalUITemplate from '../modals/ui-modal/ModalUITemplate';
 import { Agent, User } from '../types/api';
 import { userService } from '../services/userService';
 import apiClient from '../config/api';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface ColumnDefinition {
     key: string;
@@ -173,6 +174,12 @@ const AgentPayout: React.FC = () => {
         fetchCommissions,
         fetchUpdates
     } = useCommissionStore();
+
+    // Signing a payout off. The buttons were previously wired straight to the
+    // handler for anyone who could open the page; the API now demands this same
+    // key, so the two agree.
+    const { can } = usePermissions();
+    const canApprove = can('agent-payout.approve');
 
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
@@ -997,8 +1004,8 @@ const AgentPayout: React.FC = () => {
                         type="payouts"
                         isMobile={isMobile}
                         approvalPending={approvalPending}
-                        onApprove={(record) => handleApproval(record, 'approve')}
-                        onReject={(record) => handleApproval(record, 'reject')}
+                        onApprove={canApprove ? (record) => handleApproval(record, 'approve') : undefined}
+                        onReject={canApprove ? (record) => handleApproval(record, 'reject') : undefined}
                         onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
                         onPrevious={currentData.findIndex(r => r.id === (selectedRecord as any).id) > 0 ? handlePrevious : undefined}
                         onNext={currentData.findIndex(r => r.id === (selectedRecord as any).id) < currentData.length - 1 ? handleNext : undefined}

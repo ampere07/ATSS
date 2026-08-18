@@ -173,5 +173,50 @@ apiClient.interceptors.response.use(
   }
 );
 
+/**
+ * `fetch` that carries the same credentials the axios client does.
+ *
+ * The API refuses anything it cannot resolve a user for, and a bare fetch()
+ * sends neither the stored cookie nor the bearer token — RN has no browser to
+ * attach them. Call sites change by name only.
+ *
+ * Mirrors authFetch in ATSS2_0/frontend/src/config/api.ts.
+ */
+export const authFetch = async (input: string, init: RequestInit = {}): Promise<Response> => {
+  const method = (init.method || 'GET').toUpperCase();
+  const requiresCsrf = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+
+  if (requiresCsrf && !csrfInitialized) {
+    try {
+      await initializeCsrf();
+    } catch {
+      // Carry on with whatever credential is already held; the request will
+      // fail on its own terms if that is not enough.
+    }
+  }
+
+  const headers = new Headers(init.headers || {});
+
+  try {
+    const authToken = await AsyncStorage.getItem('authToken');
+    if (authToken && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${authToken}`);
+    }
+  } catch (e) {
+    console.error('Failed to get auth token', e);
+  }
+
+  if (cookieStore && !headers.has('Cookie')) {
+    headers.set('Cookie', cookieStore);
+  }
+
+  const xsrfToken = getCookie('XSRF-TOKEN');
+  if (requiresCsrf && xsrfToken && !headers.has('X-XSRF-TOKEN')) {
+    headers.set('X-XSRF-TOKEN', xsrfToken);
+  }
+
+  return fetch(input, { ...init, headers });
+};
+
 export default apiClient;
 export { API_BASE_URL };

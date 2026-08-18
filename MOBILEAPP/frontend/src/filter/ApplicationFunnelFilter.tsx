@@ -9,8 +9,10 @@ import {
   ActivityIndicator,
   Animated,
   Dimensions,
+  Platform,
 } from 'react-native';
-import { X, ChevronLeft, ChevronRight, Search, Check } from 'lucide-react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import { X, ChevronLeft, ChevronRight, Search, Check, Calendar } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import apiClient from '../config/api';
@@ -48,6 +50,18 @@ interface Column {
 }
 
 const STORAGE_KEY = 'applicationFunnelFilters';
+
+/** `YYYY-MM-DD` — the same value shape the web `<input type="date">` stored. */
+const toIsoDay = (date: Date) => {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
+
+const parseIsoDay = (value: string) => {
+  if (!value) return new Date();
+  const parsed = new Date(`${value}T00:00:00`);
+  return isNaN(parsed.getTime()) ? new Date() : parsed;
+};
 
 export const allColumns: Column[] = [
   { key: 'id', label: 'ID', dataType: 'int' },
@@ -104,6 +118,8 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
   const [cities, setCities] = useState<string[]>([]);
   const [regions, setRegions] = useState<string[]>([]);
   const [loadingChecklist, setLoadingChecklist] = useState(false);
+  // Which end of a date range is being picked, if any.
+  const [datePickerTarget, setDatePickerTarget] = useState<'from' | 'to' | null>(null);
 
   const primary = colorPalette?.primary || '#7c3aed';
 
@@ -182,6 +198,7 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
   const handleBack = () => {
     setSelectedColumn(null);
     setSearchTerm('');
+    setDatePickerTarget(null);
   };
 
   const handleApply = async () => {
@@ -397,46 +414,60 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
     }
 
     if (isDateType(selectedColumn.dataType)) {
+      const dateTrigger = (field: 'from' | 'to') => {
+        const value = String(currentValue?.[field] || '');
+        return (
+          <View>
+            <Text style={{ fontSize: 14, fontWeight: '500', color: '#374151', marginBottom: 8 }}>
+              {field === 'from' ? 'From' : 'To'}
+            </Text>
+            <TouchableOpacity
+              onPress={() => setDatePickerTarget(field)}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                borderWidth: 1,
+                borderColor: value ? primary : '#d1d5db',
+                borderRadius: 8,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                backgroundColor: '#fff',
+              }}
+            >
+              <Text style={{ fontSize: 14, color: value ? '#111827' : '#9ca3af' }}>
+                {value || 'Select date'}
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                {!!value && (
+                  <TouchableOpacity onPress={() => handleDateChange(selectedColumn.key, field, '')} hitSlop={8}>
+                    <X size={14} color="#9ca3af" />
+                  </TouchableOpacity>
+                )}
+                <Calendar size={16} color={value ? primary : '#9ca3af'} />
+              </View>
+            </TouchableOpacity>
+          </View>
+        );
+      };
+
       return (
         <View style={{ gap: 16 }}>
-          <View>
-            <Text style={{ fontSize: 14, fontWeight: '500', color: '#374151', marginBottom: 8 }}>From (YYYY-MM-DD)</Text>
-            <TextInput
-              value={String(currentValue?.from || '')}
-              onChangeText={(v) => handleDateChange(selectedColumn.key, 'from', v)}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor="#9ca3af"
-              style={{
-                borderWidth: 1,
-                borderColor: '#d1d5db',
-                borderRadius: 8,
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                fontSize: 14,
-                color: '#111827',
-                backgroundColor: '#fff',
+          {dateTrigger('from')}
+          {dateTrigger('to')}
+          {datePickerTarget && (
+            <DateTimePicker
+              value={parseIsoDay(String(currentValue?.[datePickerTarget] || ''))}
+              mode="date"
+              display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+              onChange={(event, date) => {
+                const target = datePickerTarget;
+                setDatePickerTarget(null);
+                if (event?.type !== 'set' || !date || !target) return;
+                handleDateChange(selectedColumn.key, target, toIsoDay(date));
               }}
             />
-          </View>
-          <View>
-            <Text style={{ fontSize: 14, fontWeight: '500', color: '#374151', marginBottom: 8 }}>To (YYYY-MM-DD)</Text>
-            <TextInput
-              value={String(currentValue?.to || '')}
-              onChangeText={(v) => handleDateChange(selectedColumn.key, 'to', v)}
-              placeholder="YYYY-MM-DD"
-              placeholderTextColor="#9ca3af"
-              style={{
-                borderWidth: 1,
-                borderColor: '#d1d5db',
-                borderRadius: 8,
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                fontSize: 14,
-                color: '#111827',
-                backgroundColor: '#fff',
-              }}
-            />
-          </View>
+          )}
         </View>
       );
     }
@@ -481,8 +512,8 @@ const ApplicationFunnelFilter: React.FC<ApplicationFunnelFilterProps> = ({
               alignItems: 'center',
               justifyContent: 'space-between',
               paddingHorizontal: 20,
-              paddingTop: insets.top,
-              paddingBottom: 16,
+              paddingTop: 12,
+              paddingBottom: 12,
               borderBottomWidth: 1,
               borderBottomColor: '#f3f4f6',
             }}

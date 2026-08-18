@@ -36,6 +36,48 @@ class AgentInvoicePdfService
     private const FOOTER_IMAGE = 'agentinvoicefooter.png';
 
     /**
+     * The layout's version, carried in every PDF's filename.
+     *
+     * A PDF is written once, at generation, and served from disk forever after —
+     * so a change to the template or to this service left every invoice already
+     * issued showing the old layout, with no way to refresh it short of deleting
+     * files off the server by hand.
+     *
+     * Putting the version in the filename makes that self-correcting: after a
+     * bump the stored path no longer matches the expected one, the next request
+     * re-renders once and stores the new path, and the invoice is up to date.
+     * The record itself never changes — only its rendering.
+     *
+     * Bump this whenever the template or the page geometry changes:
+     *   1  the original layout
+     *   2  fonts applied (the family names were being HTML-escaped), and the
+     *      customer table paginated so the totals block stops being orphaned
+     */
+    private const LAYOUT_VERSION = 2;
+
+    /** A4 portrait, in points — what setPaper('A4') gives Dompdf. */
+    private const PAGE_WIDTH_PT = 595.28;
+
+    /**
+     * The band reserved at the top of every page for the page number.
+     *
+     * Wide enough for the figure and clear air beneath it. On page one the
+     * header artwork cancels this with an equal negative margin, so the sheet
+     * still opens flush with the paper edge.
+     */
+    private const TOP_BAND_PT = 46.0;
+
+    /**
+     * Air between the footer artwork and the last line of flowing content.
+     *
+     * The reserved bottom band is the artwork's own height plus this.
+     */
+    private const FOOTER_CLEARANCE_PT = 8.0;
+
+    /** Fallback footer height when the artwork cannot be measured. */
+    private const FOOTER_FALLBACK_PT = 101.0;
+
+    /**
      * The six typefaces the invoice is set in, one per slot.
      *
      * Each slot resolves in order: the licensed face if it has been installed,
@@ -71,26 +113,16 @@ class AgentInvoicePdfService
         $relativePath = $this->pathFor($invoice);
         $absolutePath = storage_path('app/public/' . $relativePath);
 
-        if (!$force && $invoice->pdf_path && is_file(storage_path('app/public/' . $invoice->pdf_path))) {
-            // Already on disk — opening the page must not re-render it.
+        // Already on disk, and rendered by the current layout — opening the page
+        // must not re-render it. The path comparison is what makes a layout bump
+        // take effect: a file stored under an older version no longer matches
+        // and is rendered again.
+        if (!$force && $invoice->pdf_path === $relativePath && is_file($absolutePath)) {
             return $invoice->pdf_path;
         }
 
-        $html = View::make('pdf.agent_invoice', $this->viewData($invoice))->render();
-
-        $options = new Options();
-        $options->set('isHtml5ParserEnabled', true);
-        $options->set('isRemoteEnabled', false);
-        $options->set('defaultFont', 'Helvetica');
-        $options->set('dpi', 96);
-        // The invoice loads its display fonts from resources/fonts, so that
-        // folder has to be inside the chroot alongside the output directory.
-        $options->set('chroot', [storage_path('app/public'), resource_path()]);
-
-        $dompdf = new Dompdf($options);
-        $dompdf->loadHtml($html, 'UTF-8');
-        $dompdf->setPaper('A4', 'portrait');
-        $dompdf->render();
+        $html  = View::make('pdf.agent_invoice', $this->viewData($invoice))->render();
+        $bytes = $this->htmlToPdf($html);
 
         $directory = dirname($absolutePath);
         if (!is_dir($directory)) {
@@ -101,7 +133,7 @@ class AgentInvoicePdfService
             }
         }
 
-        $written = @file_put_contents($absolutePath, $dompdf->output());
+        $written = @file_put_contents($absolutePath, $bytes);
 
         if ($written === false) {
             throw new \RuntimeException("Could not write the invoice PDF to {$absolutePath}");
@@ -116,6 +148,95 @@ class AgentInvoicePdfService
         return $relativePath;
     }
 
+    /**
+     * Render several invoices into one PDF, and return its bytes.
+     *
+     * A single document rather than a merge of finished PDFs: Dompdf lays every
+     * invoice out in one pass, each opening on a fresh page, which needs no PDF
+     * merging library and gives one continuously numbered document.
+     *
+     * The artwork, the fonts and the page geometry are resolved once and shared,
+     * so a bundle of fifty carries one copy of the letterhead rather than fifty.
+     *
+     * @param  iterable<AgentInvoice>  $invoices
+     */
+    public function renderBundle(iterable $invoices): string
+    {
+        $entries = [];
+
+        foreach ($invoices as $invoice) {
+            $entries[] = $this->invoiceViewData($invoice);
+        }
+
+        if ($entries === []) {
+            throw new \RuntimeException('Refusing to render a bundle with no invoices.');
+        }
+
+        $html = View::make('pdf.agent_invoices_bundle', [
+            'invoices' => $entries,
+        ] + $this->sharedViewData())->render();
+
+        return $this->htmlToPdf($html);
+    }
+
+    /**
+     * Turn prepared HTML into PDF bytes.
+     *
+     * One place for the Dompdf settings, so a single invoice and a bundle are
+     * rendered by identical options — remote loading off, the fonts folder
+     * inside the chroot, 96dpi.
+     */
+    private function htmlToPdf(string $html): string
+    {
+        $options = new Options();
+        $options->set('isHtml5ParserEnabled', true);
+        $options->set('isRemoteEnabled', false);
+        $options->set('defaultFont', 'Helvetica');
+        $options->set('dpi', 96);
+        // The invoice loads its display fonts from resources/fonts, so that
+        // folder has to be inside the chroot alongside the output directory.
+        $options->set('chroot', [storage_path('app/public'), resource_path()]);
+
+        $dompdf = new Dompdf($options);
+        $dompdf->loadHtml($html, 'UTF-8');
+        $dompdf->setPaper('A4', 'portrait');
+        $dompdf->render();
+
+        return (string) $dompdf->output();
+    }
+
+    /**
+     * Split the customer rows into pages.
+     *
+     * Page one takes `first_page_rows`, every page after it `rows_per_page`.
+     * A list that fits on page one comes back as one chunk, so nothing changes
+     * for the ordinary invoice.
+     *
+     * Both settings are clamped to at least one row: a zero or negative value
+     * in config would otherwise loop forever.
+     *
+     * @param  array<int, array>  $rows
+     * @return array<int, array<int, array>>
+     */
+    private function paginateRows(array $rows): array
+    {
+        if ($rows === []) {
+            return [];
+        }
+
+        $first = max(1, (int) config('agent_invoices.first_page_rows', 10));
+        $rest  = max(1, (int) config('agent_invoices.rows_per_page', 18));
+
+        if (count($rows) <= $first) {
+            return [$rows];
+        }
+
+        return array_merge(
+            [array_slice($rows, 0, $first)],
+            array_chunk(array_slice($rows, $first), $rest)
+        );
+    }
+
     /** Where this invoice's PDF belongs, relative to storage/app/public. */
     public function pathFor(AgentInvoice $invoice): string
     {
@@ -125,18 +246,55 @@ class AgentInvoicePdfService
             : Carbon::parse((string) $invoice->period_start);
 
         // Filenames carry the invoice number, which is unique and never reused,
-        // so one invoice can never overwrite another's file.
+        // so one invoice can never overwrite another's file. The layout version
+        // rides alongside it so a template change produces a different name and
+        // the old rendering is left behind rather than served forever.
         $safeNumber = preg_replace('/[^A-Za-z0-9\-_]/', '', (string) $invoice->invoice_number);
 
-        return $folder . '/' . $date->format('Y/m') . '/' . $safeNumber . '.pdf';
+        return $folder . '/' . $date->format('Y/m') . '/' . $safeNumber . '-v' . self::LAYOUT_VERSION . '.pdf';
     }
 
-    /** Everything the template needs, already formatted. */
+    /** Everything the single-invoice template needs, already formatted. */
     private function viewData(AgentInvoice $invoice): array
+    {
+        return $this->invoiceViewData($invoice) + $this->sharedViewData();
+    }
+
+    /**
+     * The parts that belong to the document rather than to any one invoice:
+     * the fonts, the artwork and the page geometry.
+     *
+     * Held apart so a bundle resolves them once instead of once per invoice —
+     * the artwork alone is a base64 payload of some size, and repeating it
+     * fifty times would be fifty copies in the HTML handed to Dompdf.
+     */
+    private function sharedViewData(): array
+    {
+        return [
+            // Dompdf's core fonts have no peso glyph, so the currency is written
+            // as "P" rather than rendering as a blank box on every line.
+            'peso'        => 'P',
+            'headerImage' => $this->imageData(self::HEADER_IMAGE),
+            'footerImage' => $this->imageData(self::FOOTER_IMAGE),
+            // slot => font URL, or null where nothing is installed for it.
+            'fonts'       => $this->fonts(),
+        ] + $this->pageGeometry();
+    }
+
+    /** The parts particular to one invoice. */
+    private function invoiceViewData(AgentInvoice $invoice): array
     {
         $customers = $invoice->relationLoaded('customers')
             ? $invoice->customers
             : $invoice->customers()->orderBy('id')->get();
+
+        $rows = $customers->map(fn ($c) => [
+            'customer_name'    => $c->customer_name,
+            'referred_by_name' => $c->referred_by_name,
+            'unit_price'       => $c->unit_price,
+            'quantity'         => $c->quantity,
+            'total'            => $c->total,
+        ])->all();
 
         $periodStart = Carbon::parse((string) $invoice->period_start);
         $periodEnd   = Carbon::parse((string) $invoice->period_end);
@@ -144,13 +302,21 @@ class AgentInvoicePdfService
 
         return [
             'invoice'   => $invoice,
-            'customers' => $customers->map(fn ($c) => [
-                'customer_name'    => $c->customer_name,
-                'referred_by_name' => $c->referred_by_name,
-                'unit_price'       => $c->unit_price,
-                'quantity'         => $c->quantity,
-                'total'            => $c->total,
-            ])->all(),
+            'customers' => $rows,
+
+            /*
+             * The rows split into pages, rather than left to Dompdf.
+             *
+             * Page one holds fewer, because the header artwork and the banner
+             * take most of its height. Letting Dompdf decide fills page one to
+             * the paper's edge, discovers the totals block will not fit, and —
+             * since that block cannot be split — moves it whole to page two,
+             * leaving a large gap behind.
+             *
+             * A single page of rows stays a single chunk, so the common invoice
+             * is unaffected.
+             */
+            'customerPages' => $this->paginateRows($rows),
 
             // The reference document shows the date in capitals: AUGUST 10, 2026.
             'invoiceDateLabel' => strtoupper($invoiceDate->format('F j, Y')),
@@ -161,14 +327,64 @@ class AgentInvoicePdfService
             // would only repeat the one name in the heading.
             'showReferrer'     => $invoice->invoice_type === AgentInvoice::TYPE_TEAM,
 
-            // Dompdf's core fonts have no peso glyph, so the currency is written
-            // as "P" rather than rendering as a blank box on every line.
-            'peso'         => 'P',
-            'headerImage'  => $this->imageData(self::HEADER_IMAGE),
-            'footerImage'  => $this->imageData(self::FOOTER_IMAGE),
-            // slot => font URL, or null where nothing is installed for it.
-            'fonts'        => $this->fonts(),
         ];
+    }
+
+    /**
+     * The page bands the template reserves, in points.
+     *
+     * Both pieces of artwork are fully opaque and are painted over the flow, so
+     * anything Dompdf lays out beneath them is lost rather than pushed to the
+     * next page. The bottom band is therefore measured from the footer artwork
+     * itself: it is drawn at the full page width, so its height on the page is
+     * its pixel height scaled by (page width / pixel width). Measuring it beats
+     * hard-coding, because replacing the artwork with a taller strip would
+     * otherwise start swallowing rows again.
+     *
+     * @return array{pageTopBand: string, pageBottomBand: string,
+     *               pageNumberTop: string, footerOffset: string}
+     */
+    private function pageGeometry(): array
+    {
+        $footerHeight = $this->imageHeightAtPageWidth(self::FOOTER_IMAGE) ?? self::FOOTER_FALLBACK_PT;
+        $bottomBand   = $footerHeight + self::FOOTER_CLEARANCE_PT;
+
+        return [
+            'pageTopBand'    => $this->pt(self::TOP_BAND_PT),
+            'pageBottomBand' => $this->pt($bottomBand),
+
+            // Dompdf places a fixed box against the content box, not the paper,
+            // so both offsets reach back out through their own band: the number
+            // up into the top band, the artwork down to the paper's edge.
+            'pageNumberTop'  => $this->pt(-(self::TOP_BAND_PT - 16.0)),
+            'footerOffset'   => $this->pt(-$bottomBand),
+        ];
+    }
+
+    /**
+     * How tall a full-width image stands on the page, in points, or null when it
+     * cannot be measured.
+     */
+    private function imageHeightAtPageWidth(string $filename): ?float
+    {
+        $path = resource_path('images/' . $filename);
+
+        if (!is_file($path)) {
+            return null;
+        }
+
+        $size = @getimagesize($path);
+        if ($size === false || empty($size[0])) {
+            return null;
+        }
+
+        return self::PAGE_WIDTH_PT * ($size[1] / $size[0]);
+    }
+
+    /** A CSS length in points, rounded to something a stylesheet can carry. */
+    private function pt(float $points): string
+    {
+        return round($points, 2) . 'pt';
     }
 
     /**
@@ -216,6 +432,22 @@ class AgentInvoicePdfService
      */
     private function imageData(string $filename): ?string
     {
+        // Dompdf decodes every raster image through GD and throws outright when
+        // the extension is absent — "The PHP GD extension is required, but is
+        // not installed", from Cpdf, with the whole render lost.
+        //
+        // The artwork is decoration. An invoice with no letterhead is still a
+        // valid invoice; an invoice that cannot be produced at all is not. So
+        // where GD is missing the images are dropped and the template's text
+        // fallback stands in, rather than the document failing.
+        if (!function_exists('imagecreatefrompng')) {
+            Log::warning('[AGENT INVOICES] GD is not installed — rendering the invoice without its artwork', [
+                'image' => $filename,
+            ]);
+
+            return null;
+        }
+
         // The backend's own copy first — it is the only one that exists on the
         // server, since frontend/src is a build input and is never deployed.
         // The frontend original is a convenience for a local checkout that has

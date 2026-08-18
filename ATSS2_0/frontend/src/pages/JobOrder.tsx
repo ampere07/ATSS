@@ -15,6 +15,12 @@ import { exportToCSV } from '../utils/exportUtils';
 import { userService } from '../services/userService';
 import { User } from '../types/api';
 import { agentOwnsReferral, isAgentUser, isOnOrAfterAgentStartDate } from '../utils/agentReferral';
+import {
+  buildTechnicianLockedJobOrderIds,
+  isTechnicianUser,
+  sortJobOrdersForTechnician,
+  TECHNICIAN_LOCKED_MESSAGE
+} from '../utils/technicianJobOrderAccess';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -201,7 +207,12 @@ const JobOrderPage: React.FC = () => {
     }
     return ['timestamp', 'dateInstalled', 'referredBy', 'fullName', 'address', 'onsiteStatus', 'billingStatus', 'assignedEmail', 'billingDay', 'installationFee', 'modifiedBy', 'modifiedDate'];
   });
-  const [sortColumn, setSortColumn] = useState<string | null>('timestamp');
+  const isTechnician = isTechnicianUser(userRole, roleId);
+  // Technicians land on their queue in the order they are expected to work it —
+  // oldest first — which the presort below applies when no column sort is set.
+  // Everyone else keeps the newest-first default. Sorting a column still works
+  // for both.
+  const [sortColumn, setSortColumn] = useState<string | null>(isTechnician ? null : 'timestamp');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [hoveredColumn, setHoveredColumn] = useState<string | null>(null);
   const [resizingColumn, setResizingColumn] = useState<string | null>(null);
@@ -1054,15 +1065,20 @@ const JobOrderPage: React.FC = () => {
       return true;
     });
 
-    const presorted = [...filtered].sort((a, b) => {
-      const timeA = new Date(getVal(a, 'timestamp') || 0).getTime();
-      const timeB = new Date(getVal(b, 'timestamp') || 0).getTime();
-      if (timeA !== timeB) return timeB - timeA;
-      
-      const idA = parseInt(String(a.id)) || 0;
-      const idB = parseInt(String(b.id)) || 0;
-      return idB - idA;
-    });
+    // Technicians read their list in the order they work it: In Progress oldest
+    // first, then other active work, with Done / Reschedule / Failed at the end.
+    // Every other role keeps the newest-first default untouched.
+    const presorted = isTechnician
+      ? sortJobOrdersForTechnician(filtered)
+      : [...filtered].sort((a, b) => {
+        const timeA = new Date(getVal(a, 'timestamp') || 0).getTime();
+        const timeB = new Date(getVal(b, 'timestamp') || 0).getTime();
+        if (timeA !== timeB) return timeB - timeA;
+
+        const idA = parseInt(String(a.id)) || 0;
+        const idB = parseInt(String(b.id)) || 0;
+        return idB - idA;
+      });
 
     if (sortColumn) {
       return [...presorted].sort((a, b) => {
@@ -1080,24 +1096,51 @@ const JobOrderPage: React.FC = () => {
       });
     }
     return presorted;
-  }, [globalFilteredJobOrders, selectedLocation, sortColumn, sortDirection]);
+  }, [globalFilteredJobOrders, selectedLocation, sortColumn, sortDirection, isTechnician]);
+
+  /**
+   * The job orders a technician may not open yet.
+   *
+   * Built from their whole accessible set — the API already scopes it to them —
+   * and NOT from the filtered or paginated view, so searching, filtering or
+   * paging can never change which job order counts as the oldest.
+   */
+  const technicianLockedIds = useMemo(() => {
+    if (!isTechnician) return new Set<string>();
+    return buildTechnicianLockedJobOrderIds(accessibleJobOrders);
+  }, [isTechnician, accessibleJobOrders]);
+
+  const isJobOrderLocked = (jobOrder: JobOrder): boolean =>
+    technicianLockedIds.has(String(jobOrder.id));
 
   const currentJobOrderIndex = useMemo(() => {
     if (!selectedJobOrder || !sortedJobOrders) return -1;
     return sortedJobOrders.findIndex(r => r.id === selectedJobOrder.id);
   }, [sortedJobOrders, selectedJobOrder]);
 
+  // Record-to-record navigation skips whatever the viewer cannot open, so the
+  // arrows never land on a locked job order — and read as disabled once there is
+  // nothing left to reach in that direction.
+  const nextOpenRecordIndex = (step: 1 | -1): number => {
+    if (currentJobOrderIndex < 0) return -1;
+    for (let i = currentJobOrderIndex + step; i >= 0 && i < sortedJobOrders.length; i += step) {
+      if (!isJobOrderLocked(sortedJobOrders[i])) return i;
+    }
+    return -1;
+  };
+
+  const previousRecordIndex = nextOpenRecordIndex(-1);
+  const nextRecordIndex = nextOpenRecordIndex(1);
+
   const handlePreviousRecord = () => {
-    if (currentJobOrderIndex > 0) {
-      const prevRecord = sortedJobOrders[currentJobOrderIndex - 1];
-      handleRowClick(prevRecord);
+    if (previousRecordIndex >= 0) {
+      handleRowClick(sortedJobOrders[previousRecordIndex]);
     }
   };
 
   const handleNextRecord = () => {
-    if (currentJobOrderIndex >= 0 && currentJobOrderIndex < sortedJobOrders.length - 1) {
-      const nextRecord = sortedJobOrders[currentJobOrderIndex + 1];
-      handleRowClick(nextRecord);
+    if (nextRecordIndex >= 0) {
+      handleRowClick(sortedJobOrders[nextRecordIndex]);
     }
   };
 
@@ -2411,13 +2454,22 @@ const JobOrderPage: React.FC = () => {
               ) : displayMode === 'card' ? (
                 paginatedJobOrders.length > 0 ? (
                   <div className="space-y-0">
-                    {paginatedJobOrders.map((jobOrder) => (
+                    {paginatedJobOrders.map((jobOrder) => {
+                      const locked = isJobOrderLocked(jobOrder);
+                      return (
                       <div
                         key={jobOrder.id}
-                        onClick={() => window.innerWidth < 768 ? handleMobileRowClick(jobOrder) : handleRowClick(jobOrder)}
-                        className={`px-4 py-3 cursor-pointer transition-colors border-b ${isDarkMode
-                          ? `hover:bg-gray-800 border-gray-800 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-800' : ''}`
-                          : `hover:bg-gray-100 border-gray-200 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-100' : ''}`
+                        onClick={() => {
+                          if (locked) return;
+                          window.innerWidth < 768 ? handleMobileRowClick(jobOrder) : handleRowClick(jobOrder);
+                        }}
+                        title={locked ? TECHNICIAN_LOCKED_MESSAGE : undefined}
+                        aria-disabled={locked}
+                        className={`px-4 py-3 transition-colors border-b ${locked
+                          ? `cursor-not-allowed opacity-50 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`
+                          : `cursor-pointer ${isDarkMode
+                            ? `hover:bg-gray-800 border-gray-800 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-800' : ''}`
+                            : `hover:bg-gray-100 border-gray-200 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-100' : ''}`}`
                           }`}
                       >
                         <div className="flex items-start justify-between">
@@ -2426,6 +2478,11 @@ const JobOrderPage: React.FC = () => {
                               <div className={`font-medium text-sm ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
                                 {getClientFullName(jobOrder)}
                               </div>
+                              {locked && (
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+                                  Locked
+                                </span>
+                              )}
                               {(viewers[String(jobOrder.id)] || []).length > 0 && (
                                 <div className="flex flex-wrap gap-1">
                                   {(viewers[String(jobOrder.id)] || []).map((username: string) => (
@@ -2453,7 +2510,8 @@ const JobOrderPage: React.FC = () => {
                           </div>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className={`text-center py-12 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
@@ -2532,14 +2590,23 @@ const JobOrderPage: React.FC = () => {
                       </thead>
                       <tbody>
                         {paginatedJobOrders.length > 0 ? (
-                          paginatedJobOrders.map((jobOrder) => (
+                          paginatedJobOrders.map((jobOrder) => {
+                            const locked = isJobOrderLocked(jobOrder);
+                            return (
                             <tr
                               key={jobOrder.id}
-                              className={`border-b cursor-pointer transition-colors ${isDarkMode
-                                ? `border-gray-800 hover:bg-gray-900 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-800' : ''}`
-                                : `border-gray-200 hover:bg-gray-100 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-100' : ''}`
+                              className={`border-b transition-colors ${locked
+                                ? `cursor-not-allowed opacity-50 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`
+                                : `cursor-pointer ${isDarkMode
+                                  ? `border-gray-800 hover:bg-gray-900 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-800' : ''}`
+                                  : `border-gray-200 hover:bg-gray-100 ${selectedJobOrder?.id === jobOrder.id ? 'bg-gray-100' : ''}`}`
                                 }`}
-                              onClick={() => window.innerWidth < 768 ? handleMobileRowClick(jobOrder) : handleRowClick(jobOrder)}
+                              title={locked ? TECHNICIAN_LOCKED_MESSAGE : undefined}
+                              aria-disabled={locked}
+                              onClick={() => {
+                                if (locked) return;
+                                window.innerWidth < 768 ? handleMobileRowClick(jobOrder) : handleRowClick(jobOrder);
+                              }}
                             >
                               {filteredColumns.map((column, index) => {
                                 const cellValue = renderCellValue(jobOrder, column.key);
@@ -2557,6 +2624,11 @@ const JobOrderPage: React.FC = () => {
                                   >
                                     <div className="truncate flex items-center justify-between" title={typeof cellValue === 'string' ? cellValue : undefined}>
                                       <span className="truncate">{cellValue}</span>
+                                      {column.key === 'fullName' && locked && (
+                                        <span className={`ml-2 flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+                                          Locked
+                                        </span>
+                                      )}
                                       {column.key === 'fullName' && viewers[String(jobOrder.id)]?.length > 0 && (
                                         <div className="flex items-center gap-1 ml-2 flex-shrink-0">
                                           {viewers[String(jobOrder.id)].map(username => (
@@ -2579,7 +2651,8 @@ const JobOrderPage: React.FC = () => {
                                 );
                               })}
                             </tr>
-                          ))
+                            );
+                          })
                         ) : (
                           <tr>
                             <td colSpan={filteredColumns.length} className={`px-4 py-12 text-center border-b ${isDarkMode ? 'text-gray-400 border-gray-800' : 'text-gray-600 border-gray-200'
@@ -2683,11 +2756,12 @@ const JobOrderPage: React.FC = () => {
         <div className="fixed inset-0 z-50 md:relative md:inset-auto md:z-auto md:flex-shrink-0 md:overflow-hidden">
           <JobOrderDetails
             jobOrder={selectedJobOrder}
+            isTechnicianLocked={isJobOrderLocked(selectedJobOrder)}
             onClose={handleCloseDetails}
             onRefresh={() => fetchUpdates(technicianEmail)}
             isMobile={isMobile}
-            onPrevious={currentJobOrderIndex > 0 ? handlePreviousRecord : undefined}
-            onNext={currentJobOrderIndex < sortedJobOrders.length - 1 ? handleNextRecord : undefined}
+            onPrevious={previousRecordIndex >= 0 ? handlePreviousRecord : undefined}
+            onNext={nextRecordIndex >= 0 ? handleNextRecord : undefined}
             onExpandSection={handleExpandSection}
           />
         </div>

@@ -10,7 +10,7 @@ import { FlashList } from '@shopify/flash-list';
 import { paymentService, PendingPayment } from '../services/paymentService';
 import { useCustomerDataContext } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
-import { API_BASE_URL } from '../config/api';
+import { API_BASE_URL, authFetch } from '../config/api';
 
 interface SOARecord {
     id: number;
@@ -499,7 +499,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
 
         setIsGeneratingPDF(record.id);
         try {
-            const response = await fetch(`${API_BASE_URL}/statement-of-accounts/${record.id}/generate-pdf`, {
+            const response = await authFetch(`${API_BASE_URL}/statement-of-accounts/${record.id}/generate-pdf`, {
                 method: 'POST',
                 headers: {
                     'Accept': 'application/json',

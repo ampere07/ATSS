@@ -1143,6 +1143,23 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       const isForVisit = updatedFormData.supportStatus === 'For Visit';
       const isVisitDone = isForVisit && updatedFormData.visitStatus === 'Done';
       const isVisitRescheduledOrFailed = isForVisit && (updatedFormData.visitStatus === 'Reschedule' || updatedFormData.visitStatus === 'Failed');
+
+      /**
+       * A remark is never blanked by a save.
+       *
+       * Support Remarks and Visit Remarks are only editable in some support and
+       * visit states, so a save made in another state — taking the ticket back to
+       * In Progress, for instance — must leave them exactly as they are. Sending
+       * an empty value would overwrite what is stored; omitting the key entirely
+       * leaves the column untouched, because the server only writes the fields a
+       * request actually carries.
+       *
+       * The trade is deliberate: a remark cannot be emptied from this form once
+       * written. Clearing one by accident loses the record of what happened,
+       * which is worse than having to correct the text instead.
+       */
+      const remarkIfPresent = (key: string, value: string | null | undefined) =>
+        String(value ?? '').trim() === '' ? {} : { [key]: value };
       const isMigrateGroup = isVisitDone && ['Migrate', 'Relocate', 'Relocate Router', 'Transfer LCP/NAP/PORT'].includes(updatedFormData.repairCategory);
       const isReplaceRouter = isVisitDone && updatedFormData.repairCategory === 'Replace Router';
       const isUpdateVlan = isVisitDone && updatedFormData.repairCategory === 'Update Vlan';
@@ -1197,7 +1214,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
           visit_by_user: updatedFormData.visitBy,
           visit_with: updatedFormData.visitWith,
           visit_with_other: updatedFormData.visitWithOther,
-          visit_remarks: updatedFormData.visitRemarks,
+          ...remarkIfPresent('visit_remarks', updatedFormData.visitRemarks),
         } : {}),
 
         // Fields visible only when visit is Done
@@ -1225,7 +1242,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         concern_remarks: updatedFormData.concernRemarks,
         updated_by: updatedFormData.modifiedBy,
         updated_by_user: updatedFormData.modifiedBy,
-        support_remarks: updatedFormData.supportRemarks,
+        ...remarkIfPresent('support_remarks', updatedFormData.supportRemarks),
         service_charge: parseFloat(updatedFormData.serviceCharge),
         status: updatedFormData.status,
         ...(updatedFormData.concern === 'Upgrade/Downgrade Plan' ? { new_plan: updatedFormData.newPlan } : {}),

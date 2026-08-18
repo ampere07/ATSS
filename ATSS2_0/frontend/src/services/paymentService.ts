@@ -1,4 +1,4 @@
-import axios from 'axios';
+import apiClient from '../config/api';
 
 const getApiBaseUrl = (): string => {
   const baseUrl = process.env.REACT_APP_API_BASE_URL;
@@ -44,23 +44,9 @@ export interface PaymentStatusResponse {
 export const paymentService = {
   getAccountBalance: async (accountNo: string): Promise<number> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-      
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.post<{ status: string; account_balance?: number }>(
-        `${API_BASE_URL}/payments/account-balance`,
-        { account_no: accountNo },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
-        }
+      const response = await apiClient.post<{ status: string; account_balance?: number }>(
+        '/payments/account-balance',
+        { account_no: accountNo }
       );
 
       return response.data.account_balance || 0;
@@ -72,23 +58,9 @@ export const paymentService = {
 
   checkPendingPayment: async (accountNo: string): Promise<PendingPayment | null> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-      
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.post<{ status: string; pending_payment?: PendingPayment }>(
-        `${API_BASE_URL}/payments/check-pending`,
-        { account_no: accountNo },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
-        }
+      const response = await apiClient.post<{ status: string; pending_payment?: PendingPayment }>(
+        '/payments/check-pending',
+        { account_no: accountNo }
       );
 
       return response.data.pending_payment || null;
@@ -106,19 +78,6 @@ export const paymentService = {
         throw new Error('Account number is missing from user session. Please log in again.');
       }
 
-      const authData = localStorage.getItem('authData');
-      let token = '';
-      
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-        console.log('Auth data:', { 
-          hasToken: !!token, 
-          accountNo: parsed.account_no,
-          username: parsed.username 
-        });
-      }
-
       const payload = {
         account_no: accountNo,
         amount: amount
@@ -126,15 +85,9 @@ export const paymentService = {
 
       console.log('Payment payload:', payload);
 
-      const response = await axios.post<PaymentResponse>(
-        `${API_BASE_URL}/payments/create`,
-        payload,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
-        }
+      const response = await apiClient.post<PaymentResponse>(
+        '/payments/create',
+        payload
       );
 
       return response.data as PaymentResponse;
@@ -150,24 +103,10 @@ export const paymentService = {
 
   checkPaymentStatus: async (referenceNo: string): Promise<PaymentStatusResponse> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-      
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.post<PaymentStatusResponse>(
-        `${API_BASE_URL}/payments/status`,
+      const response = await apiClient.post<PaymentStatusResponse>(
+        '/payments/status',
         {
           reference_no: referenceNo
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
         }
       );
 
@@ -182,23 +121,9 @@ export const paymentService = {
 
   cancelPayment: async (referenceNo: string): Promise<{ status: string; message: string }> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-      
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.post<{ status: string; message: string }>(
-        `${API_BASE_URL}/payments/cancel`,
-        { reference_no: referenceNo },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
-        }
+      const response = await apiClient.post<{ status: string; message: string }>(
+        '/payments/cancel',
+        { reference_no: referenceNo }
       );
 
       return response.data;

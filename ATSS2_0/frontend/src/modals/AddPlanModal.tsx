@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Minus } from 'lucide-react';
-import { API_BASE_URL } from '../config/api';
+import { API_BASE_URL, authFetch } from '../config/api';
 import ModalUITemplate, { useModalTheme } from './ui-modal/ModalUITemplate';
 
 interface Plan {
@@ -147,7 +147,7 @@ const AddPlanModal: React.FC<AddPlanModalProps> = ({
 
       const method = editingPlan ? 'PUT' : 'POST';
 
-      const response = await fetch(url, {
+      const response = await authFetch(url, {
         method,
         headers: {
           'Accept': 'application/json',

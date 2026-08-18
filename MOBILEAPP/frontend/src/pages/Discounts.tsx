@@ -31,6 +31,7 @@ import { getRegions, Region } from '../services/regionService';
 import { getCities, City } from '../services/cityService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { exportToCSV } from '../utils/exportUtils';
+import { usePermissions } from '../hooks/usePermissions';
 
 const isDarkMode = false;
 
@@ -285,18 +286,10 @@ const Discounts: React.FC = () => {
     loadAuth();
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (
-      lowerRole === 'administrator' ||
-      lowerRole === 'superadmin' ||
-      roleId === 1 ||
-      roleId === 7
-    ) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   useEffect(() => {
     const fetchLocationData = async () => {

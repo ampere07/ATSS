@@ -10,7 +10,7 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use Throwable;
 
 /**
@@ -145,13 +145,22 @@ class AgentInvoiceController extends Controller
                 return response()->json(['success' => false, 'message' => 'Invoice not found'], 404);
             }
 
+            $pdfService = app(AgentInvoicePdfService::class);
+
+            // Where this invoice's PDF belongs under the current layout. A file
+            // stored under an older one no longer matches, which is how a
+            // template change reaches invoices already issued: the rendering is
+            // stale, so it is made again. Without this the file written at
+            // generation was served unchanged forever.
+            $expected = $pdfService->pathFor($invoice);
+            $isCurrent = $invoice->pdf_path === $expected;
             $path = $invoice->pdf_path ? storage_path('app/public/' . $invoice->pdf_path) : null;
 
-            if (!$path || !is_file($path)) {
+            if (!$isCurrent || !$path || !is_file($path)) {
                 // Rebuild from the stored rows rather than failing — the invoice
                 // is the record, the file is only a rendering of it.
                 $invoice->load(['customers' => fn ($q) => $q->orderBy('id')]);
-                $relative = app(AgentInvoicePdfService::class)->render($invoice, true);
+                $relative = $pdfService->render($invoice, true);
                 $invoice->forceFill(['pdf_path' => $relative])->save();
                 $path = storage_path('app/public/' . $relative);
             }
@@ -160,19 +169,155 @@ class AgentInvoiceController extends Controller
                 return response()->json(['success' => false, 'message' => 'The invoice PDF is unavailable'], 404);
             }
 
+            // These constants are ResponseHeaderBag's, not BinaryFileResponse's.
+            // Naming the wrong class was silent until the line actually ran:
+            // PHP 8 raises an undefined-constant Error, which surfaced as a 500
+            // on every View and Download while the invoice itself was fine.
             $disposition = $request->boolean('download')
-                ? BinaryFileResponse::DISPOSITION_ATTACHMENT
-                : BinaryFileResponse::DISPOSITION_INLINE;
+                ? ResponseHeaderBag::DISPOSITION_ATTACHMENT
+                : ResponseHeaderBag::DISPOSITION_INLINE;
 
+            // Built by makeDisposition rather than by joining strings, so a
+            // filename needing escaping cannot produce a malformed header.
             return response()->file($path, [
                 'Content-Type'        => 'application/pdf',
-                'Content-Disposition' => $disposition . '; filename="' . $invoice->invoice_number . '.pdf"',
+                'Content-Disposition' => (new ResponseHeaderBag())->makeDisposition(
+                    $disposition,
+                    $invoice->invoice_number . '.pdf'
+                ),
             ]);
         } catch (Throwable $e) {
-            Log::error('[AGENT INVOICES] pdf failed: ' . $e->getMessage());
+            // Enough to identify the fault from the log alone. The message on
+            // its own was not: a Dompdf failure, a missing storage directory and
+            // an unreadable file all read the same way once the class and the
+            // line are dropped.
+            Log::error('[AGENT INVOICES] pdf failed: ' . $e->getMessage(), [
+                'invoice_id'     => $id,
+                'invoice_number' => $invoice->invoice_number ?? null,
+                'stored_path'    => $invoice->pdf_path ?? null,
+                'resolved_path'  => $path ?? null,
+                'exception'      => get_class($e),
+                'at'             => $e->getFile() . ':' . $e->getLine(),
+                'gd_loaded'      => extension_loaded('gd'),
+                'trace'          => $e->getTraceAsString(),
+            ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to open the invoice PDF',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * GET /api/agent-invoices/periods — the billing weeks that have invoices.
+     *
+     * Scoped like everything else, so an agent is offered only the weeks they
+     * have invoices for. Feeds the download dialog's period picker; drawn from
+     * every invoice rather than the page on screen, which is the point of
+     * asking the server rather than deriving it from the list.
+     */
+    public function periods(Request $request)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            $rows = $this->scopedQuery($user)
+                ->select('period_start', 'period_end')
+                ->selectRaw('COUNT(*) as invoice_count')
+                ->selectRaw('SUM(subtotal) as subtotal')
+                ->groupBy('period_start', 'period_end')
+                ->orderByDesc('period_start')
+                ->get();
+
+            return response()->json([
+                'success' => true,
+                'data'    => $rows->map(fn ($row) => [
+                    'period_start'  => optional($row->period_start)->format('Y-m-d')
+                        ?? (string) $row->period_start,
+                    'period_end'    => optional($row->period_end)->format('Y-m-d')
+                        ?? (string) $row->period_end,
+                    'invoice_count' => (int) $row->invoice_count,
+                    'subtotal'      => (float) $row->subtotal,
+                ])->all(),
+            ]);
+        } catch (Throwable $e) {
+            Log::error('[AGENT INVOICES] periods failed: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch the billing periods',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * GET /api/agent-invoices/archive — the invoices as one PDF.
+     *
+     * With `period_start` it covers that billing week; without, every invoice
+     * the caller may see. Scoped by the same query as the list, so an agent's
+     * download can only ever contain their own team's invoices.
+     *
+     * One document rather than a folder of them: each invoice opens on a fresh
+     * page and the whole thing can be read, printed or filed in one go. It is
+     * rendered fresh rather than assembled from the stored files, so it can
+     * never contain a page written by an older layout.
+     */
+    public function archive(Request $request)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            $query = $this->scopedQuery($user)->with(['customers' => fn ($q) => $q->orderBy('id')]);
+
+            $periodStart = trim((string) $request->input('period_start', ''));
+
+            if ($periodStart !== '') {
+                $query->whereDate('period_start', Carbon::parse($periodStart)->format('Y-m-d'));
+            }
+
+            $invoices = $query->orderBy('invoice_number')->get();
+
+            if ($invoices->isEmpty()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'There are no invoices to download for that selection.',
+                ], 404);
+            }
+
+            $bytes = app(AgentInvoicePdfService::class)->renderBundle($invoices);
+
+            $filename = $periodStart !== ''
+                ? 'agent-invoices-' . Carbon::parse($periodStart)->format('Y-m-d') . '.pdf'
+                : 'agent-invoices-all.pdf';
+
+            return response($bytes, 200, [
+                'Content-Type'        => 'application/pdf',
+                'Content-Length'      => (string) strlen($bytes),
+                'Content-Disposition' => (new ResponseHeaderBag())->makeDisposition(
+                    ResponseHeaderBag::DISPOSITION_ATTACHMENT,
+                    $filename
+                ),
+                // How many invoices the document holds, for anything that wants
+                // to confirm the download matched the selection.
+                'X-Invoices-Included' => (string) $invoices->count(),
+            ]);
+        } catch (Throwable $e) {
+            Log::error('[AGENT INVOICES] archive failed: ' . $e->getMessage(), [
+                'exception' => get_class($e),
+                'at'        => $e->getFile() . ':' . $e->getLine(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to build the invoice document',
                 'error'   => $e->getMessage(),
             ], 500);
         }
@@ -199,11 +344,26 @@ class AgentInvoiceController extends Controller
                 ], 403);
             }
 
-            $weekOf = $request->input('week')
-                ? Carbon::parse($request->input('week'))
-                : null;
+            // Treated as the generation date: the seven days BEFORE it are
+            // billed, matching what the Monday cron would have produced that
+            // day. `week` is kept as the field name for the existing callers;
+            // `as_of` is the clearer name and wins when both are sent.
+            $asOfInput = $request->input('as_of') ?: $request->input('week');
+            $asOf = $asOfInput ? Carbon::parse($asOfInput) : null;
 
-            $summary = $service->generateForWeek($weekOf);
+            // Same log as the scheduled run, minus the console echo — there is
+            // no console on a web request. The person who pressed Generate is
+            // named in it, which a cron run has no equivalent of and which is
+            // the first thing anyone asks about an unexpected invoice.
+            $service
+                ->setVerbose(true, false)
+                ->setTriggeredBy(sprintf(
+                    'Generate button — %s (user #%s)',
+                    $user->email_address ?? $user->username ?? 'unknown',
+                    $user->id ?? '?'
+                ));
+
+            $summary = $service->generateForWeek($asOf);
 
             return response()->json([
                 'success' => true,

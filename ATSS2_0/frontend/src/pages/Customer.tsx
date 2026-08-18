@@ -18,6 +18,7 @@ import { userService } from '../services/userService';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import apiClient from '../config/api';
 import { exportToCSV } from '../utils/exportUtils';
+import { authFetch } from '../config/api';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -1501,7 +1502,7 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
     const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/cron-test/process-overdue-notifications`, {
+      const response = await authFetch(`${API_BASE_URL}/cron-test/process-overdue-notifications`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -1539,7 +1540,7 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
     const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/cron-test/process-disconnection-notices`, {
+      const response = await authFetch(`${API_BASE_URL}/cron-test/process-disconnection-notices`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -1583,7 +1584,7 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
     const generationDate = `${year}-${month}-${day}`;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/billing-generation/force-generate-all`, {
+      const response = await authFetch(`${API_BASE_URL}/billing-generation/force-generate-all`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

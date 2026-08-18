@@ -9,7 +9,10 @@ export interface LoginResponse {
       full_name: string;
       role: string;
       role_id: number;
+      /** The role's effective permission keys. `['*']` for a SuperAdmin. */
       permissions?: string[] | null;
+      /** The section this role lands on after signing in. */
+      home?: string | null;
       organization?: {
         id: number;
         name: string;
@@ -47,7 +50,13 @@ export interface UserData {
   role: string;
   role_id: number;
   organization_id?: number | null;
+  /**
+   * The role's effective permission keys, resolved server side — see
+   * backend/app/Support/Permissions.php. `['*']` for a SuperAdmin.
+   */
   permissions?: string[] | null;
+  /** The section this role lands on after signing in, e.g. "job-order". */
+  home?: string | null;
   organization?: {
     id: number;
     name: string;

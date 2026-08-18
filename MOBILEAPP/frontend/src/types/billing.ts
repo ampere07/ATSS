@@ -40,6 +40,8 @@ export interface BillingRecord {
   region?: string;
   usageType?: string;
   lcpnapport?: string;
+  /** RADIUS session group — what the customer funnel filter's "Group" column matches on. */
+  sessionGroup?: string;
 }
 
 export interface BillingDetailRecord extends BillingRecord {

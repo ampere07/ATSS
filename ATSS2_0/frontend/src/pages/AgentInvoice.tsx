@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Search, RefreshCw, Download, FileText, Users, User as UserIcon, Loader2,
-    ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, X, Eye, Calendar, Play
+    RefreshCw, Download, FileText, Users, User as UserIcon, Loader2,
+    ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, ChevronDown, X, Eye
 } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { agentInvoiceService, AgentInvoiceRecord } from '../services/agentInvoiceService';
-import { exportToCSV } from '../utils/exportUtils';
+import AgentInvoiceDetails from '../components/AgentInvoiceDetails';
+import GlobalSearch from './globalfunctions/GlobalSearch';
+import AgentInvoiceDownloadModal from '../modals/AgentInvoiceDownloadModal';
 
 const hexToRgba = (hex: string, opacity: number) => {
     const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -34,7 +36,6 @@ const columns: ColumnDefinition[] = [
     { key: 'actions', label: 'Actions', minWidth: 130, align: 'center' },
 ];
 
-const STATUSES = ['Generated', 'Sent', 'Paid', 'Cancelled'];
 
 const formatCurrency = (amount: number): string =>
     `₱${Number(amount || 0).toFixed(2).replace(/\d(?=(\d{3})+\.)/g, '$&,')}`;
@@ -73,24 +74,66 @@ const AgentInvoice: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
 
     const [searchTerm, setSearchTerm] = useState('');
-    const [statusFilter, setStatusFilter] = useState('');
     const [typeFilter, setTypeFilter] = useState('');
-    const [dateFrom, setDateFrom] = useState('');
-    const [dateTo, setDateTo] = useState('');
 
     const [currentPage, setCurrentPage] = useState(1);
     const [itemsPerPage, setItemsPerPage] = useState(25);
     const [totalCount, setTotalCount] = useState(0);
     const [lastPage, setLastPage] = useState(1);
 
+    const [collapsedPeriods, setCollapsedPeriods] = useState<string[]>([]);
+    const [isDownloadOpen, setIsDownloadOpen] = useState(false);
     const [selected, setSelected] = useState<AgentInvoiceRecord | null>(null);
     const [isLoadingDetail, setIsLoadingDetail] = useState(false);
     const [pdfPending, setPdfPending] = useState<number | null>(null);
-    const [isGenerating, setIsGenerating] = useState(false);
 
     // Whether this user may generate invoices or change a status. The server is
     // the authority — this only decides whether the control is worth showing.
-    const [canManage, setCanManage] = useState(false);
+    /**
+     * The rows grouped by the week they bill, in the order the server sent them.
+     *
+     * The server already orders by invoice date descending, so taking the groups
+     * in first-seen order keeps the newest week at the top without sorting
+     * again — and without disagreeing with the order inside each group.
+     *
+     * Grouping is per page: pagination is server side, so a week spanning a page
+     * boundary appears in both, each showing what that page holds. The count and
+     * total on the header say "on this page" for the same reason.
+     */
+    const periodGroups = useMemo(() => {
+        const groups: Array<{ key: string; label: string; records: AgentInvoiceRecord[]; subtotal: number }> = [];
+        const index = new Map<string, number>();
+
+        records.forEach(record => {
+            const key = `${record.period_start ?? ''}|${record.period_end ?? ''}`;
+
+            if (!index.has(key)) {
+                index.set(key, groups.length);
+                groups.push({
+                    key,
+                    label: record.period_start || record.period_end
+                        ? `${formatDate(record.period_start)} – ${formatDate(record.period_end)}`
+                        : 'No billing period',
+                    records: [],
+                    subtotal: 0,
+                });
+            }
+
+            const group = groups[index.get(key)!];
+            group.records.push(record);
+            group.subtotal += Number(record.subtotal || 0);
+        });
+
+        return groups;
+    }, [records]);
+
+    // Collapsed rather than expanded is tracked, so a week that arrives on a
+    // later page is open by default instead of hidden.
+    const togglePeriod = (key: string) => {
+        setCollapsedPeriods(current =>
+            current.includes(key) ? current.filter(k => k !== key) : [...current, key]
+        );
+    };
 
     const primaryColor = colorPalette?.primary || '#7c3aed';
     const searchDebounce = useRef<number | null>(null);
@@ -119,18 +162,6 @@ const AgentInvoice: React.FC = () => {
         return () => window.removeEventListener('palette-updated', onPalette);
     }, []);
 
-    useEffect(() => {
-        try {
-            const raw = localStorage.getItem('authData') || localStorage.getItem('user');
-            const auth = raw ? JSON.parse(raw) : null;
-            const role = String(auth?.role?.role_name || auth?.role_name || auth?.role || '').toLowerCase();
-            const roleId = auth?.role_id ?? auth?.user?.role_id;
-            setCanManage(roleId === 7 || ['admin', 'administrator', 'billing', 'superadmin'].includes(role));
-        } catch {
-            setCanManage(false);
-        }
-    }, []);
-
     const load = useCallback(async (page: number, quiet = false) => {
         if (quiet) setIsRefreshing(true); else setIsLoading(true);
         setError(null);
@@ -138,10 +169,8 @@ const AgentInvoice: React.FC = () => {
         try {
             const response = await agentInvoiceService.list({
                 search: searchTerm,
-                status: statusFilter,
+
                 type: typeFilter,
-                date_from: dateFrom,
-                date_to: dateTo,
                 page,
                 per_page: itemsPerPage,
             });
@@ -162,13 +191,13 @@ const AgentInvoice: React.FC = () => {
             setIsLoading(false);
             setIsRefreshing(false);
         }
-    }, [searchTerm, statusFilter, typeFilter, dateFrom, dateTo, itemsPerPage]);
+    }, [searchTerm, typeFilter, itemsPerPage]);
 
     // Filters reset to the first page: staying on page 4 of a narrower result
     // set would show an empty table.
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchTerm, statusFilter, typeFilter, dateFrom, dateTo, itemsPerPage]);
+    }, [searchTerm, typeFilter, itemsPerPage]);
 
     useEffect(() => {
         if (searchDebounce.current) window.clearTimeout(searchDebounce.current);
@@ -194,6 +223,46 @@ const AgentInvoice: React.FC = () => {
         }
     };
 
+    // Where the open record sits in the list, so the pane's chevrons know
+    // whether there is anywhere to step to. Matches Invoice.tsx's approach.
+    const selectedIndex = selected ? records.findIndex(r => r.id === selected.id) : -1;
+
+    const handlePreviousRecord = () => {
+        if (selectedIndex > 0) handleOpenDetails(records[selectedIndex - 1]);
+    };
+
+    const handleNextRecord = () => {
+        if (selectedIndex >= 0 && selectedIndex < records.length - 1) {
+            handleOpenDetails(records[selectedIndex + 1]);
+        }
+    };
+
+
+    /**
+     * Read the server's message out of a failed blob request.
+     *
+     * The PDF endpoint is fetched with responseType 'blob', so when it answers
+     * with a JSON error the body arrives as a Blob and `err.response.data.message`
+     * is undefined — which is why a 500 here used to surface as nothing more
+     * than a minified error name in the console. Reading the blob back as text
+     * recovers what the server actually said.
+     */
+    const messageFromBlobError = async (err: any): Promise<string | null> => {
+        const data = err?.response?.data;
+
+        if (!(data instanceof Blob)) {
+            return err?.response?.data?.message ?? null;
+        }
+
+        try {
+            const text = await data.text();
+            const parsed = JSON.parse(text);
+            return parsed?.error || parsed?.message || null;
+        } catch {
+            return null;
+        }
+    };
+
     const handlePdf = async (record: AgentInvoiceRecord, download: boolean) => {
         setPdfPending(record.id);
         try {
@@ -214,53 +283,15 @@ const AgentInvoice: React.FC = () => {
             // Released on the next tick so the tab has taken the reference.
             window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
         } catch (err: any) {
-            console.error('[AgentInvoice] Failed to open the PDF:', err);
-            window.alert(err?.response?.data?.message || 'The invoice PDF could not be opened.');
+            const message = await messageFromBlobError(err);
+            console.error('[AgentInvoice] Failed to open the PDF:', message || err);
+            window.alert(message || 'The invoice PDF could not be opened.');
         } finally {
             setPdfPending(null);
         }
     };
 
-    const handleGenerate = async () => {
-        if (isGenerating) return;
-        if (!window.confirm('Generate the referral invoices for last week now?\n\nInvoices already raised for that week are left alone.')) return;
 
-        setIsGenerating(true);
-        try {
-            const response = await agentInvoiceService.generate();
-            window.alert(response?.message || 'Invoice generation finished.');
-            await load(1);
-        } catch (err: any) {
-            window.alert(err?.response?.data?.message || 'Invoice generation failed.');
-        } finally {
-            setIsGenerating(false);
-        }
-    };
-
-    const handleExport = () => {
-        if (!records.length) return;
-
-        // The visible columns, minus the actions column, which has nothing to export.
-        const exportColumns = columns
-            .filter(c => c.key !== 'actions')
-            .map(c => ({ key: c.key, label: c.label }));
-
-        exportToCSV('agent-invoices', exportColumns, records, (record, key) => {
-            switch (key) {
-                case 'invoice_type': return record.invoice_type === 'team' ? 'Team' : 'Solo';
-                case 'period':       return `${record.period_start || ''} - ${record.period_end || ''}`;
-                case 'total_amount': return record.total_amount;
-                case 'subtotal':     return record.subtotal;
-                default:             return (record as any)[key] ?? '';
-            }
-        });
-    };
-
-    const summary = useMemo(() => ({
-        invoices: totalCount,
-        customers: records.reduce((sum, r) => sum + (r.total_customers || 0), 0),
-        amount: records.reduce((sum, r) => sum + (r.subtotal || 0), 0),
-    }), [records, totalCount]);
 
     const cell = (record: AgentInvoiceRecord, key: string): React.ReactNode => {
         switch (key) {
@@ -325,88 +356,22 @@ const AgentInvoice: React.FC = () => {
     };
 
     return (
-        <div className={`h-full flex flex-col overflow-hidden ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
-            {/* Header */}
-            <div className={`px-4 py-3 border-b flex-shrink-0 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <div>
-                        <h2 className={`text-lg font-semibold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-                            Agent Invoices
-                        </h2>
-                        <p className={`text-xs mt-0.5 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                            Weekly referral invoices, raised every Monday for the week just ended
-                        </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                        {canManage && (
-                            <button
-                                onClick={handleGenerate}
-                                disabled={isGenerating}
-                                title="Generate last week's invoices now"
-                                className="px-3 py-2 rounded-lg text-sm text-white font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
-                                style={{ backgroundColor: primaryColor }}
-                            >
-                                {isGenerating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                                {isMobile ? '' : 'Generate'}
-                            </button>
-                        )}
-                        <button
-                            onClick={handleExport}
-                            disabled={isLoading || records.length === 0}
-                            title="Export to CSV"
-                            className="p-2 rounded-lg transition-all flex items-center justify-center shadow-sm disabled:opacity-50 border"
-                            style={{ backgroundColor: '#ffffff', borderColor: primaryColor, color: primaryColor }}
-                            onMouseEnter={(e) => { if (records.length) e.currentTarget.style.backgroundColor = hexToRgba(primaryColor, 0.1); }}
-                            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
-                        >
-                            <Download className="h-5 w-5" />
-                        </button>
-                        <button
-                            onClick={() => load(currentPage, true)}
-                            disabled={isLoading || isRefreshing}
-                            title="Refresh"
-                            className="p-2 rounded-lg transition-all flex items-center justify-center shadow-sm disabled:opacity-50 border"
-                            style={{ backgroundColor: '#ffffff', borderColor: primaryColor, color: primaryColor }}
-                        >
-                            <RefreshCw className={`h-5 w-5 ${(isLoading || isRefreshing) ? 'animate-spin' : ''}`} />
-                        </button>
-                    </div>
-                </div>
-
-                {/* Summary tiles */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-                    {[
-                        { label: 'Invoices', value: String(summary.invoices), icon: FileText },
-                        { label: 'Customers on this page', value: String(summary.customers), icon: Users },
-                        { label: 'Subtotal on this page', value: formatCurrency(summary.amount), icon: Calendar },
-                    ].map(tile => (
-                        <div
-                            key={tile.label}
-                            className={`rounded-lg border px-3 py-2.5 flex items-center gap-3 ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}
-                        >
-                            <div className="p-2 rounded-lg" style={{ backgroundColor: hexToRgba(primaryColor, 0.12), color: primaryColor }}>
-                                <tile.icon className="h-4 w-4" />
-                            </div>
-                            <div className="min-w-0">
-                                <div className={`text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>{tile.label}</div>
-                                <div className={`text-sm font-bold truncate ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>{tile.value}</div>
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            </div>
-
-            {/* Filters */}
+        // Row layout, as the billing Invoice page uses: the list is one column
+        // and the detail pane another, so opening a record narrows the list
+        // rather than covering it.
+        <div className={`h-full flex flex-col md:flex-row overflow-hidden ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
+            <div className={`flex-1 flex flex-col overflow-hidden min-w-0 ${selected && isMobile ? 'hidden' : ''}`}>
+            {/* Toolbar — search, the type filter, and the two actions on one
+                row. The page has no title bar of its own: the sidebar already
+                says which section this is. */}
             <div className={`px-4 py-3 border-b flex-shrink-0 flex flex-wrap items-center gap-2 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
-                <div className="relative flex-1 min-w-[200px]">
-                    <Search className={`absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`} />
-                    <input
-                        type="text"
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
+                <div className="flex-1 min-w-[200px]">
+                    <GlobalSearch
+                        searchQuery={searchTerm}
+                        setSearchQuery={setSearchTerm}
+                        isDarkMode={isDarkMode}
+                        colorPalette={colorPalette}
                         placeholder="Search invoice number, team or agent..."
-                        className={`w-full pl-9 pr-3 py-2 rounded-lg border text-sm focus:outline-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500' : 'bg-white border-gray-300 text-gray-900'}`}
                     />
                 </div>
 
@@ -420,38 +385,35 @@ const AgentInvoice: React.FC = () => {
                     <option value="solo">Solo</option>
                 </select>
 
-                <select
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                    className={`px-3 py-2 rounded-lg border text-sm focus:outline-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
-                >
-                    <option value="">All statuses</option>
-                    {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-
-                <input
-                    type="date"
-                    value={dateFrom}
-                    onChange={(e) => setDateFrom(e.target.value)}
-                    title="Invoice date from"
-                    className={`px-3 py-2 rounded-lg border text-sm focus:outline-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
-                />
-                <input
-                    type="date"
-                    value={dateTo}
-                    onChange={(e) => setDateTo(e.target.value)}
-                    title="Invoice date to"
-                    className={`px-3 py-2 rounded-lg border text-sm focus:outline-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
-                />
-
-                {(searchTerm || statusFilter || typeFilter || dateFrom || dateTo) && (
+                {(searchTerm || typeFilter) && (
                     <button
-                        onClick={() => { setSearchTerm(''); setStatusFilter(''); setTypeFilter(''); setDateFrom(''); setDateTo(''); }}
+                        onClick={() => { setSearchTerm(''); setTypeFilter(''); }}
                         className={`px-3 py-2 rounded-lg text-sm border transition-colors ${isDarkMode ? 'border-gray-700 text-gray-300 hover:bg-gray-800' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}
                     >
                         Clear
                     </button>
                 )}
+
+                <button
+                    onClick={() => setIsDownloadOpen(true)}
+                    disabled={isLoading}
+                    title="Download invoice PDFs"
+                    className="p-2 rounded-lg transition-all flex items-center justify-center shadow-sm disabled:opacity-50 border"
+                    style={{ backgroundColor: '#ffffff', borderColor: primaryColor, color: primaryColor }}
+                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = hexToRgba(primaryColor, 0.1); }}
+                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = '#ffffff'; }}
+                >
+                    <Download className="h-5 w-5" />
+                </button>
+                <button
+                    onClick={() => load(currentPage, true)}
+                    disabled={isLoading || isRefreshing}
+                    title="Refresh"
+                    className="p-2 rounded-lg transition-all flex items-center justify-center shadow-sm disabled:opacity-50 border"
+                    style={{ backgroundColor: '#ffffff', borderColor: primaryColor, color: primaryColor }}
+                >
+                    <RefreshCw className={`h-5 w-5 ${(isLoading || isRefreshing) ? 'animate-spin' : ''}`} />
+                </button>
             </div>
 
             {/* Table */}
@@ -489,25 +451,65 @@ const AgentInvoice: React.FC = () => {
                             </tr>
                         </thead>
                         <tbody>
-                            {records.map(record => (
-                                <tr
-                                    key={record.id}
-                                    onClick={() => handleOpenDetails(record)}
-                                    className={`border-b cursor-pointer transition-colors ${isDarkMode ? 'border-gray-800 hover:bg-gray-800/60 text-gray-200' : 'border-gray-100 hover:bg-gray-50 text-gray-700'}`}
-                                >
-                                    {columns.map(col => (
-                                        <td
-                                            key={col.key}
-                                            style={{ minWidth: col.minWidth }}
-                                            className={`px-4 py-3 whitespace-nowrap ${
-                                                col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'
+                            {periodGroups.map(group => {
+                                const isOpen = !collapsedPeriods.includes(group.key);
+
+                                return (
+                                    <React.Fragment key={group.key}>
+                                        {/* The period header. Clicking it opens or closes the
+                                            week; the count and total describe what is in the
+                                            group on this page, not across every page. */}
+                                        <tr
+                                            onClick={() => togglePeriod(group.key)}
+                                            className={`border-b cursor-pointer select-none transition-colors ${
+                                                isDarkMode
+                                                    ? 'bg-gray-800/70 hover:bg-gray-800 border-gray-700 text-gray-100'
+                                                    : 'bg-gray-100 hover:bg-gray-200/70 border-gray-200 text-gray-800'
                                             }`}
                                         >
-                                            {cell(record, col.key)}
-                                        </td>
-                                    ))}
-                                </tr>
-                            ))}
+                                            <td colSpan={columns.length} className="px-4 py-2.5">
+                                                <div className="flex items-center gap-2">
+                                                    <ChevronDown
+                                                        className={`h-4 w-4 flex-shrink-0 transition-transform ${isOpen ? '' : '-rotate-90'}`}
+                                                        style={{ color: primaryColor }}
+                                                    />
+                                                    <span className="text-[11px] font-bold uppercase tracking-wider">
+                                                        {group.label}
+                                                    </span>
+                                                    <span className={`text-[11px] px-2 py-0.5 rounded-full ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-white text-gray-600'}`}>
+                                                        {group.records.length} {group.records.length === 1 ? 'invoice' : 'invoices'}
+                                                    </span>
+                                                    <span className={`ml-auto text-xs font-semibold ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                                                        {formatCurrency(group.subtotal)}
+                                                    </span>
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        {isOpen && group.records.map(record => (
+                                            <tr
+                                                key={record.id}
+                                                onClick={() => handleOpenDetails(record)}
+                                                className={`border-b cursor-pointer transition-colors ${isDarkMode ? 'border-gray-800 hover:bg-gray-800/60 text-gray-200' : 'border-gray-100 hover:bg-gray-50 text-gray-700'} ${
+                                                    selected?.id === record.id ? (isDarkMode ? 'bg-gray-800' : 'bg-gray-100') : ''
+                                                }`}
+                                            >
+                                                {columns.map(col => (
+                                                    <td
+                                                        key={col.key}
+                                                        style={{ minWidth: col.minWidth }}
+                                                        className={`px-4 py-3 whitespace-nowrap ${
+                                                            col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'
+                                                        }`}
+                                                    >
+                                                        {cell(record, col.key)}
+                                                    </td>
+                                                ))}
+                                            </tr>
+                                        ))}
+                                    </React.Fragment>
+                                );
+                            })}
                         </tbody>
                     </table>
                 )}
@@ -559,130 +561,30 @@ const AgentInvoice: React.FC = () => {
                 </div>
             )}
 
-            {/* Details */}
+            </div>
+
+            {/* Detail pane — a sibling of the list, not an overlay, so the list
+                stays readable behind it and the record can be stepped through. */}
             {selected && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setSelected(null)}>
-                    <div
-                        onClick={(e) => e.stopPropagation()}
-                        className={`w-full max-w-4xl max-h-[90vh] rounded-2xl shadow-2xl overflow-hidden flex flex-col ${isDarkMode ? 'bg-gray-900' : 'bg-white'}`}
-                    >
-                        <div className={`px-5 py-4 border-b flex items-start justify-between gap-4 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-                            <div className="min-w-0">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                    <h3 className={`text-lg font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-                                        {selected.invoice_number}
-                                    </h3>
-                                    <StatusBadge status={selected.status} isDarkMode={isDarkMode} />
-                                </div>
-                                <p className={`text-sm mt-0.5 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                                    {selected.invoice_type === 'team' ? 'Team invoice' : 'Solo agent invoice'} · {selected.billed_to}
-                                </p>
-                            </div>
-                            <button onClick={() => setSelected(null)} className={`p-1.5 rounded ${isDarkMode ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}>
-                                <X className="h-5 w-5" />
-                            </button>
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto px-5 py-4">
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-                                {[
-                                    { label: 'Invoice date', value: formatDate(selected.invoice_date) },
-                                    { label: 'Billing period', value: `${formatDate(selected.period_start)} – ${formatDate(selected.period_end)}` },
-                                    { label: 'Customers', value: String(selected.total_customers) },
-                                    { label: 'Unit price', value: formatCurrency(selected.unit_price) },
-                                ].map(f => (
-                                    <div key={f.label}>
-                                        <div className={`text-[11px] uppercase tracking-wide ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>{f.label}</div>
-                                        <div className={`text-sm font-medium mt-0.5 ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>{f.value}</div>
-                                    </div>
-                                ))}
-                            </div>
-
-                            <h4 className={`text-sm font-bold mb-2 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-                                Referred customers
-                            </h4>
-
-                            {isLoadingDetail ? (
-                                <div className="py-10 flex justify-center">
-                                    <Loader2 className="h-6 w-6 animate-spin" style={{ color: primaryColor }} />
-                                </div>
-                            ) : (
-                                <div className={`rounded-lg border overflow-hidden ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-                                    <table className="w-full text-sm">
-                                        <thead>
-                                            <tr className={isDarkMode ? 'bg-gray-800' : 'bg-gray-50'}>
-                                                {['Customer', 'Referred by', 'Installed', 'Unit price', 'Qty', 'Total'].map((h, i) => (
-                                                    <th key={h} className={`px-3 py-2 text-[11px] font-bold uppercase tracking-wider ${i >= 3 ? 'text-right' : 'text-left'} ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                                                        {h}
-                                                    </th>
-                                                ))}
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {(selected.customers || []).map(c => (
-                                                <tr key={c.id} className={`border-t ${isDarkMode ? 'border-gray-800 text-gray-200' : 'border-gray-100 text-gray-700'}`}>
-                                                    <td className="px-3 py-2 font-medium">{c.customer_name}</td>
-                                                    <td className="px-3 py-2">{c.referred_by_name || '-'}</td>
-                                                    <td className="px-3 py-2">{formatDate(c.installed_date)}</td>
-                                                    <td className="px-3 py-2 text-right">{formatCurrency(c.unit_price)}</td>
-                                                    <td className="px-3 py-2 text-right">{c.quantity}</td>
-                                                    <td className="px-3 py-2 text-right font-medium">{formatCurrency(c.total)}</td>
-                                                </tr>
-                                            ))}
-                                            {(selected.customers || []).length === 0 && (
-                                                <tr>
-                                                    <td colSpan={6} className={`px-3 py-6 text-center text-sm ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                                                        No customers on this invoice.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-
-                            {/* Totals, in the same order as the printed invoice */}
-                            <div className="mt-4 flex justify-end">
-                                <div className={`w-full sm:w-80 rounded-lg border overflow-hidden ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-                                    {[
-                                        ['Total client installed', String(selected.total_customers)],
-                                        ['Installation fee', formatCurrency(selected.installation_fee)],
-                                        ['Total amount', formatCurrency(selected.total_amount)],
-                                        ['Commission', formatCurrency(selected.commission)],
-                                    ].map(([label, value]) => (
-                                        <div key={label} className={`flex items-center justify-between px-3 py-2 text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                                            <span>{label}</span>
-                                            <span className="font-medium">{value}</span>
-                                        </div>
-                                    ))}
-                                    <div className="flex items-center justify-between px-3 py-2.5 text-sm font-bold text-white" style={{ backgroundColor: primaryColor }}>
-                                        <span>Subtotal</span>
-                                        <span>{formatCurrency(selected.subtotal)}</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className={`px-5 py-3 border-t flex items-center justify-end gap-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-                            <button
-                                onClick={() => handlePdf(selected, false)}
-                                disabled={pdfPending === selected.id}
-                                className={`px-3 py-2 rounded-lg text-sm border transition-colors disabled:opacity-50 flex items-center gap-2 ${isDarkMode ? 'border-gray-700 text-gray-200 hover:bg-gray-800' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
-                            >
-                                <FileText className="h-4 w-4" /> View PDF
-                            </button>
-                            <button
-                                onClick={() => handlePdf(selected, true)}
-                                disabled={pdfPending === selected.id}
-                                className="px-3 py-2 rounded-lg text-sm text-white font-medium transition-colors disabled:opacity-50 flex items-center gap-2"
-                                style={{ backgroundColor: primaryColor }}
-                            >
-                                <Download className="h-4 w-4" /> Download
-                            </button>
-                        </div>
-                    </div>
+                <div className="flex-shrink-0 overflow-hidden h-full">
+                    <AgentInvoiceDetails
+                        key={selected.id}
+                        invoiceRecord={selected}
+                        isLoading={isLoadingDetail}
+                        isPdfPending={pdfPending === selected.id}
+                        onClose={() => setSelected(null)}
+                        onPrevious={selectedIndex > 0 ? handlePreviousRecord : undefined}
+                        onNext={selectedIndex >= 0 && selectedIndex < records.length - 1 ? handleNextRecord : undefined}
+                        onViewPdf={() => handlePdf(selected, false)}
+                        onDownloadPdf={() => handlePdf(selected, true)}
+                    />
                 </div>
             )}
+
+            <AgentInvoiceDownloadModal
+                isOpen={isDownloadOpen}
+                onClose={() => setIsDownloadOpen(false)}
+            />
         </div>
     );
 };

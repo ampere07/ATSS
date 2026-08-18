@@ -18,6 +18,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Menu,
   RefreshCw,
   Download,
   Filter,
@@ -38,6 +39,8 @@ import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { BillingDetailRecord } from '../types/billing';
 import { exportToCSV } from '../utils/exportUtils';
+import TransactionFunnelFilter, { allColumns as filterColumns, FilterValues } from '../filter/TransactionFunnelFilter';
+import { usePermissions } from '../hooks/usePermissions';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 const isDarkMode = false;
@@ -293,6 +296,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
   const [refreshing, setRefreshing] = useState(false);
   const [locationFilterVisible, setLocationFilterVisible] = useState(false);
+  const [isFunnelFilterOpen, setIsFunnelFilterOpen] = useState(false);
 
   const [cities, setCities] = useState<City[]>([]);
   const [regions, setRegions] = useState<Region[]>([]);
@@ -360,11 +364,10 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
   // ─── Permissions ───────────────────────────────────────────────────────────
 
-  const hasPermission = useCallback((permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) return true;
-    return userPermissions.includes(permission);
-  }, [userRole, roleId, userPermissions]);
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   // ─── User org ──────────────────────────────────────────────────────────────
 
@@ -380,6 +383,22 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
   }, []);
 
   // ─── Location items ────────────────────────────────────────────────────────
+
+  const resolvePaymentMethodName = (pmId: string | number | null | undefined): string => {
+    if (!pmId) return '';
+    const pm = paymentMethods.find((m) => String(m.id) === String(pmId));
+    return pm ? pm.payment_method : String(pmId);
+  };
+
+  // Restore saved funnel filters
+  useEffect(() => {
+    AsyncStorage.getItem('transactionFunnelFilters')
+      .then((saved) => {
+        if (!saved) return;
+        try { setActiveFilters(JSON.parse(saved)); } catch { /* ignore */ }
+      })
+      .catch(() => { });
+  }, []);
 
   const globalFilteredTransactions = useMemo(() => {
     const normalizedQuery = searchQuery.toLowerCase().replace(/\s+/g, '');
@@ -415,8 +434,80 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
       });
     }
 
+    // Apply funnel filters — same field resolution and comparisons as the web screen.
+    if (activeFilters && Object.keys(activeFilters).length > 0) {
+      filtered = filtered.filter((transaction: any) =>
+        Object.entries(activeFilters).every(([key, filter]: [string, any]) => {
+          const getValForFilter = (item: any, k: string) => {
+            switch (k) {
+              case 'id': return item.id;
+              case 'account_no': return item.account?.account_no || item.account_no;
+              case 'full_name': return item.account?.customer?.full_name;
+              case 'contact_no': return item.account?.customer?.contact_number_primary;
+              case 'date_processed': return item.date_processed;
+              case 'processed_by_user': return item.processor?.email_address || item.processed_by_user;
+              case 'payment_method':
+                return item.payment_method_info?.payment_method || resolvePaymentMethodName(item.payment_method);
+              case 'reference_no': return item.reference_no;
+              case 'or_no': return item.or_no;
+              case 'remarks': return item.remarks;
+              case 'status': return item.status;
+              case 'transaction_type': return item.transaction_type;
+              case 'barangay': return item.account?.customer?.barangay;
+              case 'city': return item.account?.customer?.city;
+              case 'region': return item.account?.customer?.region;
+              case 'account_balance': return item.account?.account_balance;
+              default: return item[k];
+            }
+          };
+
+          const val = getValForFilter(transaction, key);
+
+          if (filter.type === 'checklist') {
+            if (!filter.value || !Array.isArray(filter.value) || filter.value.length === 0) return true;
+            const valStr = String(val || '').toLowerCase().trim();
+
+            // Location values can live in the address string rather than their own column.
+            if (key === 'barangay' || key === 'city' || key === 'region') {
+              const address = String(transaction.account?.customer?.address || '').toLowerCase();
+              return (filter.value as string[]).some((option) => {
+                const opt = String(option).toLowerCase().trim();
+                return valStr === opt || address.includes(opt);
+              });
+            }
+
+            return (filter.value as string[]).some((option) => valStr === String(option).toLowerCase().trim());
+          }
+
+          if (filter.type === 'text') {
+            if (!filter.value) return true;
+            return String(val || '').toLowerCase().includes(String(filter.value).toLowerCase());
+          }
+
+          if (filter.type === 'number') {
+            const numValue = Number(val);
+            if (isNaN(numValue)) return false;
+            if (filter.from !== undefined && filter.from !== '' && numValue < Number(filter.from)) return false;
+            if (filter.to !== undefined && filter.to !== '' && numValue > Number(filter.to)) return false;
+            return true;
+          }
+
+          if (filter.type === 'date') {
+            if (!val) return false;
+            const dateValue = new Date(val).getTime();
+            if (isNaN(dateValue)) return false;
+            if (filter.from && dateValue < new Date(filter.from).getTime()) return false;
+            if (filter.to && dateValue > new Date(filter.to).getTime()) return false;
+            return true;
+          }
+
+          return true;
+        })
+      );
+    }
+
     return filtered;
-  }, [transactions, searchQuery, userOrgId, processedDateFrom, processedDateTo]);
+  }, [transactions, searchQuery, userOrgId, processedDateFrom, processedDateTo, activeFilters, paymentMethods]);
 
   const locationItems = useMemo(() => {
     const regionCounts: Record<string, number> = {};
@@ -519,6 +610,41 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
   const totalPages = Math.ceil(filteredTransactions.length / itemsPerPage);
 
   // ─── Pull to refresh ──────────────────────────────────────────────────────
+
+  const activeFilterKeys = Object.keys(activeFilters);
+
+  const handleApplyFilters = async (filters: FilterValues) => {
+    setActiveFilters(filters);
+    setCurrentPage(1);
+    try { await AsyncStorage.setItem('transactionFunnelFilters', JSON.stringify(filters)); } catch { /* ignore */ }
+  };
+
+  const removeFilter = async (key: string) => {
+    const next = { ...activeFilters };
+    delete next[key];
+    setActiveFilters(next);
+    setCurrentPage(1);
+    try { await AsyncStorage.setItem('transactionFunnelFilters', JSON.stringify(next)); } catch { /* ignore */ }
+  };
+
+  const handleClearAllFilters = async () => {
+    setActiveFilters({});
+    setCurrentPage(1);
+    try { await AsyncStorage.removeItem('transactionFunnelFilters'); } catch { /* ignore */ }
+  };
+
+  const getFilterDisplayValue = (filter: any): string => {
+    if (filter.type === 'checklist') {
+      return Array.isArray(filter.value) ? filter.value.join(', ') : String(filter.value ?? '');
+    }
+    if (filter.type === 'text') return String(filter.value ?? '');
+    if (filter.type === 'number' || filter.type === 'date') {
+      if (filter.from && filter.to) return `${filter.from} - ${filter.to}`;
+      if (filter.from) return `> ${filter.from}`;
+      if (filter.to) return `< ${filter.to}`;
+    }
+    return '';
+  };
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -861,7 +987,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
               placeholder="Search transactions..."
             />
           </View>
-          {/* Location filter button */}
+          {/* Location tree */}
           <TouchableOpacity
             onPress={() => setLocationFilterVisible(true)}
             style={{
@@ -869,10 +995,41 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
               borderRadius: 8,
               borderWidth: 1,
               borderColor: selectedLocation !== 'all' ? primary : '#e5e7eb',
+              backgroundColor: selectedLocation !== 'all' ? `${primary}12` : '#ffffff',
+            }}
+          >
+            <Menu size={18} color={selectedLocation !== 'all' ? primary : '#374151'} />
+          </TouchableOpacity>
+          {/* Funnel filter */}
+          <TouchableOpacity
+            onPress={() => setIsFunnelFilterOpen(true)}
+            style={{
+              padding: 9,
+              borderRadius: 8,
+              borderWidth: 1,
+              borderColor: activeFilterKeys.length > 0 ? '#ef4444' : '#e5e7eb',
               backgroundColor: '#ffffff',
             }}
           >
-            <Filter size={18} color={selectedLocation !== 'all' ? primary : '#6b7280'} />
+            <Filter size={18} color={activeFilterKeys.length > 0 ? '#ef4444' : '#374151'} />
+            {activeFilterKeys.length > 0 && (
+              <View
+                style={{
+                  position: 'absolute',
+                  top: -4,
+                  right: -4,
+                  minWidth: 16,
+                  height: 16,
+                  paddingHorizontal: 3,
+                  borderRadius: 8,
+                  backgroundColor: '#ef4444',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 9, color: '#fff', fontWeight: '700' }}>{activeFilterKeys.length}</Text>
+              </View>
+            )}
           </TouchableOpacity>
           {/* Export */}
           <TouchableOpacity
@@ -903,6 +1060,50 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
             <RefreshCw size={18} color={primary} />
           </TouchableOpacity>
         </View>
+
+        {/* Active funnel filter chips */}
+        {activeFilterKeys.length > 0 && (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
+          >
+            <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1 }}>FILTERS:</Text>
+            {activeFilterKeys.map((key) => {
+              const filter = activeFilters[key] as any;
+              const label = filterColumns.find((c) => c.key === key)?.label || key;
+              return (
+                <View
+                  key={key}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 4,
+                    backgroundColor: `${primary}15`,
+                    borderColor: `${primary}30`,
+                    borderWidth: 1,
+                    borderRadius: 99,
+                    paddingLeft: 10,
+                    paddingRight: 6,
+                    paddingVertical: 4,
+                  }}
+                >
+                  <Text style={{ fontSize: 11, color: primary }} numberOfLines={1}>
+                    {label}: {getFilterDisplayValue(filter)}
+                  </Text>
+                  <TouchableOpacity onPress={() => removeFilter(key)}>
+                    <X size={12} color={primary} />
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+            <TouchableOpacity onPress={handleClearAllFilters} style={{ paddingHorizontal: 8 }}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: primary, textDecorationLine: 'underline' }}>
+                Clear all
+              </Text>
+            </TouchableOpacity>
+          </ScrollView>
+        )}
 
         {/* Batch approve row */}
         <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
@@ -1118,6 +1319,17 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
       {/* Location filter modal */}
       {renderLocationFilterModal()}
+
+      {/* Funnel filter */}
+      <TransactionFunnelFilter
+        isOpen={isFunnelFilterOpen}
+        onClose={() => setIsFunnelFilterOpen(false)}
+        onApplyFilters={(filters) => {
+          handleApplyFilters(filters);
+          setIsFunnelFilterOpen(false);
+        }}
+        currentFilters={activeFilters}
+      />
 
       {/* Transaction detail modal */}
       {selectedTransaction && (

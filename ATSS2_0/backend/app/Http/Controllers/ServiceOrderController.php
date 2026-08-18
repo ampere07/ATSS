@@ -1058,10 +1058,31 @@ class ServiceOrderController extends Controller
             // any other casing. 'reactivation' is accepted too because the
             // repair-category lookup spells it that way and the two get mixed up.
             $reactivateConcerns = ['reactivate', 'reactivation'];
-            $isAlreadyResolvedReactivate = in_array(strtolower(trim($originalConcern)), $reactivateConcerns, true)
+
+            // Read from the repair category as well as the concern.
+            //
+            // A reactivation gets recorded in either field depending on who files
+            // it — support sets the concern, the technician picks the repair
+            // category — and the pullout trigger further down already reads
+            // repair_category for exactly that reason. Matching only `concern`
+            // here meant a resolved Reactivation ticket could leave the account
+            // pulled out with no way back, because this branch is the ONLY place
+            // in the codebase that sets users.active to 1.
+            $reactivateRepairCategory = strtolower(trim($request->input('repair_category') ?? ''));
+            if ($reactivateRepairCategory === '' && isset($serviceOrder->repair_category)) {
+                $reactivateRepairCategory = strtolower(trim($serviceOrder->repair_category));
+            }
+
+            $isReactivateRequest = in_array($normalizedConcern, $reactivateConcerns, true)
+                || in_array($reactivateRepairCategory, $reactivateConcerns, true);
+
+            $isAlreadyResolvedReactivate = (
+                    in_array(strtolower(trim($originalConcern)), $reactivateConcerns, true)
+                    || in_array(strtolower(trim($originalRepairCategory)), $reactivateConcerns, true)
+                )
                 && $originalSupportStatus === 'resolved';
 
-            if (in_array($normalizedConcern, $reactivateConcerns, true) && $supportStatus === 'resolved') {
+            if ($isReactivateRequest && $supportStatus === 'resolved') {
                 // Forced, and deliberately outside the billing check below.
                 // Gating this on "billing is not already Active" is exactly what
                 // kept users.active at 0: four other paths restore
@@ -1143,7 +1164,33 @@ class ServiceOrderController extends Controller
                 $repairCategory = strtolower(trim($order->repair_category));
             }
 
-            if ($repairCategory === 'pullout' && $visitStatus === 'done' && !$isAlreadyPulloutDone) {
+
+            // The pullout itself is decided on what the ticket says AFTER this
+            // request's write, not on $request and not on the pre-update copy above.
+            //
+            // This is the write that disables the customer's portal login, so the
+            // request-or-stored fallbacks are too loose for it in both directions:
+            //   • a request that only sets the category to Pullout would inherit a
+            //     'Done' left behind by an earlier, unrelated visit, and disable the
+            //     login without any pullout visit having been completed;
+            //   • a request that merely claims visit_status=Done would be trusted
+            //     even if that value never reached the row.
+            // Reading the row back closes both: no completed pullout visit on the
+            // record, no deactivation.
+            $pulloutRow = DB::table('service_orders')->where('id', $id)->first();
+            $pulloutVisitStatus = strtolower(trim((string) ($pulloutRow->visit_status ?? '')));
+            $pulloutRepairCategory = strtolower(trim((string) ($pulloutRow->repair_category ?? '')));
+
+            // 'for pullout' is accepted next to 'pullout' because the two spellings are
+            // used interchangeably for these tickets. Only 'Pullout' ever reaches
+            // repair_category today (the auto-generated requests put 'For Pullout' in
+            // `concern` and leave the category empty), so this widens nothing on
+            // existing data — it just stops the spelling from mattering later.
+            $pulloutCategories = ['pullout', 'for pullout'];
+            $isPulloutVisitDone = in_array($pulloutRepairCategory, $pulloutCategories, true)
+                && $pulloutVisitStatus === 'done';
+
+            if ($isPulloutVisitDone && !$isAlreadyPulloutDone) {
                 $billingAccount = BillingAccount::where('account_no', $order->account_no)->first();
                 if ($billingAccount) {
                     \Log::info('Triggering auto-pullout for Service Order with Pullout repair category', [

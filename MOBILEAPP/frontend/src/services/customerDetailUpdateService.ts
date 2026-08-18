@@ -1,4 +1,5 @@
 import apiClient, { API_BASE_URL as API_URL } from '../config/api';
+import { authFetch } from '../config/api';
 
 export interface CustomerDetailsUpdate {
   firstName: string;
@@ -71,7 +72,7 @@ export const customerDetailUpdateService = {
         headers['Content-Type'] = 'application/json';
       }
 
-      const response = await fetch(`${API_URL}/customer-detail/${accountNo}`, {
+      const response = await authFetch(`${API_URL}/customer-detail/${accountNo}`, {
         method,
         headers,
         body,

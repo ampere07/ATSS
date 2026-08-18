@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import { getApplications } from '../services/applicationService';
+import { usePermissions } from '../hooks/usePermissions';
 import { Application as ApiApplication } from '../types/application';
 
 interface Application {
@@ -84,6 +85,9 @@ const transformApplication = (app: ApiApplication): Application => {
 };
 
 export const ApplicationProvider: React.FC<ApplicationProviderProps> = ({ children }) => {
+    // Mounted for every role by Dashboard. Reading /applications needs the
+    // application-management key server side, so anyone else 403s on mount.
+    const { can, ready: permissionsReady } = usePermissions();
     const [applications, setApplications] = useState<Application[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
@@ -152,11 +156,14 @@ export const ApplicationProvider: React.FC<ApplicationProviderProps> = ({ childr
 
     // Initial fetch effect
     useEffect(() => {
+        // Wait for the keys to load, then only fetch for a user who may read applications.
+        if (!permissionsReady || !can('application-management')) return;
+
         // Only fetch if empty, otherwise let the logic decide
         if (applications.length === 0) {
             fetchApplications(false, false);
         }
-    }, [fetchApplications, applications.length]);
+    }, [fetchApplications, applications.length, permissionsReady, can]);
 
     return (
         <ApplicationContext.Provider

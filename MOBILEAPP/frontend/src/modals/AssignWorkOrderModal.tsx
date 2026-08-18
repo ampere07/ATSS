@@ -29,6 +29,7 @@ import { formatToGMT8MySQL } from '../utils/dateUtils';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
+import { authFetch } from '../config/api';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -161,7 +162,7 @@ const AssignWorkOrderModal: React.FC<AssignWorkOrderModalProps> = ({
     const fetchCategories = async () => {
       if (!isOpen) return;
       try {
-        const response = await fetch(`${API_BASE_URL}/work-categories`);
+        const response = await authFetch(`${API_BASE_URL}/work-categories`);
         const result = await response.json();
         if (result.success && result.data) {
           setCategories(result.data);

@@ -9,10 +9,12 @@ import {
   Menu as MenuIcon, Package, List, ClipboardCheck, X, ChevronUp,
   CreditCard, FileText, Receipt, Clock,
   MessageSquare, Network, AlertCircle, Router, Server, Wifi, Send, Cable, MapPin, Mail,
-  MessageSquareText, Wallet, Gauge, Layers, Ticket
+  MessageSquareText, Wallet, Gauge, Layers, Ticket, Users
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { usePermissions } from '../hooks/usePermissions';
+import { permissionForSection } from '../config/permissions';
 
 interface SidebarProps {
   activeSection: string;
@@ -23,12 +25,20 @@ interface SidebarProps {
   roleId?: number | string;
 }
 
+/**
+ * A tab-bar entry.
+ *
+ * What a role may open is decided by the permission table, keyed on `id`
+ * through config/permissions.ts — the same key the screen itself checks and the
+ * API demands. The per-item allowedRoles / allowedRoleIds lists this replaced
+ * had to be kept in step with the web portal's own copy by hand, and had
+ * drifted: Work Order listed technician here and not on the web, LCP List
+ * listed administrator here and superadmin there.
+ */
 interface MenuItem {
   id: string;
   label: string;
   icon: React.ElementType;
-  allowedRoles?: string[];
-  allowedRoleIds?: (number | string)[];
   isMenuPage?: boolean;
 }
 
@@ -41,6 +51,7 @@ const MAX_VISIBLE_ITEMS = 4;
 const GRID_COLUMNS = 3;
 
 const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userRole, roleId }) => {
+  const { can } = usePermissions();
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [isMenuExpanded, setIsMenuExpanded] = useState(false);
   const [measuredHeight, setMeasuredHeight] = useState(300);
@@ -66,88 +77,84 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
     {
       title: 'Operations',
       items: [
-        { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['agent'] },
-        { id: 'customer-dashboard', label: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['customer'] },
-        { id: 'applicationManagement', label: 'Application', icon: FileCheck, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'job-order', label: 'Job Order', icon: Wrench, allowedRoles: ['administrator', 'technician', 'agent', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 4, '4', 7, '7', 8, '8'] },
-        { id: 'service-order', label: 'Service Order', icon: Settings, allowedRoles: ['administrator', 'technician', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 7, '7', 8, '8'] },
-        { id: 'work-order', label: 'Work Order', icon: ClipboardCheck, allowedRoles: ['administrator', 'technician', 'agent', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 4, '4', 6, '6', 7, '7', 8, '8'] },
-        { id: 'lcp-nap-location', label: 'LCP/NAP', icon: MapPinned, allowedRoles: ['administrator', 'technician', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 6, '6', 7, '7', 8, '8'] },
+        { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        { id: 'customer-dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        { id: 'applicationManagement', label: 'Application', icon: FileCheck },
+        { id: 'job-order', label: 'Job Order', icon: Wrench },
+        { id: 'service-order', label: 'Service Order', icon: Settings },
+        { id: 'work-order', label: 'Work Order', icon: ClipboardCheck },
+        { id: 'lcp-nap-location', label: 'LCP/NAP', icon: MapPinned },
       ],
     },
     {
       title: 'Billing',
       items: [
-        { id: 'customer-bills', label: 'Bills', icon: ReceiptText, allowedRoles: ['customer'] },
-        { id: 'overdue', label: 'Overdue', icon: Clock, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
+        { id: 'customer-bills', label: 'Bills', icon: ReceiptText },
+        { id: 'customer', label: 'Customer', icon: Users },
+        { id: 'transaction-list', label: 'Transactions', icon: Receipt },
+        { id: 'overdue', label: 'Overdue', icon: Clock },
       ],
     },
     {
       title: 'Agent',
       items: [
-        { id: 'commission', label: 'History', icon: ReceiptText, allowedRoles: ['administrator', 'agent'], allowedRoleIds: [1, '1', 4, '4', 7, '7'] },
+        { id: 'commission', label: 'History', icon: ReceiptText },
       ],
     },
     {
       title: 'Inventory',
       items: [
-        { id: 'inventory', label: 'Inventory', icon: Package, allowedRoles: ['administrator', 'inventorystaff'], allowedRoleIds: [1, '1', 5, '5', 7, '7'] },
-        { id: 'inventory-category-list', label: 'Categories', icon: List, allowedRoles: ['administrator', 'inventorystaff'], allowedRoleIds: [1, '1', 5, '5', 7, '7'] },
+        { id: 'inventory', label: 'Inventory', icon: Package },
+        { id: 'inventory-category-list', label: 'Categories', icon: List },
       ],
     },
     {
       title: 'Configurations',
       items: [
-        { id: 'promo-list', label: 'Promos', icon: Ticket, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'plan-list', label: 'Plans', icon: Layers, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'location-list', label: 'Locations', icon: MapPin, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'lcp-list', label: 'LCP List', icon: Network, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'nap-list', label: 'NAP List', icon: Network, allowedRoles: ['administrator', 'headtech'], allowedRoleIds: [1, '1', 7, '7', 8, '8'] },
-        { id: 'usage-type-list', label: 'Usage Types', icon: Gauge, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'payment-method-list', label: 'Payment', icon: CreditCard, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'work-category-list', label: 'Work Cat.', icon: Wrench, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'radius-config', label: 'RADIUS', icon: Wifi, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'smart-olt-config', label: 'SmartOLT', icon: Server, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'sms-config', label: 'SMS Config', icon: Send, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'pppoe-setup', label: 'PPPoE', icon: Router, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'concern-config', label: 'Concerns', icon: AlertCircle, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'billing-config', label: 'Billing Cfg', icon: Receipt, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
+        { id: 'promo-list', label: 'Promos', icon: Ticket },
+        { id: 'plan-list', label: 'Plans', icon: Layers },
+        { id: 'location-list', label: 'Locations', icon: MapPin },
+        { id: 'lcp-list', label: 'LCP List', icon: Network },
+        { id: 'nap-list', label: 'NAP List', icon: Network },
+        { id: 'usage-type-list', label: 'Usage Types', icon: Gauge },
+        { id: 'payment-method-list', label: 'Payment', icon: CreditCard },
+        { id: 'work-category-list', label: 'Work Cat.', icon: Wrench },
+        { id: 'radius-config', label: 'RADIUS', icon: Wifi },
+        { id: 'smart-olt-config', label: 'SmartOLT', icon: Server },
+        { id: 'sms-config', label: 'SMS Config', icon: Send },
+        { id: 'pppoe-setup', label: 'PPPoE', icon: Router },
+        { id: 'concern-config', label: 'Concerns', icon: AlertCircle },
+        { id: 'billing-config', label: 'Billing Cfg', icon: Receipt },
       ],
     },
     {
       title: 'Logs',
       items: [
-        { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquareText, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'email-logs', label: 'Email Logs', icon: Mail, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'file-log-viewer', label: 'File Logs', icon: FileText, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
-        { id: 'expenses-log', label: 'Expenses', icon: Wallet, allowedRoles: ['administrator'], allowedRoleIds: [1, '1', 7, '7'] },
+        { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquareText },
+        { id: 'email-logs', label: 'Email Logs', icon: Mail },
+        { id: 'file-log-viewer', label: 'File Logs', icon: FileText },
+        { id: 'expenses-log', label: 'Expenses', icon: Wallet },
       ],
     },
     {
       title: 'Account',
       items: [
-        { id: 'customer-support', label: 'Support', icon: LifeBuoy, allowedRoles: ['customer'] },
-        { id: 'menu', label: 'Menu', icon: MenuIcon, isMenuPage: true, allowedRoles: ['customer', 'technician', 'administrator', 'inventorystaff', 'agent', 'osp', 'headtech'], allowedRoleIds: [1, '1', 2, '2', 3, '3', 4, '4', 5, '5', 6, '6', 7, '7', 8, '8'] },
+        { id: 'customer-support', label: 'Support', icon: LifeBuoy },
+        { id: 'menu', label: 'Menu', icon: MenuIcon, isMenuPage: true },
       ],
     },
   ];
 
-  // ─── Role filtering ───
-  const filterMenuByRole = (items: MenuItem[]): MenuItem[] => {
-    const normalizedUserRole = userRole ? userRole.toLowerCase().trim() : '';
-    const currentRoleId = roleId ? String(roleId) : '';
-
-    return items.filter(item => {
-      if ((!item.allowedRoles || item.allowedRoles.length === 0) && (!item.allowedRoleIds || item.allowedRoleIds.length === 0)) return true;
-      const roleMatched = item.allowedRoles?.some(role => role.toLowerCase().trim() === normalizedUserRole);
-      const roleIdMatched = item.allowedRoleIds?.some(id => String(id) === currentRoleId);
-      return roleMatched || roleIdMatched;
-    });
-  };
+  // ─── Permission filtering ───
+  // An entry is listed when the role holds the key its id maps to — the same
+  // key Dashboard checks before rendering the screen, so the tab bar can never
+  // offer something that then refuses to open.
+  const filterByPermission = (items: MenuItem[]): MenuItem[] =>
+    items.filter(item => can(permissionForSection(item.id)));
 
   // Build filtered groups (only groups with at least 1 visible item)
   const filteredNavGroups = navGroups
-    .map(group => ({ title: group.title, items: filterMenuByRole(group.items) }))
+    .map(group => ({ title: group.title, items: filterByPermission(group.items) }))
     .filter(group => group.items.length > 0);
 
   // Flatten for bottom bar logic

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import apiClient from '../config/api';
+import { usePermissions } from '../hooks/usePermissions';
 
 export interface InventoryItem {
     item_name: string;
@@ -56,6 +57,13 @@ interface InventoryProviderProps {
 }
 
 export const InventoryProvider: React.FC<InventoryProviderProps> = ({ children }) => {
+    // Mirrors the server rules: /inventory is readable by the inventory page and by
+    // the order pages that consume items, /inventory-categories only by the inventory
+    // pages. A technician holds the former and not the latter, and a customer holds
+    // neither — both used to 403 on mount.
+    const { can, ready: permissionsReady } = usePermissions();
+    const canReadItems = can(['inventory', 'inventory-category-list', 'job-order', 'service-order', 'work-order']);
+    const canReadCategories = can(['inventory', 'inventory-category-list']);
     const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
     const [dbCategories, setDbCategories] = useState<InventoryCategory[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -63,8 +71,9 @@ export const InventoryProvider: React.FC<InventoryProviderProps> = ({ children }
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
     const fetchInventoryData = useCallback(async (force = false, silent = false) => {
-        // Only skip if not forced AND both items and categories already exist
-        if (!force && inventoryItems.length > 0 && dbCategories.length > 0) {
+        // Only skip if not forced AND both items and categories already exist. A role that
+        // may not read categories never fills them, so it must not be waited on.
+        if (!force && inventoryItems.length > 0 && (!canReadCategories || dbCategories.length > 0)) {
             return;
         }
 
@@ -73,9 +82,13 @@ export const InventoryProvider: React.FC<InventoryProviderProps> = ({ children }
         }
 
         try {
+            // The categories request is skipped rather than allowed to fail for a role that
+            // may not read them: awaiting both together used to reject and drop the items too.
             const [inventoryResponse, categoriesResponse] = await Promise.all([
                 apiClient.get<ApiResponse<InventoryItem[]> | InventoryItem[]>('/inventory'),
-                apiClient.get<ApiResponse<InventoryCategory[]> | InventoryCategory[]>('/inventory-categories')
+                canReadCategories
+                    ? apiClient.get<ApiResponse<InventoryCategory[]> | InventoryCategory[]>('/inventory-categories')
+                    : Promise.resolve({ data: [] as InventoryCategory[] })
             ]);
 
             const invResData = inventoryResponse.data;
@@ -107,7 +120,7 @@ export const InventoryProvider: React.FC<InventoryProviderProps> = ({ children }
         } finally {
             setIsLoading(false);
         }
-    }, [inventoryItems.length, dbCategories.length]);
+    }, [inventoryItems.length, dbCategories.length, canReadCategories]);
 
     const refreshInventory = useCallback(async () => {
         await fetchInventoryData(true, false);
@@ -118,11 +131,14 @@ export const InventoryProvider: React.FC<InventoryProviderProps> = ({ children }
     }, [fetchInventoryData]);
 
     useEffect(() => {
+        // Wait for the keys to load, then only fetch for a user who may read inventory.
+        if (!permissionsReady || !canReadItems) return;
+
         // Initial fetch if empty
-        if (inventoryItems.length === 0 || dbCategories.length === 0) {
+        if (inventoryItems.length === 0 || (canReadCategories && dbCategories.length === 0)) {
             fetchInventoryData(false, false);
         }
-    }, [fetchInventoryData, inventoryItems.length, dbCategories.length]);
+    }, [fetchInventoryData, inventoryItems.length, dbCategories.length, permissionsReady, canReadItems, canReadCategories]);
 
     return (
         <InventoryContext.Provider

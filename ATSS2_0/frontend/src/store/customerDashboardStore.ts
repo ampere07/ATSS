@@ -24,6 +24,14 @@ interface CustomerDashboardState {
     isLoading: boolean;
     error: string | null;
     fetchedAccountNo: string | null;
+    /**
+     * The account the last fetch was asked for, set whether or not it succeeded.
+     *
+     * fetchedAccountNo is only set on success, so after a failed first load there
+     * was nothing to retry with and refreshCustomerData became a no-op — the
+     * dashboard stayed empty until the customer signed in again.
+     */
+    requestedAccountNo: string | null;
 
     fetchCustomerData: (usernameOrAccountNo: string, isCustomerRole?: boolean) => Promise<void>;
     refreshCustomerData: () => Promise<void>;
@@ -38,6 +46,7 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
     isLoading: false,
     error: null,
     fetchedAccountNo: null,
+    requestedAccountNo: null,
 
     fetchCustomerData: async (usernameOrAccountNo: string, isCustomerRole = true) => {
         const { fetchedAccountNo, isLoading } = get();
@@ -45,7 +54,7 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
         // Prevent refetching for the same user if already loaded
         if (fetchedAccountNo === usernameOrAccountNo || isLoading) return;
 
-        set({ isLoading: true, error: null });
+        set({ isLoading: true, error: null, requestedAccountNo: usernameOrAccountNo });
 
         try {
             const detail = await getCustomerDetail(usernameOrAccountNo);
@@ -136,10 +145,13 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
     },
 
     refreshCustomerData: async () => {
-        const { fetchedAccountNo } = get();
-        if (fetchedAccountNo) {
+        // Falls back to the requested account so this can also recover a load that
+        // failed outright, which is the case that used to need a fresh sign-in.
+        const { fetchedAccountNo, requestedAccountNo } = get();
+        const target = fetchedAccountNo || requestedAccountNo;
+        if (target) {
             set({ fetchedAccountNo: null }); // Clear cached ID to force refresh
-            await get().fetchCustomerData(fetchedAccountNo);
+            await get().fetchCustomerData(target);
         }
     }
 }));

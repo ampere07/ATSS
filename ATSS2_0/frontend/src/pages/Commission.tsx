@@ -11,8 +11,8 @@ import BonusPayoutModal from '../modals/BonusPayoutModal';
 import { useAgentStore } from '../store/agentStore';
 import ModalUITemplate from '../modals/ui-modal/ModalUITemplate';
 import { Agent } from '../types/api';
-import { getStoredAgentIdentity } from '../utils/agentReferral';
 import apiClient from '../config/api';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface ColumnDefinition {
     key: string;
@@ -249,11 +249,16 @@ const Commission: React.FC = () => {
     const [showBonusModal, setShowBonusModal] = useState(false);
     const [payoutAgent, setPayoutAgent] = useState<Agent | null>(null);
     const { agents, fetchAgents } = useAgentStore();
+    const { can } = usePermissions();
 
     // Agents reach this page as their own read-only "History": the backend already scopes
     // every record to them, and payout creation stays an administrator action.
-    const [isAgentView] = useState<boolean>(() => getStoredAgentIdentity().isAgent);
-    const canManagePayouts = !isAgentView;
+    //
+    // Keyed on the permission rather than on "not an agent", so a custom role
+    // granted the History page is read-only too unless it was also given Agent
+    // Payout — and so this agrees with the API, where approving a payout
+    // requires the same key.
+    const canManagePayouts = can('agent-payout');
     const [columnOrderEarnings, setColumnOrderEarnings] = useState<string[]>(
         () => mergeColumnOrder(localStorage.getItem('commissionEarningsColumnOrder'), earningsColumns)
     );

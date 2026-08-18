@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, Pressable, TextInput, ScrollView, ActivityIndicator, Alert, Linking, useWindowDimensions, Modal, PanResponder, Animated, RefreshControl, KeyboardAvoidingView, Platform, StyleSheet, DeviceEventEmitter } from 'react-native';
+import { View, Text, Pressable, TextInput, ScrollView, Alert, Linking, useWindowDimensions, Modal, PanResponder, Animated, RefreshControl, KeyboardAvoidingView, Platform, StyleSheet, DeviceEventEmitter } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
 import * as LinkingExpo from 'expo-linking';
 import { User, Activity, Clock, Users, FileText, CheckCircle, HelpCircle, RefreshCcw, AlertCircle } from 'lucide-react-native';
@@ -8,6 +8,50 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { paymentService, PendingPayment } from '../services/paymentService';
 import { useCustomerDataContext } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+
+/**
+ * A pulsing placeholder block.
+ *
+ * Rendered instead of a number that has not arrived. The balance card would otherwise
+ * show a confident zero while the request is still in flight, which reads as "you owe
+ * nothing" rather than "not loaded yet".
+ */
+const Skeleton: React.FC<{
+  width: number | string;
+  height: number;
+  radius?: number;
+  light?: boolean;
+  style?: any;
+}> = ({ width, height, radius = 8, light = false, style }) => {
+  const pulse = React.useRef(new Animated.Value(0.35)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 0.85, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.35, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  return (
+    <Animated.View
+      accessibilityLabel="Loading"
+      style={[
+        {
+          width: width as any,
+          height,
+          borderRadius: radius,
+          backgroundColor: light ? 'rgba(255,255,255,0.35)' : '#e5e7eb',
+          opacity: pulse,
+        },
+        style,
+      ]}
+    />
+  );
+};
 
 interface Payment {
     id: string;
@@ -141,10 +185,27 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         ? `${customerDetail.firstName.charAt(0)}${customerDetail.lastName.charAt(0)}`.toUpperCase()
         : displayName.split(' ').map((n: any) => n[0]).join('').substring(0, 2).toUpperCase();
     const accountNo = customerDetail?.billingAccount?.accountNo || user?.username || 'N/A';
+    // "No Plan" is a claim about the account, so it is only said once the record is
+    // actually here. Every customer in the database has a plan; a blank one meant the
+    // fetch had not landed, and the surrounding fields kept looking right because they
+    // fall back to stored authData rather than to this record.
+    const planKnown = !!customerDetail;
     const planName = customerDetail?.desiredPlan || 'No Plan';
     const address = customerDetail?.address || 'No Address';
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
-    const balance = Number(customerDetail?.billingAccount?.accountBalance || 0);
+    const rawBalance = customerDetail?.billingAccount?.accountBalance;
+    const balance = Number(rawBalance) || 0;
+
+    // A settled account legitimately reads 0, so only a missing/unparsable value counts
+    // as "not loaded yet". `|| 0` collapsed the two, which is what rendered a confident
+    // zero while the request was still in flight.
+    //
+    // A load in progress counts as not-known too: the context publishes customerDetail as
+    // soon as the first call returns and keeps fetching, so the card can be on screen
+    // while figures are still arriving.
+    const balanceReady = !contextLoading
+        && rawBalance !== null && rawBalance !== undefined
+        && String(rawBalance).trim() !== '' && !isNaN(Number(rawBalance));
 
     // An outstanding (positive) balance must be settled in full, so Pay Now is pinned to the
     // balance and locked. At zero or on a credit balance the customer chooses the amount.
@@ -301,9 +362,31 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         }
     }, [balance, isBalancePositive]);
 
+    // Nothing at all yet: lay the page out as skeletons rather than a bare spinner, so the
+    // balance card never appears with a placeholder figure in it.
     if (contextLoading && !customerDetail) return (
-        <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#111827" />
+        <View style={{ flex: 1, backgroundColor: '#f9fafb', padding: 16, paddingTop: 60 }}>
+            <View style={{ borderRadius: 20, backgroundColor: '#111827', padding: 20, gap: 12 }}>
+                <Skeleton light width={120} height={12} />
+                <Skeleton light width={180} height={40} radius={10} />
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Skeleton light width={110} height={12} radius={6} />
+                    <Skeleton light width={96} height={34} radius={17} />
+                </View>
+            </View>
+
+            <View style={{ marginTop: 24, gap: 12 }}>
+                <Skeleton width={140} height={14} />
+                {[0, 1, 2].map((i) => (
+                    <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <View style={{ gap: 6 }}>
+                            <Skeleton width={180} height={12} />
+                            <Skeleton width={120} height={10} />
+                        </View>
+                        <Skeleton width={70} height={14} />
+                    </View>
+                ))}
+            </View>
         </View>
     );
 
@@ -542,30 +625,38 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 <View style={styles.billingRow}>
                                     <View style={styles.billingLeft}>
                                         <Text allowFontScaling={false} style={styles.balanceLabel}>Total Amount</Text>
-                                        <Text 
-                                            numberOfLines={1} 
-                                            adjustsFontSizeToFit
-                                            minimumFontScale={0.5}
-                                            allowFontScaling={false}
-                                            style={[styles.balanceAmountText, { fontSize: balance >= 1000 ? (isMobile ? (isShort ? 28 : 32) : 44) : (isMobile ? (isShort ? 36 : 40) : 56) }]}
-                                        >
-                                            {formatCurrency(balance)}
-                                        </Text>
+                                        {balanceReady ? (
+                                            <Text
+                                                numberOfLines={1}
+                                                adjustsFontSizeToFit
+                                                minimumFontScale={0.5}
+                                                allowFontScaling={false}
+                                                style={[styles.balanceAmountText, { fontSize: balance >= 1000 ? (isMobile ? (isShort ? 28 : 32) : 44) : (isMobile ? (isShort ? 36 : 40) : 56) }]}
+                                            >
+                                                {formatCurrency(balance)}
+                                            </Text>
+                                        ) : (
+                                            <Skeleton light width={isShort ? 150 : 180} height={isShort ? 34 : 42} radius={10} style={{ marginTop: 4 }} />
+                                        )}
                                     </View>
 
                                     <View style={styles.billingRightCol}>
                                         <View style={styles.dueDateContainer}>
-                                            <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>{dueDateString}</Text></Text>
+                                            {balanceReady ? (
+                                                <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>{dueDateString}</Text></Text>
+                                            ) : (
+                                                <Skeleton light width={110} height={12} radius={6} />
+                                            )}
                                         </View>
 
                                         <Pressable
                                             onPress={handlePayNow}
-                                            disabled={isPaymentProcessing}
-                                            style={[styles.payBtn, { opacity: isPaymentProcessing ? 0.5 : 1 }]}
+                                            disabled={isPaymentProcessing || !balanceReady}
+                                            style={[styles.payBtn, { opacity: (isPaymentProcessing || !balanceReady) ? 0.5 : 1 }]}
                                         >
                                             <View style={styles.payBtnInner}>
                                                 <Text style={styles.payBtnText}>
-                                                    {isPaymentProcessing ? '...' : (pendingPayment ? 'Proceed' : 'Pay Now')}
+                                                    {(!balanceReady || isPaymentProcessing) ? '...' : (pendingPayment ? 'Proceed' : 'Pay Now')}
                                                 </Text>
                                             </View>
                                         </Pressable>
@@ -577,7 +668,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                                         <View style={{ flex: 1 }}>
                                             <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, marginBottom: 4 }}>Plan</Text>
-                                            <Text style={{ color: '#ffffff', fontSize: 18, fontWeight: '700' }}>{planName}</Text>
+                                            {planKnown ? (
+                                                <Text style={{ color: '#ffffff', fontSize: 18, fontWeight: '700' }}>{planName}</Text>
+                                            ) : (
+                                                <Skeleton light width={120} height={18} radius={6} />
+                                            )}
                                         </View>
                                         <View style={{ flex: 1, alignItems: 'flex-end' }}>
                                             <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, marginBottom: 4 }}>Usage Type</Text>
@@ -750,9 +845,13 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 </View>
                                 <View style={styles.verifyRow}>
                                     <Text style={styles.verifyLabel}>Current Balance</Text>
-                                    <Text style={[styles.verifyValue, { fontWeight: 'bold', color: balance > 0 ? (colorPalette?.primary || '#ef4444') : '#16a34a' }]}>
-                                        {formatCurrency(balance)}
-                                    </Text>
+                                    {balanceReady ? (
+                                        <Text style={[styles.verifyValue, { fontWeight: 'bold', color: balance > 0 ? (colorPalette?.primary || '#ef4444') : '#16a34a' }]}>
+                                            {formatCurrency(balance)}
+                                        </Text>
+                                    ) : (
+                                        <Skeleton width={90} height={14} radius={6} />
+                                    )}
                                 </View>
                             </View>
 
@@ -795,10 +894,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
                             <Pressable
                                 onPress={handleProceedToCheckout}
-                                disabled={isPaymentProcessing || paymentAmount < 1 || (balance > 0 && paymentAmount < balance)}
+                                disabled={!balanceReady || isPaymentProcessing || paymentAmount < 1 || (balance > 0 && paymentAmount < balance)}
                                 style={[styles.primaryBtn, {
                                     backgroundColor: colorPalette?.primary || '#ef4444',
-                                    opacity: (isPaymentProcessing || paymentAmount < 1) ? 0.5 : 1,
+                                    opacity: (!balanceReady || isPaymentProcessing || paymentAmount < 1) ? 0.5 : 1,
                                 }]}
                             >
                                 <Text style={styles.primaryBtnText}>

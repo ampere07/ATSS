@@ -5,6 +5,8 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Models\Organization;
 use App\Models\AgentBalance;
+use App\Models\Role;
+use App\Support\Permissions;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
@@ -12,6 +14,55 @@ use App\Services\ActivityLogService;
 
 class UserController extends Controller
 {
+    /**
+     * May the caller only touch agent accounts?
+     *
+     * Agent Management renders this same controller with `agentOnly` set, and
+     * an administrator reaches it through the "agent-management" key without
+     * holding the full Users Management one. The UI offers nothing but agents
+     * there, so a request naming another role did not come from the UI —
+     * without this, an administrator could POST /api/users with role_id 7 and
+     * mint themselves a SuperAdmin.
+     */
+    private function limitedToAgents($authUser): bool
+    {
+        if ($authUser === null) {
+            return true;
+        }
+
+        if (Permissions::allows($authUser, ['user-management', 'tech-users'])) {
+            return false;
+        }
+
+        return Permissions::allows($authUser, ['agent-management', 'team-agent']);
+    }
+
+    /**
+     * Refuse a write that would create or alter an account outside the caller's
+     * remit, or null when the write is allowed.
+     *
+     * `$targetRoleId` is the role the request is asking for; `$existing` is the
+     * account being edited, if any — an agent-only caller may neither promote
+     * an agent nor edit somebody who was never one.
+     */
+    private function denyIfRoleOutOfRemit($authUser, $targetRoleId, ?User $existing = null)
+    {
+        if (!$this->limitedToAgents($authUser)) {
+            return null;
+        }
+
+        $offLimits = static fn ($roleId) => $roleId !== null && (int) $roleId !== Role::AGENT;
+
+        if ($offLimits($targetRoleId) || ($existing !== null && $offLimits($existing->role_id))) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You may only manage agent accounts.',
+            ], 403);
+        }
+
+        return null;
+    }
+
     public function index(Request $request)
     {
         try {
@@ -106,8 +157,15 @@ class UserController extends Controller
             $authUser = auth()->user();
             $organizationId = $authUser ? $authUser->organization_id : null;
             $roleId = $authUser ? $authUser->role_id : null;
-            
-            $isGlobalAdmin = !$authUser || ($roleId == 7 && $organizationId === null);
+
+            if ($denied = $this->denyIfRoleOutOfRemit($authUser, $request->role_id)) {
+                return $denied;
+            }
+
+            // A request with no user reaches here only if the API's access
+            // control was bypassed; treat it as unprivileged rather than as a
+            // global administrator.
+            $isGlobalAdmin = $authUser && $roleId == 7 && $organizationId === null;
 
             // Generate user ID with proper error handling
             
@@ -262,7 +320,11 @@ class UserController extends Controller
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
 
             $user = User::findOrFail($id);
-            
+
+            if ($denied = $this->denyIfRoleOutOfRemit($authUser, $request->input('role_id'), $user)) {
+                return $denied;
+            }
+
             if (!$isGlobalAdmin) {
                 if ($organizationId) {
                     if ($user->organization_id !== $organizationId) {
@@ -388,6 +450,10 @@ class UserController extends Controller
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
 
             $user = User::findOrFail($id);
+
+            if ($denied = $this->denyIfRoleOutOfRemit($authUser, null, $user)) {
+                return $denied;
+            }
 
             if (!$isGlobalAdmin) {
                 if ($organizationId) {

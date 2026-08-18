@@ -79,6 +79,11 @@ Route::post('/commissions/bonus-history/{id}/reject', [CommissionController::cla
 // "generate" is registered before "{id}" so it is not read as an id.
 Route::get('/agent-invoices', [\App\Http\Controllers\AgentInvoiceController::class, 'index']);
 Route::post('/agent-invoices/generate', [\App\Http\Controllers\AgentInvoiceController::class, 'generate']);
+// Registered above the /{id} routes below. Those carry whereNumber, so a word
+// would not match them anyway — the order is kept for the next route added
+// without one.
+Route::get('/agent-invoices/periods', [\App\Http\Controllers\AgentInvoiceController::class, 'periods']);
+Route::get('/agent-invoices/archive', [\App\Http\Controllers\AgentInvoiceController::class, 'archive']);
 Route::get('/agent-invoices/{id}', [\App\Http\Controllers\AgentInvoiceController::class, 'show'])->whereNumber('id');
 Route::get('/agent-invoices/{id}/pdf', [\App\Http\Controllers\AgentInvoiceController::class, 'pdf'])->whereNumber('id');
 Route::patch('/agent-invoices/{id}/status', [\App\Http\Controllers\AgentInvoiceController::class, 'updateStatus'])->whereNumber('id');
@@ -88,13 +93,18 @@ Route::get('/reports/options', [ReportController::class , 'options']);
 // constraint and would otherwise match "settings" as an id.
 Route::get('/reports/settings', [ReportController::class , 'settings']);
 Route::put('/reports/settings', [ReportController::class , 'updateSettings'])
-    ->middleware('role:administrator,super_admin');
+    ->middleware('permission:reports.manage');
 Route::put('/reports/{id}', [ReportController::class , 'update'])->whereNumber('id');
 // Deleting a report also drops its dispatch ledger and unsent emails, so it is
-// Super Admin only — enforced here, not just hidden in the UI.
+// held apart from editing one — enforced here, not just hidden in the UI.
+//
+// Stated as a permission rather than as `role:super_admin`: the two are the same
+// thing for the seeded roles, since SuperAdmin is the only one holding
+// reports.delete, but a custom role can now be granted it deliberately instead
+// of being refused something its Role Management page said it had.
 Route::delete('/reports/{id}', [ReportController::class , 'destroy'])
     ->whereNumber('id')
-    ->middleware('role:super_admin');
+    ->middleware('permission:reports.delete');
 Route::get('/reports/{id}/preview', [ReportController::class , 'preview'])->whereNumber('id');
 Route::post('/reports/{id}/regenerate', [ReportController::class , 'regenerate'])->whereNumber('id');
 Route::post('/reports/{id}/send-now', [ReportController::class , 'sendNow'])->whereNumber('id');
@@ -1050,6 +1060,11 @@ Route::prefix('work-orders')->group(function () {
     Route::get('/statistics', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'getStatistics']);
     Route::get('/{id}', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'show']);
     Route::put('/{id}', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'update']);
+    // Releases a work order to its technician ahead of their queue.
+    // Administrators only — enforced here, not just hidden in the UI. This group
+    // has no auth middleware of its own, so auth:sanctum is named explicitly.
+    Route::post('/{id}/enable-technician', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'enableForTechnician'])
+        ->middleware(['auth:sanctum', 'role:administrator,super_admin']);
     Route::delete('/{id}', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'destroy']);
 });
 
@@ -1242,22 +1257,17 @@ Route::post('/login', function (Request $request) {
             $fullName = $user->username;
         }
 
-        // Get role permissions (for custom roles)
-        // Note: Role model casts 'permissions' to array automatically
-        $rolePermissions = null;
-        if ($user->role) {
-            $rawPerms = $user->role->permissions;
-            \Log::info('Login permissions debug', [
-                'user_id' => $user->id,
-                'role_id' => $user->role_id,
-                'role_name' => $user->role->role_name ?? 'unknown',
-                'raw_permissions' => $rawPerms,
-                'permissions_type' => gettype($rawPerms),
-            ]);
-            if (is_array($rawPerms) && count($rawPerms) > 0) {
-                $rolePermissions = $rawPerms;
-            }
-        }
+        // The role's effective permission keys.
+        //
+        // Resolved through App\Support\Permissions rather than read straight off
+        // the role row, so a seeded role (1-8) gets the keys its role implies
+        // and a custom role (9+) gets its own stored list — the clients receive
+        // one shape and do not have to know which kind of role they hold. A
+        // SuperAdmin gets ["*"].
+        //
+        // This is the same list /api/me/permissions returns; sending it at
+        // sign-in saves the first paint a round trip.
+        $rolePermissions = \App\Support\Permissions::forUser($user);
 
         $responseData = [
             'user' => [
@@ -1268,6 +1278,9 @@ Route::post('/login', function (Request $request) {
                 'role' => $primaryRole,
                 'role_id' => $user->role_id,
                 'permissions' => $rolePermissions,
+                // Where this role should land. The client uses it instead of
+                // guessing from the first key in the list.
+                'home' => \App\Support\Permissions::ROLE_HOME[(int) $user->role_id] ?? null,
             ]
         ];
 
@@ -1287,9 +1300,29 @@ Route::post('/login', function (Request $request) {
             ]);
         }
 
-        // Generate token
-        $token = 'user_token_' . $user->id . '_' . time();
-        $responseData['token'] = $token;
+        // A real Sanctum personal access token, issued alongside the session.
+        //
+        // The session cookie remains the primary credential and nothing about
+        // the cookie flow changes. This is the fallback for a browser that will
+        // not return the cookie at all — an in-app browser such as Messenger's,
+        // whose WebView drops a cookie set by a host other than the page's.
+        // Without it, such a browser has no way to stay authenticated: the
+        // login succeeds, the cookie is discarded, and every request after it
+        // is a 401.
+        //
+        // Replaces a string of the form "user_token_<id>_<timestamp>", which
+        // looked like a credential but authenticated nothing — no guard ever
+        // read it, and anyone could have constructed one.
+        //
+        // Named per device so a token can be traced and revoked on its own, and
+        // so signing in again does not silently pile up duplicates.
+        $tokenName = 'spa:' . substr((string) ($request->userAgent() ?? 'unknown'), 0, 120);
+
+        // The previous token for this device is dropped first: a fresh login
+        // should replace the old credential rather than leave it valid.
+        $user->tokens()->where('name', $tokenName)->delete();
+
+        $responseData['token'] = $user->createToken($tokenName)->plainTextToken;
 
         return response()->json([
         'status' => 'success',
@@ -1376,10 +1409,69 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
+/**
+ * The signed-in user's effective permission keys.
+ *
+ * The server is the authority on what a role may do; this is how a client
+ * asks. The clients cache the same table locally so the first paint after a
+ * reload does not have to wait on a round trip, and reconcile against this —
+ * so an administrator whose role is changed while they are signed in loses the
+ * menu entries on their next load rather than on their next sign-in.
+ *
+ * `permissions` may be `["*"]` for a SuperAdmin, which the clients read as
+ * "everything, including keys added later".
+ */
+Route::middleware('auth:sanctum')->get('/me/permissions', function (Request $request) {
+    $user = $request->user();
+
+    return response()->json([
+        'success' => true,
+        'data' => [
+            'role_id'     => (int) $user->role_id,
+            'role'        => strtolower(optional($user->role)->role_name ?? ''),
+            'permissions' => \App\Support\Permissions::forUser($user),
+            'home'        => \App\Support\Permissions::ROLE_HOME[(int) $user->role_id] ?? null,
+        ],
+    ]);
+});
+
+/**
+ * Sign out: end the session AND revoke the token this device is holding.
+ *
+ * Both halves matter. Clearing the session alone would leave a working bearer
+ * token behind on a device that has signed out, which is exactly the credential
+ * an in-app browser is relying on.
+ *
+ * Deliberately tolerant of being called when only one of the two exists — a
+ * cookie session with no token, or a token with no session — so signing out
+ * never fails and leaves the user stuck.
+ */
+Route::middleware('auth:sanctum')->post('/logout', function (Request $request) {
+    $token = $request->user()?->currentAccessToken();
+
+    // Only a real personal access token can be deleted. On a cookie-based
+    // request this is a TransientToken, which has nothing to revoke.
+    if ($token instanceof \Laravel\Sanctum\PersonalAccessToken) {
+        $token->delete();
+    }
+
+    if ($request->hasSession()) {
+        \Auth::guard('web')->logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+    }
+
+    return response()->json(['status' => 'success', 'message' => 'Logged out']);
+});
+
 // User Management Routes
 Route::prefix('users')->middleware('ensure.database.tables')->group(function () {
     Route::get('/', [UserController::class , 'index']);
     Route::post('/', [UserController::class , 'store']);
+    // The mobile app registers its own Expo token here. Declared above /{id} so the
+    // literal path is never read as an id, and UserController::updatePushToken writes
+    // only to the caller's own row.
+    Route::post('/push-token', [UserController::class , 'updatePushToken']);
     Route::get('/{id}', [UserController::class , 'show']);
     Route::put('/{id}', [UserController::class , 'update']);
     Route::delete('/{id}', [UserController::class , 'destroy']);
@@ -1496,6 +1588,10 @@ Route::prefix('job-orders')->middleware(['auth:sanctum', 'ensure.database.tables
     Route::put('/{id}', [JobOrderController::class , 'update']);
     Route::delete('/{id}', [JobOrderController::class , 'destroy']);
     Route::post('/{id}/approve', [JobOrderController::class , 'approve']);
+    // Releases a job order to its technician ahead of their oldest-first queue.
+    // Administrators only — enforced here, not just hidden in the UI.
+    Route::post('/{id}/enable-technician', [JobOrderController::class , 'enableForTechnician'])
+        ->middleware('role:administrator,super_admin');
     Route::post('/{id}/log-blocked-transfer', [JobOrderController::class , 'logBlockedTransfer']);
     Route::post('/{id}/create-radius-account', [JobOrderController::class , 'createRadiusAccount']);
     Route::post('/{id}/upload-images', [JobOrderController::class , 'uploadImages']);
@@ -2032,6 +2128,11 @@ Route::prefix('work-orders')->group(function () {
     Route::get('/statistics', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'getStatistics']);
     Route::get('/{id}', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'show']);
     Route::put('/{id}', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'update']);
+    // Releases a work order to its technician ahead of their queue.
+    // Administrators only — enforced here, not just hidden in the UI. This group
+    // has no auth middleware of its own, so auth:sanctum is named explicitly.
+    Route::post('/{id}/enable-technician', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'enableForTechnician'])
+        ->middleware(['auth:sanctum', 'role:administrator,super_admin']);
     Route::delete('/{id}', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'destroy']);
     Route::post('/{id}/upload-images', [\App\Http\Controllers\Api\WorkOrderApiController::class , 'uploadImages']);
 });
@@ -2185,6 +2286,11 @@ Route::prefix('service-orders')->group(function () {
     Route::post('/broadcast-viewing', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'broadcastViewing']);
     Route::get('/{id}', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'show']);
     Route::put('/{id}', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'update']);
+    // Releases a service order to its technician ahead of their queue.
+    // Administrators only — enforced here, not just hidden in the UI. This group
+    // has no auth middleware of its own, so auth:sanctum is named explicitly.
+    Route::post('/{id}/enable-technician', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'enableForTechnician'])
+        ->middleware(['auth:sanctum', 'role:administrator,super_admin']);
     Route::post('/{id}/log-blocked-transfer', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'logBlockedTransfer']);
     Route::delete('/{id}', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'destroy']);
 });
@@ -2214,6 +2320,11 @@ Route::prefix('service_orders')->group(function () {
     Route::post('/broadcast-viewing', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'broadcastViewing']);
     Route::get('/{id}', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'show']);
     Route::put('/{id}', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'update']);
+    // Releases a service order to its technician ahead of their queue.
+    // Administrators only — enforced here, not just hidden in the UI. This group
+    // has no auth middleware of its own, so auth:sanctum is named explicitly.
+    Route::post('/{id}/enable-technician', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'enableForTechnician'])
+        ->middleware(['auth:sanctum', 'role:administrator,super_admin']);
     Route::post('/{id}/log-blocked-transfer', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'logBlockedTransfer']);
     Route::delete('/{id}', [\App\Http\Controllers\Api\ServiceOrderApiController::class , 'destroy']);
 });

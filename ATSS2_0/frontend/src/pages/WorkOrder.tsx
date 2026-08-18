@@ -11,6 +11,14 @@ import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import { exportToCSV } from '../utils/exportUtils';
 import { isAgentUser } from '../utils/agentReferral';
+import {
+  buildTechnicianLockedWorkOrderIds,
+  isTechnicianUser,
+  sortWorkOrdersForTechnician,
+  TECHNICIAN_LOCKED_MESSAGE
+} from '../utils/technicianWorkOrderAccess';
+import { authFetch } from '../config/api';
+import { usePermissions } from '../hooks/usePermissions';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -92,6 +100,7 @@ const WorkOrderPage: React.FC = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, [mobileView]);
 
+  const { can } = usePermissions();
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(25);
   const [userRole, setUserRole] = useState<number | null>(null);
@@ -292,7 +301,7 @@ const WorkOrderPage: React.FC = () => {
     showGlobalModal('loading', 'Deleting', 'Removing work order from system...');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/work-orders/${workOrder.id}`, {
+      const response = await authFetch(`${API_BASE_URL}/work-orders/${workOrder.id}`, {
         method: 'DELETE',
         headers: {
           'Accept': 'application/json',
@@ -338,8 +347,14 @@ const WorkOrderPage: React.FC = () => {
   // ones, matching the mobile app where the "add" action is hidden for them.
   const isAgentView = isAgentUser(userRoleName, userRole);
 
+  // Raising or reassigning a work order, as opposed to working one already
+  // assigned to you. Keyed on the permission rather than on "is this an agent",
+  // so a custom role gets the same treatment and so the button agrees with the
+  // API — /api/work-orders writes require this same key.
+  const canManageWorkOrders = can('work-order.manage');
+
   const handleAddNew = () => {
-    if (isAgentView) return;
+    if (!canManageWorkOrders) return;
     setSelectedWorkOrder(null);
     setShowAssignModal(true);
   };
@@ -363,6 +378,12 @@ const WorkOrderPage: React.FC = () => {
       return dateString;
     }
   };
+
+  /**
+   * Technicians only — narrower than the OSP/agent check below. The queue
+   * ordering and the lock are for the role that actually carries the work out.
+   */
+  const isTechnician = isTechnicianUser(userRoleName, userRole);
 
   const filteredWorkOrders = useMemo(() => {
     let filtered = workOrders;
@@ -390,23 +411,49 @@ const WorkOrderPage: React.FC = () => {
       });
     }
 
-    if (!searchQuery) return filtered;
+    if (searchQuery) {
+      const normalizedQuery = searchQuery.toLowerCase().replace(/\s+/g, '');
+      filtered = filtered.filter(wo => {
+        const checkValue = (val: any): boolean => {
+          if (val === null || val === undefined) return false;
+          return String(val).toLowerCase().replace(/\s+/g, '').includes(normalizedQuery);
+        };
 
-    const normalizedQuery = searchQuery.toLowerCase().replace(/\s+/g, '');
-    return filtered.filter(wo => {
-      const checkValue = (val: any): boolean => {
-        if (val === null || val === undefined) return false;
-        return String(val).toLowerCase().replace(/\s+/g, '').includes(normalizedQuery);
-      };
+        return (
+          checkValue(wo.instructions) ||
+          checkValue(wo.report_to) ||
+          checkValue(wo.assign_to) ||
+          checkValue(wo.requested_by)
+        );
+      });
+    }
 
-      return (
-        checkValue(wo.instructions) ||
-        checkValue(wo.report_to) ||
-        checkValue(wo.assign_to) ||
-        checkValue(wo.requested_by)
-      );
-    });
-  }, [workOrders, userRole, userRoleName, userEmail, userName, searchQuery, currentUserOrgId]);
+    // Technicians read their list in the order they work it: In Progress oldest
+    // first, then other active work, with Done / Failed / On Hold at the end.
+    // Every other role keeps the API's requested_date-descending order.
+    if (isTechnician) {
+      return sortWorkOrdersForTechnician(filtered);
+    }
+
+    return filtered;
+  }, [workOrders, userRole, userRoleName, userEmail, userName, searchQuery, currentUserOrgId, isTechnician]);
+
+  /**
+   * The work orders a technician may not open yet.
+   *
+   * Built from the whole store set, not the filtered or paginated view, so
+   * searching, filtering or paging can never change whose turn it is. The util
+   * narrows to the records actually assigned to this technician — the work order
+   * API returns the whole organisation, unlike job and service orders, and this
+   * page does not narrow it for technicians either.
+   */
+  const technicianLockedIds = useMemo(() => {
+    if (!isTechnician) return new Set<string>();
+    return buildTechnicianLockedWorkOrderIds(workOrders, { email: userEmail, fullName: userName });
+  }, [isTechnician, workOrders, userEmail, userName]);
+
+  const isWorkOrderLocked = (wo: WorkOrder): boolean =>
+    technicianLockedIds.has(String(wo.id));
 
   useEffect(() => {
     setCurrentPage(1);
@@ -851,7 +898,7 @@ const WorkOrderPage: React.FC = () => {
                     </div>
                   )}
                 </div>
-                {!isAgentView && (
+                {canManageWorkOrders && (
                   <button
                     onClick={handleAddNew}
                     className="px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm flex-shrink-0"
@@ -935,16 +982,30 @@ const WorkOrderPage: React.FC = () => {
               <div className="flex-1 overflow-auto custom-scrollbar" ref={scrollRef}>
                 {paginatedWorkOrders.length > 0 ? (
                   <div>
-                    {paginatedWorkOrders.map((wo) => (
+                    {paginatedWorkOrders.map((wo) => {
+                      const locked = isWorkOrderLocked(wo);
+                      return (
                       <div
                         key={wo.id}
-                        className={`border-b group cursor-pointer transition-colors ${isDarkMode ? 'bg-gray-900 border-gray-800 hover:bg-gray-800/50' : 'bg-white border-gray-200 hover:bg-gray-50'}`}
-                        onClick={() => handleEdit(wo)}
+                        className={`border-b group transition-colors ${locked
+                          ? `cursor-not-allowed opacity-50 ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`
+                          : `cursor-pointer ${isDarkMode ? 'bg-gray-900 border-gray-800 hover:bg-gray-800/50' : 'bg-white border-gray-200 hover:bg-gray-50'}`}`}
+                        title={locked ? TECHNICIAN_LOCKED_MESSAGE : undefined}
+                        aria-disabled={locked}
+                        onClick={() => {
+                          if (locked) return;
+                          handleEdit(wo);
+                        }}
                       >
                         <div className="px-4 py-3 flex items-center justify-between">
                           <div className="flex-1 min-w-0 pr-4">
-                            <h3 className={`font-medium text-sm uppercase tracking-wide group-hover:translate-x-1 transition-transform duration-200 ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                            <h3 className={`font-medium text-sm uppercase tracking-wide transition-transform duration-200 ${locked ? '' : 'group-hover:translate-x-1'} ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
                               {wo.instructions || `WORK ORDER #${wo.id}`}
+                              {locked && (
+                                <span className={`ml-2 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+                                  Locked
+                                </span>
+                              )}
                             </h3>
                             <div className={`flex items-center gap-4 mt-1 text-[10px] uppercase font-medium ${isDarkMode ? 'text-gray-500' : 'text-gray-600'}`}>
                               {wo.work_category && (
@@ -967,7 +1028,8 @@ const WorkOrderPage: React.FC = () => {
                           </span>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className={`text-center py-20 ${isDarkMode ? 'text-gray-500' : 'text-gray-600'}`}>
@@ -1016,13 +1078,21 @@ const WorkOrderPage: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {sortedWorkOrders.map((wo) => (
+                      {sortedWorkOrders.map((wo) => {
+                        const locked = isWorkOrderLocked(wo);
+                        return (
                         <tr
                           key={wo.id}
-                          onClick={() => handleEdit(wo)}
-                          className={`transition-colors cursor-pointer border-b ${
-                            isDarkMode ? 'hover:bg-gray-800/50 border-gray-800' : 'hover:bg-gray-50 border-gray-100'
-                          } ${selectedWorkOrder?.id === wo.id ? (isDarkMode ? 'bg-gray-800' : 'bg-gray-100') : ''}`}
+                          onClick={() => {
+                            if (locked) return;
+                            handleEdit(wo);
+                          }}
+                          title={locked ? TECHNICIAN_LOCKED_MESSAGE : undefined}
+                          aria-disabled={locked}
+                          className={`transition-colors border-b ${locked
+                            ? `cursor-not-allowed opacity-50 ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`
+                            : `cursor-pointer ${isDarkMode ? 'hover:bg-gray-800/50 border-gray-800' : 'hover:bg-gray-50 border-gray-100'}`
+                          } ${selectedWorkOrder?.id === wo.id && !locked ? (isDarkMode ? 'bg-gray-800' : 'bg-gray-100') : ''}`}
                         >
                           {filteredColumns.map((column) => (
                             <td
@@ -1055,7 +1125,8 @@ const WorkOrderPage: React.FC = () => {
                             </td>
                           ))}
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

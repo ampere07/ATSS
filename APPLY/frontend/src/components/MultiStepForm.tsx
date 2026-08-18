@@ -350,10 +350,15 @@ const MultiStepForm = forwardRef<MultiStepFormRef, MultiStepFormProps>(({ showEd
       formData.append('contact_information', contactInformation);
       formData.append('submit_modal', submitModal);
 
+      // Saving the form's layout is an administrator action, and the endpoint
+      // now requires the token to prove it. Reading the settings stays public,
+      // because the form itself has to render for an applicant who is not
+      // signed in.
       const response = await fetch(`${apiBaseUrl}/api/form-ui/settings`, {
         method: 'POST',
         headers: {
-          'Accept': 'application/json'
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('auth_token') ?? ''}`
         },
         body: formData
       });
@@ -698,10 +703,14 @@ const MultiStepForm = forwardRef<MultiStepFormRef, MultiStepFormProps>(({ showEd
     try {
       setIsSubmitting(true);
 
+      // No `credentials: 'include'` on purpose. This endpoint is stateless —
+      // it reads no cookie and no session — so sending credentials achieved
+      // nothing except to promote the request to credentialed CORS, which is
+      // the stricter mode and the first thing an in-app browser (Messenger's
+      // above all) restricts. Plain CORS is what the request actually needs.
       const response = await fetch(`${apiBaseUrl}/api/application/store`, {
         method: 'POST',
         body: submissionData,
-        credentials: 'include',
         headers: {
           'Accept': 'application/json'
         }

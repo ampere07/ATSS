@@ -1,6 +1,6 @@
 import { MessageSquare, Circle, ChevronLeft, ChevronRight, ChevronDown, RefreshCw, ChevronsLeft, ChevronsRight, ArrowUp, ArrowDown, Columns3, X } from 'lucide-react';
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import axios from 'axios';
+import apiClient from '../config/api';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import { useTableColumns } from './globalfunctions/useTableColumns';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -126,14 +126,8 @@ const SmsLogs: React.FC = () => {
       setIsLoading(true);
       setError(null);
 
-      let token = '';
-      try {
-        token = JSON.parse(localStorage.getItem('authData') || '{}').token || '';
-      } catch { /* ignore */ }
-
-      const response = await axios.get<any>(`${API_BASE_URL}/sms/logs`, {
+      const response = await apiClient.get<any>('/sms/logs', {
         params: { per_page: 1000 },
-        headers: { Authorization: token ? `Bearer ${token}` : '' }
       });
 
       // Laravel paginator returns { data: [...] }

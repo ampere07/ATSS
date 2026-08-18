@@ -21,6 +21,51 @@ const apiClient = axios.create({
   },
 });
 
+/*
+ * ── Bearer token fallback ───────────────────────────────────────────────────
+ *
+ * The session cookie stays the primary credential and nothing below changes
+ * how it is used. This is the fallback for a browser that will not return it.
+ *
+ * The SPA is served from sync.atssfiber.ph and the API lives on
+ * backend.atssfiber.ph. A normal browser treats those as the same site and
+ * sends the session cookie with every API call. An in-app browser — the one
+ * inside Messenger above all — is a WebView with its own cookie policy, and
+ * the restrictive ones drop a cookie set by a host other than the page's.
+ * Login then appears to succeed and every request after it is a 401, because
+ * the cookie the server issued is never sent back.
+ *
+ * A token in an Authorization header does not depend on cookie policy at all,
+ * so it survives where the cookie does not. The server tries the cookie
+ * session first and only falls back to the token, so a browser where cookies
+ * work is completely unaffected by this.
+ *
+ * localStorage rather than a cookie, deliberately: a cookie is exactly the
+ * thing that does not survive here.
+ */
+const AUTH_TOKEN_KEY = 'authToken';
+
+export const setAuthToken = (token: string | null): void => {
+  try {
+    if (token) {
+      localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    // Private-mode WebViews can refuse localStorage. The cookie session is
+    // still in play, so this is a degraded fallback rather than a failure.
+  }
+};
+
+export const getAuthToken = (): string | null => {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+};
+
 let csrfInitialized = false;
 
 let csrfInitializationPromise: Promise<void> | null = null;
@@ -67,6 +112,18 @@ apiClient.interceptors.request.use(
       config.headers['X-XSRF-TOKEN'] = xsrfToken;
     }
 
+    // Sent on every request, not only when the cookie is known to be missing.
+    // There is no reliable way for the page to tell whether the browser will
+    // return a cookie set by another host — document.cookie cannot see it —
+    // so the token always rides along and the server decides. It tries the
+    // cookie session first and only reads this if that fails, which leaves a
+    // working cookie browser behaving exactly as before.
+    const authToken = getAuthToken();
+    if (authToken) {
+      config.headers = config.headers || {};
+      config.headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
     return config;
   },
   (error) => {
@@ -98,6 +155,10 @@ apiClient.interceptors.response.use(
       // Handle Session expiration (401)
       if (status === 401) {
         console.warn('[API] Unauthorized (401). Triggering session expiration modal...');
+        // Neither credential is good any more: the cookie session has gone and
+        // the token was either rejected or absent. Dropping it here stops a
+        // dead token being replayed on every later request.
+        setAuthToken(null);
         // Dispatch custom event so App.tsx can show the modal
         window.dispatchEvent(new CustomEvent('auth:session-expired'));
       }
@@ -105,6 +166,55 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+/**
+ * `fetch` with the same credentials apiClient sends.
+ *
+ * A number of call sites use `fetch` directly rather than the axios client —
+ * file downloads, streamed responses, a few one-off admin actions. They passed
+ * `credentials: 'include'` and nothing else, which was enough while the
+ * endpoints they call checked nothing. Now that every endpoint is authorized,
+ * they need the bearer token too, for exactly the reason the axios client sends
+ * it: a browser that drops a cross-site cookie has no other credential.
+ *
+ * Same signature as `fetch`, so a call site changes by name only.
+ */
+export const authFetch = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+  const method = (init.method || 'GET').toUpperCase();
+  const requiresCsrf = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
+
+  if (requiresCsrf && !csrfInitialized) {
+    try {
+      await initializeCsrf();
+    } catch {
+      // Carry on with whatever credential is already held; the request will
+      // fail on its own terms if that is not enough.
+    }
+  }
+
+  const headers = new Headers(init.headers || {});
+
+  const authToken = getAuthToken();
+  if (authToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${authToken}`);
+  }
+
+  const xsrfToken = getCookie('XSRF-TOKEN');
+  if (requiresCsrf && xsrfToken && !headers.has('X-XSRF-TOKEN')) {
+    headers.set('X-XSRF-TOKEN', xsrfToken);
+  }
+
+  const response = await fetch(input, { credentials: 'include', ...init, headers });
+
+  // Same treatment the axios interceptor gives a 401, so a session that has
+  // gone ends the same way whichever transport noticed.
+  if (response.status === 401) {
+    setAuthToken(null);
+    window.dispatchEvent(new CustomEvent('auth:session-expired'));
+  }
+
+  return response;
+};
 
 export default apiClient;
 export { API_BASE_URL };

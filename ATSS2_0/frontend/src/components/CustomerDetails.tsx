@@ -24,6 +24,7 @@ import PaymentPortalDetails from './PaymentPortalDetails';
 import TransactionListDetails from './TransactionListDetails';
 import * as lcpnapService from '../services/lcpnapService';
 import { transformServiceOrder } from '../store/serviceOrderStore';
+import { usePermissions } from '../hooks/usePermissions';
 
 // Break circular dependency with lazy loading
 const LcpNapLocationDetails = React.lazy(() => import('./LcpNapLocationDetails'));
@@ -146,13 +147,10 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7 || lowerRole === 'headtech' || roleId === 8) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   const [selectedSOARecord, setSelectedSOARecord] = useState<any>(null);
   const [loadingSOARecord, setLoadingSOARecord] = useState(false);

@@ -28,6 +28,30 @@ const ReleaseNotes: React.FC<ReleaseNotesProps> = ({ onBack }) => {
 
     const allNotes: ReleaseNote[] = [
         {
+            version: '2.5.56',
+            date: 'August 15, 2026',
+            title: 'Photo Backup & Job Order List Order',
+            updates: [
+                { text: 'Photos Saved to Your Phone: Every picture you take for a Job Order or Service Order is now copied to your phone gallery before it is uploaded. If the upload fails, you lose signal, or the app closes mid-submission, the photos are still on your phone.', visibility: 'technician' },
+                { text: 'Named Photos: Saved pictures are filed as the field name followed by the customer, for example "setup_image, Juan Dela Cruz" — so you can find the right photo for the right visit without opening each one.', visibility: 'technician' },
+                { text: 'Job Order List Order: Your Job Order list now runs oldest first through to newest. In Progress and Rescheduled jobs sit together among the work you still have to do, and only Done and Failed jobs are moved to the bottom.', visibility: 'technician' },
+                { text: 'Completed Job Orders Save Again: Fixed an error that stopped a Job Order from saving when you submitted the completion form.', visibility: 'technician' },
+                { text: 'One Remarks Box: The Job Order completion form now has a single Remarks field instead of two. Everything you write about the visit goes in the one place.', visibility: 'technician' }
+            ]
+        },
+        {
+            version: '2.5.55',
+            date: 'August 14, 2026',
+            title: 'Guided Work Queue — One Job at a Time',
+            updates: [
+                { text: 'Guided Work Queue: Job Orders, Service Orders, and Work Orders now appear in the order you are meant to work them. Anything already In Progress comes first, oldest first, followed by the rest of your active work, with Done, Failed, Rescheduled, and On Hold items moved to the bottom of the list.', visibility: 'technician' },
+                { text: 'One Job at a Time: Only the job at the top of your list can be opened. The rest of your active work is greyed out and marked "Locked" until it is your turn, so there is never any doubt about what to do next. Tapping a locked job tells you why it is locked.', visibility: 'technician' },
+                { text: 'Automatic Progression: As soon as you finish the job at the top — whether it ends as Done, Failed, or Rescheduled — the next one unlocks on its own. Nothing to request and nobody to wait for.', visibility: 'technician' },
+                { text: 'Admin Override: When something needs doing out of turn, an administrator can release a specific job to you. It opens alongside the one you already have, so you can work more than one at a time whenever the office says so.', visibility: 'technician' },
+                { text: 'Started Work Stays Open: A job you have already started always stays open to you, even if the order of your list changes around it. You can still stop the timer and finish the work in front of you.', visibility: 'technician' }
+            ]
+        },
+        {
             version: '2.5.49',
             date: 'July 3, 2026',
             title: 'Application Form Crash Fix & Searchable Dropdowns',

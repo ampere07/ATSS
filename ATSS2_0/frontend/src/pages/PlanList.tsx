@@ -6,6 +6,7 @@ import AddPlanModal from '../modals/AddPlanModal';
 import PlanListDetails from '../components/PlanListDetails';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
+import { authFetch } from '../config/api';
 
 interface Plan {
   id: number;
@@ -171,7 +172,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
   const loadPlans = async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/plans`, {
+      const response = await authFetch(`${API_BASE_URL}/plans`, {
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
@@ -220,7 +221,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
     showGlobalModal('loading', 'Deleting Plan', `Permanently removing "${plan.name}" from database...`);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/plans/${plan.id}`, {
+      const response = await authFetch(`${API_BASE_URL}/plans/${plan.id}`, {
         method: 'DELETE',
         headers: {
           'Accept': 'application/json',

@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
+import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import apiClient from '../config/api';
@@ -81,17 +82,26 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     // which was causing DashboardCustomer to remount and lose its modal state.
     const customerDetailRef = React.useRef<CustomerDetailData | null>(null);
 
-    const fetchData = useCallback(async (force = false, silent = false) => {
-        if (!force && customerDetailRef.current) return;
+    /**
+     * Load the signed-in customer's data.
+     *
+     * Returns whether there is nothing left to load — either it succeeded, or the
+     * viewer is not a customer and never had anything to fetch. False means "try
+     * again": no stored session yet, or the request failed. getCustomerDetail
+     * swallows every error into null, so this return value is the only signal a
+     * caller gets.
+     */
+    const fetchData = useCallback(async (force = false, silent = false): Promise<boolean> => {
+        if (!force && customerDetailRef.current) return true;
 
         if (!silent) setIsLoading(true);
 
         try {
             const storedUser = await AsyncStorage.getItem('authData');
-            if (!storedUser) return;
+            if (!storedUser) return false;
 
             const parsedUser = JSON.parse(storedUser);
-            if (!parsedUser.username) return;
+            if (!parsedUser.username) return false;
 
             // Only fetch customer details if the user role is 'customer'
             const role = (parsedUser.role || '').toLowerCase();
@@ -99,7 +109,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
             const isCustomer = role === 'customer' || roleId === 3;
             if (!isCustomer) {
                 setIsLoading(false);
-                return;
+                return true;
             }
 
             // 1. Fetch Customer Detail
@@ -117,7 +127,11 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                     apiClient.get(`/transactions/by-account/${accNo}`).catch((e) => { console.error('Transactions fetch error:', e); return { data: { data: [] } }; }),
                     apiClient.get(`/statement-of-accounts/by-account/${accNo}`).catch((e) => { console.error('SOA fetch error:', e); return { data: { data: [] } }; }),
                     apiClient.get(`/invoices/by-account/${accNo}`).catch((e) => { console.error('Invoices fetch error:', e); return { data: { data: [] } }; }),
-                    apiClient.get(`/service-orders`, { params: { account_no: accNo, page: 1, limit: 50 } }).catch((e) => { console.error('Service orders fetch error:', e); return { data: { success: false, data: [] } }; })
+                    // The account-scoped route, not the `/service-orders` collection: the
+                    // collection is staff-only (it needs the `service-order` page key, which
+                    // the customer role does not hold) and answered 403 here. by-account
+                    // returns the same { data: [...] } shape, already filtered to this account.
+                    apiClient.get(`/service-orders/by-account/${accNo}`).catch((e) => { console.error('Service orders fetch error:', e); return { data: { success: false, data: [] } }; })
                 ]);
 
                 // Process Payment Portal Logs
@@ -175,9 +189,11 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
 
             setLastUpdated(new Date());
             setError(null);
+            return true;
         } catch (err: any) {
             console.error('Failed to fetch customer data:', err);
             if (!silent) setError(err.message || 'Failed to load data');
+            return false;
         } finally {
             setIsLoading(false);
         }
@@ -185,12 +201,52 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // A failed first load used to be permanent. This runs once on mount, and
+    // getCustomerDetail turns any 401, timeout or dropped connection into a plain
+    // null — so one bad moment at launch left customerDetail null for the whole
+    // session. Nothing retried it, which is why the dashboard read "No Plan" until
+    // the customer signed in again: the fields that still looked right (name,
+    // account number) come from stored authData, not from this fetch.
+    //
+    // So: retry with a widening delay until it lands, and try again whenever the
+    // app returns to the foreground, where the connection that failed at launch has
+    // usually come back. Retries are silent, so they never flash a spinner over a
+    // screen the customer is already reading.
     useEffect(() => {
-        fetchData();
-    }, []);
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let attempt = 0;
+        const backoffMs = [2000, 5000, 15000, 30000];
 
-    const refreshData = useCallback(() => fetchData(true, false), [fetchData]);
-    const silentRefresh = useCallback(() => fetchData(true, true), [fetchData]);
+        const attemptLoad = async () => {
+            if (cancelled || customerDetailRef.current) return;
+
+            const done = await fetchData(true, attempt > 0);
+            if (cancelled || done) return;
+
+            timer = setTimeout(attemptLoad, backoffMs[Math.min(attempt, backoffMs.length - 1)]);
+            attempt += 1;
+        };
+
+        attemptLoad();
+
+        const subscription = AppState.addEventListener('change', state => {
+            if (state === 'active' && !customerDetailRef.current) {
+                if (timer) clearTimeout(timer);
+                attempt = 0;
+                attemptLoad();
+            }
+        });
+
+        return () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+            subscription.remove();
+        };
+    }, [fetchData]);
+
+    const refreshData = useCallback(async () => { await fetchData(true, false); }, [fetchData]);
+    const silentRefresh = useCallback(async () => { await fetchData(true, true); }, [fetchData]);
 
     return (
         <CustomerDataContext.Provider

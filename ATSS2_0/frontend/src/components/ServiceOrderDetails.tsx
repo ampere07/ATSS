@@ -3,7 +3,7 @@ import {
   X, ExternalLink, Edit, Settings, CircleArrowRight, Loader
 } from 'lucide-react';
 import ServiceOrderEditModal from '../modals/ServiceOrderEditModal';
-import { getRelatedDetailsUpdateLogs } from '../services/serviceOrderService';
+import { getRelatedDetailsUpdateLogs, enableServiceOrderForTechnician } from '../services/serviceOrderService';
 import RelatedDataTable from './RelatedDataTable';
 import { relatedDataColumns } from '../config/relatedDataColumns';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -14,6 +14,8 @@ import { userService } from '../services/userService';
 import { User as UserType } from '../types/api';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { getAllInventoryItems } from '../services/inventoryItemService';
+import { isClosedForTechnicianQueue, isTechnicianEnabled, TECHNICIAN_LOCKED_MESSAGE } from '../utils/technicianServiceOrderAccess';
+import { usePermissions } from '../hooks/usePermissions';
 
 const PlanListDetails = React.lazy(() => import('./PlanListDetails'));
 const UserDetails = React.lazy(() => import('./UserDetails'));
@@ -140,9 +142,19 @@ interface ServiceOrderDetailsProps {
   onClose: () => void;
   onRefresh?: () => void;
   isMobile?: boolean;
+  /**
+   * Is the viewer a technician who may not act on this record yet?
+   *
+   * The list owns the queue — it needs the whole assigned set to know whose turn
+   * it is — so it passes the answer down rather than having this view guess from
+   * the one record it holds. Reading is never restricted; editing is. Absent
+   * means "not restricted", which is the right answer for every non-technician
+   * viewer and for the places this view is opened from outside the queue.
+   */
+  isTechnicianLocked?: boolean;
 }
 
-const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder, onClose, onRefresh, isMobile = false }) => {
+const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder, onClose, onRefresh, isMobile = false, isTechnicianLocked = false }) => {
   const [localIsMobile, setLocalIsMobile] = useState<boolean>(window.innerWidth < 768);
   useEffect(() => {
     const handleResize = () => {
@@ -166,6 +178,17 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
   const [userRole, setUserRole] = useState<string>('');
   const [roleId, setRoleId] = useState<number | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
+  const [isEnablingTechnician, setIsEnablingTechnician] = useState(false);
+  const [enableTechnicianError, setEnableTechnicianError] = useState<string | null>(null);
+  const [enableTechnicianNotice, setEnableTechnicianNotice] = useState<string | null>(null);
+  /**
+   * Local echo of technician_enabled after a successful enable.
+   *
+   * The list refresh is what makes the change permanent everywhere; this only
+   * keeps the button honest in the moment between the two. Cleared whenever a
+   * different service order is opened so it can never leak across records.
+   */
+  const [technicianEnabledOverride, setTechnicianEnabledOverride] = useState<boolean | null>(null);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
 
@@ -347,13 +370,73 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
+
+  // ── Technician queue release ────────────────────────────────────────────────
+  // Technicians work their service orders In Progress first and oldest first
+  // within that: everything else active is greyed out until either the work
+  // ahead of it moves forward or an administrator releases one early. This is
+  // that release.
+
+  const isAdminUser = (): boolean => {
     const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
+    return lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7;
   };
+
+  const technicianEnabled = technicianEnabledOverride ?? isTechnicianEnabled(serviceOrder);
+
+  // Offered for administrators on any service order still in a technician's
+  // queue. One the queue already skips is not blocking anything, so there is
+  // nothing to release.
+  // Offered for administrators on any record a technician still owes work on,
+  // including one that is deferred — that is precisely the case where they cannot
+  // pick it back up on their own. Only work that is finished, failed or cancelled
+  // has nothing left to release.
+  const shouldShowEnableTechnicianButton = () =>
+    isAdminUser() && !isClosedForTechnicianQueue(serviceOrder);
+
+  const handleEnableTechnicianClick = async () => {
+    if (isEnablingTechnician || technicianEnabled) return;
+
+    if (!serviceOrder.id) {
+      setEnableTechnicianError('Cannot enable service order: Missing ID');
+      return;
+    }
+
+    setEnableTechnicianError(null);
+    setEnableTechnicianNotice(null);
+    setIsEnablingTechnician(true);
+
+    try {
+      const response = await enableServiceOrderForTechnician(serviceOrder.id);
+
+      if (response?.success) {
+        setTechnicianEnabledOverride(true);
+        setEnableTechnicianNotice('Service order enabled. The technician can now start it.');
+        if (onRefresh) {
+          onRefresh();
+        }
+      } else {
+        setEnableTechnicianError((response as any)?.message || 'Failed to enable service order for the technician');
+      }
+    } catch (err: any) {
+      setEnableTechnicianError(
+        err.response?.data?.message || err.message || 'Failed to enable service order for the technician'
+      );
+    } finally {
+      setIsEnablingTechnician(false);
+    }
+  };
+
+  // A different record is a different lock state.
+  useEffect(() => {
+    setTechnicianEnabledOverride(null);
+    setEnableTechnicianError(null);
+    setEnableTechnicianNotice(null);
+  }, [serviceOrder.id]);
 
   useEffect(() => {
     if (!isResizing) return;
@@ -388,6 +471,13 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
   };
 
   const handleEditClick = () => {
+    // A locked service order opens for reading, but not for editing: this form is
+    // how the visit gets recorded, and the API refuses the update anyway.
+    if (isTechnicianLocked) {
+      setEnableTechnicianError(TECHNICIAN_LOCKED_MESSAGE);
+      return;
+    }
+
     if (hasPermission('service-order.admin-edit')) {
       setIsTechEditMode(false);
       setIsEditModalOpen(true);
@@ -1088,7 +1178,24 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
 
         <div className="flex items-center space-x-3">
 
-          {serviceOrder.supportStatus?.toLowerCase() !== 'resolved' && (hasPermission('service-order.admin-edit') || hasPermission('service-order.tech-edit')) && (
+          {shouldShowEnableTechnicianButton() && (
+            <button
+              className={`px-3 py-1 rounded-sm flex items-center text-sm font-medium whitespace-nowrap ${technicianEnabled
+                ? 'bg-gray-200 text-gray-500 cursor-not-allowed dark:bg-gray-700 dark:text-gray-400'
+                : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                }`}
+              onClick={handleEnableTechnicianClick}
+              disabled={technicianEnabled || isEnablingTechnician}
+              title={technicianEnabled
+                ? 'The technician can already start this service order'
+                : 'Let the technician start this service order without finishing the work ahead of it first'}
+            >
+              {isEnablingTechnician && <Loader className="h-3 w-3 mr-1 animate-spin" />}
+              <span>{technicianEnabled ? 'Enabled' : (isEnablingTechnician ? 'Enabling...' : 'Enable')}</span>
+            </button>
+          )}
+
+          {serviceOrder.supportStatus?.toLowerCase() !== 'resolved' && !isTechnicianLocked && (hasPermission('service-order.admin-edit') || hasPermission('service-order.tech-edit')) && (
             <button
               className="text-white px-3 py-1 rounded-sm flex items-center disabled:opacity-50"
               style={{
@@ -1197,6 +1304,24 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
           </button>
         </div>
       </div>
+
+      {enableTechnicianError && (
+        <div className={`p-3 m-3 rounded ${isDarkMode
+          ? 'bg-red-900 bg-opacity-20 border border-red-700 text-red-400'
+          : 'bg-red-100 border border-red-300 text-red-700'
+          }`}>
+          {enableTechnicianError}
+        </div>
+      )}
+
+      {enableTechnicianNotice && (
+        <div className={`p-3 m-3 rounded ${isDarkMode
+          ? 'bg-emerald-900 bg-opacity-20 border border-emerald-700 text-emerald-400'
+          : 'bg-emerald-50 border border-emerald-300 text-emerald-700'
+          }`}>
+          {enableTechnicianNotice}
+        </div>
+      )}
 
       <div className={`flex-1 overflow-y-auto w-full ${activeIsMobile ? 'pb-24' : ''}`}>
         <div className={`mx-auto py-1 px-4 ${isDarkMode ? 'bg-gray-950' : 'bg-white'

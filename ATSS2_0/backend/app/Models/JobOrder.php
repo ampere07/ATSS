@@ -34,6 +34,9 @@ class JobOrder extends Model
         'onsite_status',
         'assigned_email',
         'status_remarks',
+        // The written record of what happened on site. A job order has this one
+        // remarks column and no other — visit notes belong here too. Service
+        // Orders are the ones that carry a separate Visit_Remarks.
         'onsite_remarks',
         'status_remarks_id',
         'address_coordinates',
@@ -65,6 +68,10 @@ class JobOrder extends Model
         'incentive_value',
         'agent_paid_at',
         'agent_paid_to',
+        // technician_enabled is deliberately NOT fillable: it is the flag that
+        // releases a job order to a technician out of turn, so it must never be
+        // settable through the generic update endpoint a technician also calls.
+        // JobOrderController::enableForTechnician() assigns it directly.
     ];
 
     protected $dates = [
@@ -85,6 +92,70 @@ class JobOrder extends Model
         'incentive_value' => 'decimal:2',
         'agent_paid_at' => 'datetime',
         'agent_paid_to' => 'integer',
+        'technician_enabled' => 'boolean',
+    ];
+
+    /**
+     * Onsite statuses that finish a job order for good.
+     *
+     * Nothing is left for the technician to do, so the queue steps over these
+     * and they are never locked and never offered for release.
+     *
+     * Mirrors CLOSED_ONSITE_STATUSES in the two clients'
+     * utils/technicianJobOrderAccess.ts.
+     */
+    public const TECHNICIAN_QUEUE_CLOSED_ONSITE_STATUSES = [
+        'done',
+        'completed',
+        'failed',
+        'cancelled',
+    ];
+
+    /**
+     * Onsite statuses that defer a job order without closing it.
+     *
+     * A reschedule is work the technician still owes, waiting on a return visit.
+     * It keeps out of the queue's way — it never claims the "next one" slot and
+     * never blocks the job orders behind it — but it is not theirs to pick back
+     * up on their own either: it stays locked until it is the only thing left in
+     * their queue or an administrator releases it.
+     *
+     * Mirrors DEFERRED_ONSITE_STATUSES in the two clients'
+     * utils/technicianJobOrderAccess.ts.
+     */
+    public const TECHNICIAN_QUEUE_DEFERRED_ONSITE_STATUSES = [
+        'reschedule',
+        'rescheduled',
+        're-schedule',
+    ];
+
+    /**
+     * Everything the queue steps over, closed and deferred together.
+     *
+     * This is what decides the ORDER of a technician's list. What decides
+     * whether a record is locked is the closed list alone — see
+     * JobOrderController::isJobOrderLockedForTechnician().
+     */
+    public const TECHNICIAN_QUEUE_EXEMPT_ONSITE_STATUSES = [
+        'done',
+        'completed',
+        'failed',
+        'cancelled',
+        'reschedule',
+        'rescheduled',
+        're-schedule',
+    ];
+
+    /**
+     * The work a technician is actively out on, which leads their list.
+     *
+     * Mirrors IN_PROGRESS_ONSITE_STATUSES in the two clients'
+     * utils/technicianJobOrderAccess.ts.
+     */
+    public const TECHNICIAN_IN_PROGRESS_ONSITE_STATUSES = [
+        'in progress',
+        'inprogress',
+        'in-progress',
     ];
 
     public function application()

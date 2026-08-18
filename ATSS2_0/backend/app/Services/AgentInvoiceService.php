@@ -43,20 +43,101 @@ class AgentInvoiceService
     private string $logName = 'Agent_Invoices';
 
     /**
+     * Emit extra-detailed [VERBOSE] lines.
+     *
+     * On by default, matching AutoDisconnectService: a weekly run that bills real
+     * money is worth being able to read afterwards line by line, and the volume
+     * is one file per week rather than one per customer.
+     */
+    private bool $verbose = true;
+
+    /** Mirror every log line to stdout when running from the CLI. */
+    private bool $cliEcho = true;
+
+    /** Whether this process is running under the CLI SAPI. */
+    private bool $isCli;
+
+    /**
+     * What set this run going, printed in the log's configuration block.
+     *
+     * A weekly invoice run that produced an unexpected result is the sort of
+     * thing somebody asks about days later, and "was this the Monday cron or did
+     * someone press Generate?" is the first question. Defaults to naming the
+     * scheduler, since that is what runs unattended.
+     */
+    private ?string $triggeredBy = null;
+
+    public function __construct()
+    {
+        $this->isCli = PHP_SAPI === 'cli';
+    }
+
+    /** Name what set this run going, e.g. "Generate button — jane@example.com (user #4)". */
+    public function setTriggeredBy(?string $label): self
+    {
+        $this->triggeredBy = $label;
+
+        return $this;
+    }
+
+    /**
+     * Toggle verbose file logging and CLI echo at runtime.
+     *
+     * Same signature as AutoDisconnectService::setVerbose(), so the two run the
+     * same way from a command.
+     */
+    public function setVerbose(bool $verbose = true, bool $cliEcho = true): self
+    {
+        $this->verbose = $verbose;
+        $this->cliEcho = $cliEcho;
+
+        return $this;
+    }
+
+    /**
+     * The seven days a run bills: the week immediately before the run itself.
+     *
+     * A run on Monday 17 August bills 10 August 00:00:00 to 16 August 23:59:59.
+     * The day of the run is never included — work completed during it belongs to
+     * the following week's invoice.
+     *
+     * Rolling rather than calendar-aligned, so the rule holds whatever day the
+     * run happens on: a catch-up run on Wednesday 19 August bills the 12th to the
+     * 18th, not the part-finished week the 19th sits in. Consecutive weekly runs
+     * therefore produce windows that abut exactly — no day is billed twice and
+     * none is skipped.
+     *
+     * Dates come from Carbon, which Laravel has already set to the app timezone
+     * (config/app.php — Asia/Manila), so the boundaries are local midnights
+     * regardless of what the server's own clock is set to.
+     *
+     * @param  Carbon|null  $asOf  treat this as the generation date; defaults to now
+     * @return array{0: Carbon, 1: Carbon}  [periodStart, periodEnd]
+     */
+    public function periodFor(?Carbon $asOf = null): array
+    {
+        $generatedOn = ($asOf ? $asOf->copy() : Carbon::now())->startOfDay();
+
+        return [
+            $generatedOn->copy()->subDays(7)->startOfDay(),
+            $generatedOn->copy()->subDay()->endOfDay(),
+        ];
+    }
+
+    /**
      * Generate invoices for one billing week.
      *
-     * @param  Carbon|null  $weekOf  any moment inside the week to bill; defaults
-     *                               to the week that has just ended.
+     * @param  Carbon|null  $asOf  treat this as the generation date, billing the
+     *                             seven days before it; defaults to now.
      * @return array  summary counters for the run
      */
-    public function generateForWeek(?Carbon $weekOf = null, ?int $onlyOwnerAgentId = null): array
+    public function generateForWeek(?Carbon $asOf = null, ?int $onlyOwnerAgentId = null): array
     {
-        // Run at 00:00 on Monday, the week being billed is the one that just
-        // finished — not the one starting in a minute's time, which is empty.
-        $anchor = $weekOf ? $weekOf->copy() : Carbon::now()->subDay();
+        // One derivation, shared with the command's dry run, so what a dry run
+        // reports can never differ from what a real run bills.
+        [$periodStart, $periodEnd] = $this->periodFor($asOf);
 
-        $periodStart = $anchor->copy()->startOfWeek();
-        $periodEnd   = $anchor->copy()->endOfWeek();
+        $startTime = Carbon::now();
 
         $summary = [
             'period_start'      => $periodStart->format('Y-m-d'),
@@ -73,48 +154,130 @@ class AgentInvoiceService
             'errors'            => 0,
         ];
 
-        $this->log("=== AGENT INVOICE RUN — week {$summary['period_start']} to {$summary['period_end']} ===");
+        // Collected as they happen and reprinted at the end, so a long run does
+        // not have to be scrolled through to find out what went wrong.
+        $errors = [];
+
+        $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+        $this->writeLog("║         STARTING AGENT INVOICE GENERATION                      ║");
+        $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+        $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
+        $this->writeLog("");
+
+        $programmeStart = AgentProgramme::startDate();
+
+        $this->writeLog("[CONFIG] Triggered By: " . ($this->triggeredBy ?? ($this->isCli ? 'scheduler (cron)' : 'web request')));
+        $this->writeLog("[CONFIG] Billing Week: {$summary['period_start']} to {$summary['period_end']}");
+        $this->writeLog("[CONFIG] Unit Price: ₱" . number_format((float) config('agent_invoices.unit_price', 100), 2));
+        $this->writeLog("[CONFIG] Installation Fee: ₱" . number_format((float) config('agent_invoices.installation_fee', 0), 2));
+        $this->writeLog("[CONFIG] Agent Programme Start: " . ($programmeStart ? $programmeStart->format('Y-m-d') : 'not set'));
+        if ($onlyOwnerAgentId !== null) {
+            $this->writeLog("[CONFIG] Restricted to agent user id: {$onlyOwnerAgentId}");
+        }
+        $this->writeLog("");
+
+        $this->writeLog("[QUERY] Resolving teams and solo agents...");
 
         try {
             $owners = $this->resolveOwners($onlyOwnerAgentId);
         } catch (Throwable $e) {
             $summary['errors']++;
-            $this->log('[FATAL] Could not list agents: ' . $e->getMessage());
+            $this->writeLog('[ERROR] Could not list agents: ' . $e->getMessage());
             Log::channel('single')->error('[AGENT INVOICES] Could not list agents: ' . $e->getMessage());
+
+            $this->writeRunFooter($summary, $startTime, ['Could not list agents: ' . $e->getMessage()]);
+
             return $summary;
         }
 
-        $summary['owners_evaluated'] = count($owners);
-        $this->log('Owners to evaluate: ' . count($owners));
+        $totalCount = count($owners);
+        $summary['owners_evaluated'] = $totalCount;
+
+        $this->writeLog("[RESULT] Found {$totalCount} owner(s) to evaluate — a team counts as one");
+        $this->writeLog("");
+
+        if ($totalCount === 0) {
+            $this->writeLog("[INFO] No teams or solo agents to bill.");
+            $this->writeLog("[INFO] An agent is an account holding a row in agent_balance.");
+            $this->writeRunFooter($summary, $startTime, $errors, 'No Actions');
+
+            return $summary;
+        }
+
+        $this->writeLog("[PROCESS] Starting invoice generation...");
+        $this->writeLog("─────────────────────────────────────────────────────────────────");
+
+        $counter = 0;
 
         foreach ($owners as $owner) {
+            $counter++;
+            $this->writeLog("");
+            $this->writeLog("[{$counter}/{$totalCount}] ══════════════════════════════════════════════");
+
             try {
-                $this->generateForOwner($owner, $periodStart, $periodEnd, $summary);
+                $this->generateForOwner($owner, $periodStart, $periodEnd, $summary, $counter, $totalCount);
             } catch (Throwable $e) {
                 // One owner's failure must never stop the rest of the run.
                 $summary['errors']++;
-                $this->log("[ERROR] {$owner['owner_key']}: " . $e->getMessage());
+                $errors[] = "{$owner['owner_key']}: " . $e->getMessage();
+                $this->writeLog("[{$counter}/{$totalCount}] ✗ ERROR (isolated, continuing): " . $e->getMessage());
                 Log::channel('single')->error("[AGENT INVOICES] {$owner['owner_key']}: " . $e->getMessage(), [
                     'trace' => $e->getTraceAsString(),
                 ]);
             }
         }
 
-        $this->log(sprintf(
-            '=== DONE — evaluated %d, created %d, already invoiced %d, nothing to bill %d, customers billed %d, already billed %d, amount %s, pdfs %d (failed %d), errors %d ===',
-            $summary['owners_evaluated'],
-            $summary['invoices_created'],
-            $summary['invoices_skipped'],
-            $summary['owners_no_work'],
-            $summary['customers_billed'],
-            $summary['customers_skipped'],
-            number_format($summary['amount_invoiced'], 2),
-            $summary['pdfs_written'],
-            $summary['pdf_failures'],
-            $summary['errors']
-        ));
+        $this->writeRunFooter($summary, $startTime, $errors);
 
         return $summary;
+    }
+
+    /**
+     * The closing banner, summary counters and error roll-up.
+     *
+     * Shared by the three ways a run can end — normally, with nothing to do, or
+     * having failed to list the agents at all — so all three close the log the
+     * same way and a reader always finds a summary at the bottom.
+     *
+     * @param  string[]  $errors
+     */
+    private function writeRunFooter(array $summary, Carbon $startTime, array $errors, string $note = ''): void
+    {
+        $endTime  = Carbon::now();
+        $duration = $endTime->diffInSeconds($startTime);
+        $title    = $note !== ''
+            ? "AGENT INVOICE GENERATION COMPLETE ({$note})"
+            : 'AGENT INVOICE GENERATION COMPLETE';
+
+        $this->writeLog("");
+        $this->writeLog("╔════════════════════════════════════════════════════════════════╗");
+        $this->writeLog("║         " . str_pad($title, 55) . "║");
+        $this->writeLog("╚════════════════════════════════════════════════════════════════╝");
+        $this->writeLog("Summary:");
+        $this->writeLog("  • Billing Week: {$summary['period_start']} to {$summary['period_end']}");
+        $this->writeLog("  • Owners Evaluated: {$summary['owners_evaluated']}");
+        $this->writeLog("  • Invoices Created: {$summary['invoices_created']}");
+        $this->writeLog("  • Already Invoiced: {$summary['invoices_skipped']}");
+        $this->writeLog("  • Nothing To Bill: {$summary['owners_no_work']}");
+        $this->writeLog("  • Customers Billed: {$summary['customers_billed']}");
+        $this->writeLog("  • Customers Already Billed: {$summary['customers_skipped']}");
+        $this->writeLog("  • Amount Invoiced: ₱" . number_format($summary['amount_invoiced'], 2));
+        $this->writeLog("  • PDFs Written: {$summary['pdfs_written']}");
+        $this->writeLog("  • PDF Failures: {$summary['pdf_failures']}");
+        $this->writeLog("  • Errors: " . count($errors));
+        $this->writeLog("  • Duration: {$duration} second(s)");
+        $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
+        $this->writeLog("");
+
+        if (!empty($errors)) {
+            $this->writeLog("[ERROR DETAILS]");
+            foreach ($errors as $error) {
+                $this->writeLog("  × {$error}");
+            }
+            $this->writeLog("");
+        }
+
+        $this->writeLog("");
     }
 
     /**
@@ -212,14 +375,30 @@ class AgentInvoiceService
     }
 
     /** Build and store one owner's invoice for the week. */
-    private function generateForOwner(array $owner, Carbon $periodStart, Carbon $periodEnd, array &$summary): void
-    {
+    private function generateForOwner(
+        array $owner,
+        Carbon $periodStart,
+        Carbon $periodEnd,
+        array &$summary,
+        int $counter = 0,
+        int $totalCount = 0
+    ): void {
         $ownerKey = $owner['owner_key'];
         $label    = $owner['type'] === AgentInvoice::TYPE_TEAM
             ? "team \"{$owner['team_name']}\" (" . count($owner['members']) . ' agent(s))'
             : "agent \"{$owner['agent_name']}\"";
 
-        $this->log("[{$ownerKey}] {$label}");
+        // The "[n/total]" prefix every line of this owner's block carries, so a
+        // block can be read on its own in a file covering dozens of owners.
+        $tag = $totalCount > 0 ? "[{$counter}/{$totalCount}]" : "[{$ownerKey}]";
+
+        $this->writeLog("{$tag} {$ownerKey} — {$label}");
+
+        if ($owner['type'] === AgentInvoice::TYPE_TEAM) {
+            foreach ($owner['members'] as $member) {
+                $this->writeVerbose("{$tag}   member: {$member['name']} (user #{$member['user_id']}, rate " . number_format((float) $member['commission_rate'], 2) . ')');
+            }
+        }
 
         // Already invoiced for this week — a re-run, not a fault.
         $existing = AgentInvoice::where('owner_key', $ownerKey)
@@ -228,7 +407,7 @@ class AgentInvoiceService
 
         if ($existing) {
             $summary['invoices_skipped']++;
-            $this->log("  [SKIP] already invoiced for this week as {$existing->invoice_number}");
+            $this->writeLog("{$tag} ⊘ SKIPPED: already invoiced for this week as {$existing->invoice_number}");
             return;
         }
 
@@ -236,8 +415,20 @@ class AgentInvoiceService
 
         if ($billable === []) {
             $summary['owners_no_work']++;
-            $this->log('  [SKIP] nothing billable this week');
+            $this->writeLog("{$tag} ⊘ SKIPPED: nothing billable this week");
             return;
+        }
+
+        foreach ($billable as $c) {
+            $this->writeVerbose(sprintf(
+                '%s   billable: %s (application #%d, job order #%d, installed %s, referred by %s)',
+                $tag,
+                $c['customer_name'],
+                $c['application_id'],
+                $c['job_order_id'],
+                $c['installed_date'],
+                $c['referred_by_name'] ?: $c['referred_by_raw']
+            ));
         }
 
         $unitPrice = (float) ($owner['members'][0]['unit_price'] ?? config('agent_invoices.unit_price', 100));
@@ -323,7 +514,7 @@ class AgentInvoiceService
             // Another run got there first, or a customer slipped in between the
             // read and the write. Either way this owner is already covered.
             $summary['invoices_skipped']++;
-            $this->log('  [SKIP] refused by the database (already invoiced): ' . $e->getMessage());
+            $this->writeLog("{$tag} ⊘ SKIPPED: refused by the database (already invoiced): " . $e->getMessage());
             return;
         }
 
@@ -331,12 +522,25 @@ class AgentInvoiceService
         $summary['customers_billed'] += $count;
         $summary['amount_invoiced']  += $subtotal;
 
-        $this->log("  [OK] {$invoice->invoice_number} — {$count} customer(s), subtotal " . number_format($subtotal, 2));
+        $this->writeVerbose(sprintf(
+            '%s   %d customer(s) × ₱%s = ₱%s, commission ₱%s, installation fee ₱%s',
+            $tag,
+            $count,
+            number_format($unitPrice, 2),
+            number_format($totalAmount, 2),
+            number_format($commission, 2),
+            number_format($installationFee, 2)
+        ));
+
+        $this->writeLog(
+            "{$tag} ✓ SUCCESS - {$invoice->invoice_number} issued — {$count} customer(s), subtotal ₱"
+            . number_format($subtotal, 2)
+        );
 
         // The PDF is written outside the transaction: a file that fails to
         // write must not undo a correctly recorded invoice. It can be produced
         // again on demand from the stored rows.
-        $this->writePdf($invoice, $summary);
+        $this->writePdf($invoice, $summary, $tag);
     }
 
     /**
@@ -362,8 +566,11 @@ class AgentInvoiceService
             ->join('applications as a', 'jo.application_id', '=', 'a.id')
             ->whereIn(DB::raw('LOWER(TRIM(jo.onsite_status))'), ['done', 'completed'])
             ->whereNotNull('a.referred_by')
-            ->whereRaw("{$completedAt} >= ?", [$periodStart->format('Y-m-d 00:00:00')])
-            ->whereRaw("{$completedAt} <= ?", [$periodEnd->format('Y-m-d 23:59:59')]);
+            // Inclusive of both ends, to the second: periodFor() hands over the
+            // start at 00:00:00 and the end at 23:59:59, so the bounds are taken
+            // from it rather than re-stated here where they could drift.
+            ->whereRaw("{$completedAt} >= ?", [$periodStart->format('Y-m-d H:i:s')])
+            ->whereRaw("{$completedAt} <= ?", [$periodEnd->format('Y-m-d H:i:s')]);
 
         // Never bill for work done before the agent programme began.
         if ($startDate !== null) {
@@ -468,19 +675,21 @@ class AgentInvoiceService
     }
 
     /** Render and store the invoice PDF, recording where it went. */
-    private function writePdf(AgentInvoice $invoice, array &$summary): void
+    private function writePdf(AgentInvoice $invoice, array &$summary, string $tag = ''): void
     {
+        $prefix = $tag !== '' ? "{$tag} " : '';
+
         try {
             $path = app(AgentInvoicePdfService::class)->render($invoice);
             $invoice->forceFill(['pdf_path' => $path])->save();
 
             $summary['pdfs_written']++;
-            $this->log("  [PDF] {$path}");
+            $this->writeLog("{$prefix}  [PDF] {$path}");
         } catch (Throwable $e) {
             // The invoice itself stands. The PDF can be produced again on
             // demand from the rows already recorded.
             $summary['pdf_failures']++;
-            $this->log('  [PDF FAILED] ' . $e->getMessage());
+            $this->writeLog("{$prefix}  ⚠ [PDF FAILED] " . $e->getMessage());
             Log::channel('single')->error("[AGENT INVOICES] PDF failed for {$invoice->invoice_number}: " . $e->getMessage());
         }
     }
@@ -497,19 +706,75 @@ class AgentInvoiceService
         return trim(preg_replace('/\s+/', ' ', implode(' ', $parts)));
     }
 
-    private function log(string $message): void
+    /**
+     * Write one line to the run log.
+     *
+     * Three destinations, the same three AutoDisconnectService writes to:
+     *
+     *   • storage/logs/agent-invoices/Agent_Invoices.log — the run's own file,
+     *     which is what somebody reads when asking "what did last Monday bill?"
+     *   • Laravel's `single` channel, so a run appears in laravel.log alongside
+     *     whatever else was happening at the time.
+     *   • stdout, when running from the CLI, so `php artisan agent-invoices:generate`
+     *     streams rather than going quiet for a minute.
+     *
+     * Wrapped in a try/catch throughout: a full disk or a read-only log
+     * directory must never be the reason a week goes unbilled.
+     */
+    private function writeLog(string $message): void
     {
+        $line = '[' . Carbon::now()->format('Y-m-d H:i:s') . "] [{$this->logName}] {$message}";
+
         try {
-            $line = '[' . Carbon::now()->format('Y-m-d H:i:s') . '] ' . $message . PHP_EOL;
-            $dir  = storage_path('logs/agent-invoices');
+            $dir = storage_path('logs/agent-invoices');
 
             if (!is_dir($dir)) {
                 @mkdir($dir, 0775, true);
             }
 
-            @file_put_contents($dir . '/' . $this->logName . '.log', $line, FILE_APPEND);
+            @file_put_contents($dir . '/' . $this->logName . '.log', $line . PHP_EOL, FILE_APPEND);
         } catch (Throwable $e) {
             // Logging must never be the reason a run fails.
+        }
+
+        try {
+            Log::channel('single')->info("[{$this->logName}] {$message}");
+        } catch (Throwable $e) {
+            // As above.
+        }
+
+        if ($this->isCli && $this->cliEcho) {
+            $this->echoCli($line);
+        }
+    }
+
+    /**
+     * A line that is only written when verbose mode is on.
+     *
+     * Tagged [VERBOSE] and following the same path as everything else, so the
+     * detail can be filtered out of a file after the fact.
+     */
+    private function writeVerbose(string $message): void
+    {
+        if (!$this->verbose) {
+            return;
+        }
+
+        $this->writeLog("[VERBOSE] {$message}");
+    }
+
+    /** Echo one line to stdout and flush, so CLI output streams live. */
+    private function echoCli(string $line): void
+    {
+        try {
+            if (defined('STDOUT')) {
+                @fwrite(STDOUT, $line . PHP_EOL);
+            } else {
+                echo $line . PHP_EOL;
+            }
+            @flush();
+        } catch (Throwable $e) {
+            // Never fatal.
         }
     }
 }

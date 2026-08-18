@@ -12,6 +12,11 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { techInOutService } from '../services/techInOutService';
 import TimeInOutModal from '../modals/TimeInOutModal';
 import { agentOwnsReferral, isOnOrAfterAgentStartDate } from '../utils/agentReferral';
+import {
+  buildTechnicianLockedJobOrderIds,
+  isTechnicianUser,
+  technicianQueueTime
+} from '../utils/technicianJobOrderAccess';
 
 
 const StatusText = React.memo(({ status, type }: { status?: string | null, type: 'onsite' | 'billing' }) => {
@@ -264,12 +269,14 @@ const itemExtractorMap: Record<string, (item: JobOrder) => any> = {
 const JobOrderCard = React.memo(({
   jobOrder,
   isSelected,
+  isLocked,
   onPress,
   userRole,
   userRoleId
 }: {
   jobOrder: JobOrder;
   isSelected: boolean;
+  isLocked: boolean;
   onPress: (jo: JobOrder) => void;
   userRole: string;
   userRoleId: number | null;
@@ -280,16 +287,20 @@ const JobOrderCard = React.memo(({
 
   return (
     <Pressable
+      // A locked card opens like any other: the technician may read the job order
+      // in full. The lock only governs starting the job, which the details
+      // screen gates on the administrator's Enable.
       onPress={() => onPress(jobOrder)}
       style={[jo.cardRow, {
-        backgroundColor: isSelected ? '#f3f4f6' : 'transparent',
-        borderColor: '#e5e7eb'
+        backgroundColor: isLocked ? '#f9fafb' : (isSelected ? '#f3f4f6' : 'transparent'),
+        borderColor: '#e5e7eb',
+        opacity: isLocked ? 0.45 : 1
       }]}
     >
       <View style={jo.cardInner}>
         <View style={jo.cardLeft}>
           <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 }}>
-            <Text style={[jo.cardName, { color: '#111827', marginBottom: 0 }]}>
+            <Text style={[jo.cardName, { color: isLocked ? '#6b7280' : '#111827', marginBottom: 0 }]}>
               {getClientFullName(jobOrder)}
             </Text>
             {isWorkStarted(jobOrder) && (
@@ -299,11 +310,18 @@ const JobOrderCard = React.memo(({
                 </Text>
               </View>
             )}
+            {isLocked && (
+              <View style={{ backgroundColor: '#e5e7eb', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }}>
+                <Text style={{ color: '#4b5563', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase' }}>
+                  Locked
+                </Text>
+              </View>
+            )}
           </View>
-          <Text style={[jo.cardSub, { color: '#4b5563' }]} numberOfLines={2}>
+          <Text style={[jo.cardSub, { color: isLocked ? '#9ca3af' : '#4b5563' }]} numberOfLines={2}>
             {formatDate(jobOrder.Timestamp || jobOrder.timestamp)} | {getClientFullAddress(jobOrder)}
           </Text>
-          <Text style={[jo.cardSub, { color: '#6b7280', marginTop: 4 }]}>
+          <Text style={[jo.cardSub, { color: isLocked ? '#9ca3af' : '#6b7280', marginTop: 4 }]}>
             Fee: {formatPrice(jobOrder.Installation_Fee || jobOrder.installation_fee)}
           </Text>
         </View>
@@ -592,7 +610,67 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
     });
   }, [jobOrders, debouncedSearch, statusFilter, identityReady, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, getClientFullName, getClientFullAddress]);
 
+  const isTechnician = useMemo(() => isTechnicianUser(userRole, userRoleId), [userRole, userRoleId]);
+
+  /**
+   * The job orders a technician may not open yet.
+   *
+   * Built from the technician's whole assigned set — the API already scopes
+   * `jobOrders` to them — and NOT from the filtered/paginated view, so searching
+   * or filtering can never change which job order counts as the oldest.
+   */
+  const technicianLockedIds = useMemo(() => {
+    if (!identityReady || !isTechnician) return new Set<string>();
+    return buildTechnicianLockedJobOrderIds(jobOrders);
+  }, [identityReady, isTechnician, jobOrders]);
+
   const sortedJobOrders = useMemo(() => {
+    // A technician reads their list oldest first, running through to the
+    // newest, with only the finished work pushed to the very bottom.
+    //
+    // Two bands, and two only:
+    //   0  still to do — In Progress, Reschedule and everything else. These sit
+    //      together on purpose: a reschedule is work the technician still owes,
+    //      so it belongs among the live jobs rather than filed away with the
+    //      finished ones.
+    //   1  done and failed, at the very bottom.
+    //
+    // Inside each band the order is plain date, oldest first, so the row at the
+    // top is the oldest job the technician still has to do. The date is the job
+    // order's own timestamp falling back to when the row was created, and two
+    // raised at the same moment fall back to id ascending so the order is
+    // stable rather than left to the sort's discretion.
+    //
+    // This is the READING order only. Which job order a technician may open is
+    // decided separately by technicianLockedIds below, and that rule is
+    // mirrored server-side in JobOrderController::isJobOrderLockedForTechnician
+    // — so it deliberately stays as it is.
+    if (isTechnician) {
+      // 'completed' is how some records spell done, and cancelled travels with
+      // failed the way the rest of the app already groups the two.
+      const FINISHED_ONSITE_STATUSES = ['done', 'completed', 'failed', 'cancelled'];
+
+      const isFinished = (jo: any): boolean =>
+        FINISHED_ONSITE_STATUSES.includes(
+          String(jo?.Onsite_Status || jo?.onsite_status || '').toLowerCase().trim()
+        );
+
+      return [...filteredJobOrders].sort((a, b) => {
+        const finishedA = isFinished(a) ? 1 : 0;
+        const finishedB = isFinished(b) ? 1 : 0;
+        if (finishedA !== finishedB) return finishedA - finishedB;
+
+        const timeA = technicianQueueTime(a);
+        const timeB = technicianQueueTime(b);
+        if (timeA !== timeB) return timeA - timeB;
+
+        const idA = parseInt(String(a.id), 10) || 0;
+        const idB = parseInt(String(b.id), 10) || 0;
+        return idA - idB;
+      });
+    }
+
+    // Every other role keeps the existing started-first, newest-first ordering.
     return [...filteredJobOrders].sort((a, b) => {
       const activeA = isWorkStarted(a) ? 1 : 0;
       const activeB = isWorkStarted(b) ? 1 : 0;
@@ -605,7 +683,8 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
       const idB = parseInt(String(b.id)) || 0;
       return idB - idA;
     });
-  }, [filteredJobOrders]);
+  }, [filteredJobOrders, isTechnician]);
+
 
   const shouldPaginate = true; // Consistently paginate for all roles to prevent UI jumping
 
@@ -793,6 +872,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
                     <JobOrderCard
                       jobOrder={jobOrder}
                       isSelected={selectedJobOrder?.id === jobOrder.id}
+                      isLocked={technicianLockedIds.has(String(jobOrder.id))}
                       onPress={!isTablet ? handleMobileRowClick : handleRowClick}
                       userRole={userRole}
                       userRoleId={userRoleId}

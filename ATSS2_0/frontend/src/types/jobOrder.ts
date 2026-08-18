@@ -90,6 +90,9 @@ export interface JobOrder {
 
   // Assignment and Tracking
   Assigned_Email?: string | null;
+  // Whether an administrator released this job order to the technician ahead of
+  // their oldest-first queue. Locked (false) until they do.
+  technician_enabled?: boolean | number | null;
   Visit_By?: string | null;
   Visit_With?: string | null;
   Visit_With_Other?: string | null;
@@ -141,6 +144,17 @@ export interface JobOrderDetailsProps {
   onClose: () => void;
   onRefresh?: () => void;
   isMobile?: boolean;
+  /**
+   * Is the viewer a technician who may not act on this record yet?
+   *
+   * The list owns the queue — it needs the whole assigned set to know whose turn
+   * it is — so it passes the answer down rather than having this view guess from
+   * the one record it holds. Reading is never restricted; editing is. Absent
+   * means "not restricted", which is the right answer for every non-technician
+   * viewer and for the places this view is opened from outside the queue.
+   */
+  isTechnicianLocked?: boolean;
+
   onPrevious?: () => void;
   onNext?: () => void;
   onExpandSection?: (sectionKey: string, title: string, data: any[], columns: any[], count: number) => void;

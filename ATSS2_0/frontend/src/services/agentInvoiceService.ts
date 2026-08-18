@@ -39,6 +39,14 @@ export interface AgentInvoiceRecord {
     customers?: AgentInvoiceCustomer[];
 }
 
+/** One billing week that has invoices, for the download dialog's picker. */
+export interface AgentInvoicePeriod {
+    period_start: string;
+    period_end: string;
+    invoice_count: number;
+    subtotal: number;
+}
+
 export interface AgentInvoiceListParams {
     search?: string;
     status?: string;
@@ -92,9 +100,36 @@ export const agentInvoiceService = {
         return response.data as Blob;
     },
 
+    /**
+     * The billing weeks that have invoices, newest first.
+     *
+     * Asked of the server rather than derived from the list on screen: the list
+     * is one page, and the picker has to offer every week.
+     */
+    async periods() {
+        const response = await apiClient.get('/agent-invoices/periods');
+        return response.data as { success: boolean; data: AgentInvoicePeriod[] };
+    },
+
+    /**
+     * Every invoice as one PDF — the whole set, or one billing week.
+     *
+     * Returned as a blob so the caller can hand it straight to a download. A
+     * failure arrives as a JSON body inside that blob, which is why callers read
+     * it back as text rather than trusting `err.response.data.message`.
+     */
+    async archiveBlob(periodStart?: string): Promise<Blob> {
+        const response = await apiClient.get('/agent-invoices/archive', {
+            params: periodStart ? { period_start: periodStart } : {},
+            responseType: 'blob',
+        });
+        return response.data as Blob;
+    },
+
+    /** Mark an invoice Sent, Paid or Cancelled. Returns the updated record. */
     async updateStatus(id: number, status: string) {
         const response = await apiClient.patch(`/agent-invoices/${id}/status`, { status });
-        return response.data;
+        return response.data as { success: boolean; message?: string; data?: AgentInvoiceRecord };
     },
 
     /** Runs the weekly generation now. Administrators only; safe to repeat. */

@@ -65,5 +65,8 @@ class Kernel extends HttpKernel
         'verified' => \Illuminate\Auth\Middleware\EnsureEmailIsVerified::class,
         'admin' => \App\Http\Middleware\AdminMiddleware::class,
         'ensure.tables' => \App\Http\Middleware\EnsureTablesExist::class,
+        // Bearer-token auth for the API. See the middleware for why it is
+        // header-based rather than cookie-based.
+        'auth.token' => \App\Http\Middleware\EnsureApiTokenIsValid::class,
     ];
 }

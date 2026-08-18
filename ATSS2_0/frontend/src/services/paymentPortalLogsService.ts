@@ -1,14 +1,4 @@
-import axios from 'axios';
-
-const getApiBaseUrl = (): string => {
-  const baseUrl = process.env.REACT_APP_API_BASE_URL;
-  if (!baseUrl) {
-    throw new Error("REACT_APP_API_BASE_URL is not defined");
-  }
-  return baseUrl;
-};
-
-const API_BASE_URL = getApiBaseUrl();
+import apiClient from '../config/api';
 
 export interface PaymentPortalLog {
   id: string | number;
@@ -67,22 +57,10 @@ export const paymentPortalLogsService = {
     updated_since?: string;
   }): Promise<any> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.get<PaymentPortalLogsResponse>(
-        `${API_BASE_URL}/payment-portal-logs`,
+      const response = await apiClient.get<PaymentPortalLogsResponse>(
+        '/payment-portal-logs',
         {
           params,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
         }
       );
 
@@ -109,22 +87,8 @@ export const paymentPortalLogsService = {
    */
   getLogById: async (id: string | number): Promise<PaymentPortalLog | null> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.get<PaymentPortalLogResponse>(
-        `${API_BASE_URL}/payment-portal-logs/${id}`,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
-        }
+      const response = await apiClient.get<PaymentPortalLogResponse>(
+        `/payment-portal-logs/${id}`
       );
 
       return response.data.data || null;
@@ -139,22 +103,8 @@ export const paymentPortalLogsService = {
    */
   getLogsByAccountNo: async (accountNo: string): Promise<PaymentPortalLog[]> => {
     try {
-      const authData = localStorage.getItem('authData');
-      let token = '';
-
-      if (authData) {
-        const parsed = JSON.parse(authData);
-        token = parsed.token || '';
-      }
-
-      const response = await axios.get<PaymentPortalLogsResponse>(
-        `${API_BASE_URL}/payment-portal-logs/account/${accountNo}`,
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': token ? `Bearer ${token}` : ''
-          }
-        }
+      const response = await apiClient.get<PaymentPortalLogsResponse>(
+        `/payment-portal-logs/account/${accountNo}`
       );
 
       return response.data.data || [];

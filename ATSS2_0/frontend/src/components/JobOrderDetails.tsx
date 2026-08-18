@@ -3,7 +3,7 @@ import {
   X, ExternalLink, Edit, Settings, Loader, ArrowRightCircle, Paperclip,
   ChevronLeft, ChevronRight
 } from 'lucide-react';
-import { updateJobOrder, approveJobOrder, getRelatedDetailsUpdateLogs } from '../services/jobOrderService';
+import { updateJobOrder, approveJobOrder, getRelatedDetailsUpdateLogs, enableJobOrderForTechnician } from '../services/jobOrderService';
 import apiClient from '../config/api';
 import { getBillingStatuses, BillingStatus } from '../services/lookupService';
 import { JobOrderDetailsProps } from '../types/jobOrder';
@@ -24,6 +24,8 @@ import { User as UserType } from '../types/api';
 import { getBillingRecords, getBillingRecordDetails, BillingDetailRecord } from '../services/billingService';
 import { getAllInventoryItems } from '../services/inventoryItemService';
 import { isAgentUser } from '../utils/agentReferral';
+import { isClosedForTechnicianQueue, isTechnicianEnabled, TECHNICIAN_LOCKED_MESSAGE } from '../utils/technicianJobOrderAccess';
+import { usePermissions } from '../hooks/usePermissions';
 
 const PlanListDetails = React.lazy(() => import('./PlanListDetails'));
 const UserDetails = React.lazy(() => import('./UserDetails'));
@@ -31,7 +33,7 @@ const CustomerDetails = React.lazy(() => import('./CustomerDetails'));
 const InventoryDetails = React.lazy(() => import('./InventoryDetails'));
 const NotFoundModal = React.lazy(() => import('../modals/NotFoundModal'));
 
-const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, onRefresh, isMobile = false, onPrevious, onNext, onExpandSection }) => {
+const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, onRefresh, isMobile = false, onPrevious, onNext, onExpandSection, isTechnicianLocked = false }) => {
   const [localIsMobile, setLocalIsMobile] = useState<boolean>(window.innerWidth < 768);
   useEffect(() => {
     const handleResize = () => {
@@ -56,6 +58,16 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
   const [billingStatuses, setBillingStatuses] = useState<BillingStatus[]>([]);
   const [userRole, setUserRole] = useState<string>('');
   const [roleId, setRoleId] = useState<number | null>(null);
+  const [isEnablingTechnician, setIsEnablingTechnician] = useState(false);
+  const [enableTechnicianError, setEnableTechnicianError] = useState<string | null>(null);
+  /**
+   * Local echo of technician_enabled after a successful enable.
+   *
+   * The list refresh is what makes the change permanent everywhere; this only
+   * keeps the button honest in the moment between the two. Cleared whenever a
+   * different job order is opened so it can never leak across records.
+   */
+  const [technicianEnabledOverride, setTechnicianEnabledOverride] = useState<boolean | null>(null);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [applicationData, setApplicationData] = useState<Application | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
@@ -324,13 +336,10 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   useEffect(() => {
     const fetchBillingStatuses = async () => {
@@ -601,6 +610,13 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
   };
 
   const handleDoneClick = () => {
+    // A locked job order opens for reading, but not for editing: this form is how
+    // the work gets recorded, and JobOrderController refuses the update anyway.
+    if (isTechnicianLocked) {
+      setError(TECHNICIAN_LOCKED_MESSAGE);
+      return;
+    }
+
     if (hasPermission('job-order.admin-edit')) {
       setIsDoneModalOpen(true);
     } else if (hasPermission('job-order.tech-edit')) {
@@ -755,6 +771,9 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
   };
 
   const shouldShowEditButton = () => {
+    // Nothing to offer on a job order that is waiting its turn.
+    if (isTechnicianLocked) return false;
+
     const billingStatus = (jobOrder.billing_status || jobOrder.Billing_Status || '').toLowerCase();
     const onsiteStatus = (jobOrder.Onsite_Status || jobOrder.onsite_status || '').toLowerCase();
 
@@ -771,6 +790,64 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
 
     return false;
   };
+
+  // ── Technician queue release ────────────────────────────────────────────────
+  // Technicians work their job orders oldest first: everything newer is greyed
+  // out until either the older work moves forward or an administrator releases
+  // one early. This is that release.
+
+  const isAdminUser = (): boolean => {
+    const lowerRole = (userRole || '').toLowerCase().trim();
+    return lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7;
+  };
+
+  const technicianEnabled = technicianEnabledOverride ?? isTechnicianEnabled(jobOrder);
+
+  // Offered for administrators on any job order a technician still owes work on,
+  // including one that has been rescheduled — that is precisely the case where
+  // they cannot pick it back up without being released. A job order that is
+  // finished, failed or cancelled has nothing left to release.
+  const shouldShowEnableTechnicianButton = () =>
+    isAdminUser() && !isClosedForTechnicianQueue(jobOrder);
+
+  const handleEnableTechnicianClick = async () => {
+    if (isEnablingTechnician || technicianEnabled) return;
+
+    if (!jobOrder.id) {
+      setEnableTechnicianError('Cannot enable job order: Missing ID');
+      return;
+    }
+
+    setEnableTechnicianError(null);
+    setIsEnablingTechnician(true);
+
+    try {
+      const response = await enableJobOrderForTechnician(jobOrder.id);
+
+      if (response?.success) {
+        setTechnicianEnabledOverride(true);
+        setSuccessMessage('Job order enabled. The technician can now start it.');
+        setShowSuccessModal(true);
+        if (onRefresh) {
+          onRefresh();
+        }
+      } else {
+        setEnableTechnicianError(response?.message || 'Failed to enable job order for the technician');
+      }
+    } catch (err: any) {
+      setEnableTechnicianError(
+        err.response?.data?.message || err.message || 'Failed to enable job order for the technician'
+      );
+    } finally {
+      setIsEnablingTechnician(false);
+    }
+  };
+
+  // A different record is a different lock state.
+  useEffect(() => {
+    setTechnicianEnabledOverride(null);
+    setEnableTechnicianError(null);
+  }, [jobOrder.id]);
 
   const shouldShowFailedButton = () => {
     const onsiteStatus = String(jobOrder.Onsite_Status || jobOrder.onsite_status || '').toLowerCase().trim();
@@ -1118,6 +1195,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
             <div className={valueClass}>{remarks}</div>
           </div>
         );
+
 
       case 'installationLandmark':
         const installationLandmark = jobOrder.Installation_Landmark || jobOrder.installation_landmark || jobOrder.landmark || applicationData?.landmark;
@@ -1984,6 +2062,22 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
 
           <div className="flex items-center space-x-2 flex-wrap gap-y-1">
 
+            {shouldShowEnableTechnicianButton() && (
+              <button
+                className={`px-2 py-1 rounded-sm flex items-center text-sm font-medium whitespace-nowrap ${technicianEnabled
+                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed dark:bg-gray-700 dark:text-gray-400'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  }`}
+                onClick={handleEnableTechnicianClick}
+                disabled={technicianEnabled || isEnablingTechnician}
+                title={technicianEnabled
+                  ? 'The technician can already start this job order'
+                  : 'Let the technician start this job order without finishing their older ones first'}
+              >
+                {isEnablingTechnician && <Loader className="h-3 w-3 mr-1 animate-spin" />}
+                <span>{technicianEnabled ? 'Enabled' : (isEnablingTechnician ? 'Enabling...' : 'Enable')}</span>
+              </button>
+            )}
             {shouldShowApproveButton() && (
               <button
                 className="bg-green-600 hover:bg-green-700 text-white px-2 py-1 rounded-sm flex items-center text-sm whitespace-nowrap"
@@ -2162,6 +2256,15 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
             : 'bg-red-100 border border-red-300 text-red-700'
             }`}>
             {error}
+          </div>
+        )}
+
+        {enableTechnicianError && (
+          <div className={`p-3 m-3 rounded ${isDarkMode
+            ? 'bg-red-900 bg-opacity-20 border border-red-700 text-red-400'
+            : 'bg-red-100 border border-red-300 text-red-700'
+            }`}>
+            {enableTechnicianError}
           </div>
         )}
 

@@ -17,6 +17,7 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { planService, Plan } from '../services/planService';
 import RelatedDataTable from './RelatedDataTable';
 import { relatedDataColumns } from '../config/relatedDataColumns';
+import { usePermissions } from '../hooks/usePermissions';
 
 const PlanListDetails = React.lazy(() => import('./PlanListDetails'));
 const NotFoundModal = React.lazy(() => import('../modals/NotFoundModal'));
@@ -101,13 +102,10 @@ const ApplicationDetails: React.FC<ApplicationDetailsProps> = ({ application, on
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   // Related data states
   const [relatedData, setRelatedData] = useState<Record<string, any[]>>({

@@ -3,8 +3,12 @@ import { Search, Plus, Edit2, Trash2, Loader2 } from 'lucide-react';
 import { getAllPorts, deletePort, Port } from '../services/portService';
 import AddPortModal from '../modals/AddPortModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { currentUserCan } from '../hooks/usePermissions';
 
 const Ports: React.FC = () => {
+  // Add/edit/delete on this list. The same key the API demands, so a
+  // control is only drawn when the request behind it would succeed.
+  const canManagePorts = currentUserCan('ports.manage');
   const [ports, setPorts] = useState<Port[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -56,11 +60,13 @@ const Ports: React.FC = () => {
   };
 
   const handleAddClick = () => {
+    if (!canManagePorts) return;
     setEditingPort(null);
     setShowAddModal(true);
   };
 
   const handleEditClick = (port: Port) => {
+    if (!canManagePorts) return;
     setEditingPort(port);
     setShowAddModal(true);
   };
@@ -75,6 +81,7 @@ const Ports: React.FC = () => {
   };
 
   const handleDelete = async (id: number) => {
+    if (!canManagePorts) return;
     if (!window.confirm('Are you sure you want to delete this port?')) {
       return;
     }
@@ -182,24 +189,26 @@ const Ports: React.FC = () => {
             />
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
           </div>
-          <button
-            onClick={handleAddClick}
-            className="text-white px-4 py-2 rounded text-sm flex items-center space-x-2 transition-colors ml-4"
-            style={{
-              backgroundColor: colorPalette?.primary || '#7c3aed'
-            }}
-            onMouseEnter={(e) => {
-              if (colorPalette?.accent) {
-                e.currentTarget.style.backgroundColor = colorPalette.accent;
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = colorPalette?.primary || '#7c3aed';
-            }}
-          >
-            <Plus size={16} />
-            <span>Add</span>
-          </button>
+          {canManagePorts && (
+            <button
+              onClick={handleAddClick}
+              className="text-white px-4 py-2 rounded text-sm flex items-center space-x-2 transition-colors ml-4"
+              style={{
+                backgroundColor: colorPalette?.primary || '#7c3aed'
+              }}
+              onMouseEnter={(e) => {
+                if (colorPalette?.accent) {
+                  e.currentTarget.style.backgroundColor = colorPalette.accent;
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = colorPalette?.primary || '#7c3aed';
+              }}
+            >
+              <Plus size={16} />
+              <span>Add</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -225,25 +234,29 @@ const Ports: React.FC = () => {
                     <td className="px-6 py-4 text-gray-400 text-sm">{formatDateTime(port.updated_at)}</td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => handleEditClick(port)}
-                          className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
-                          title="Edit"
-                        >
-                          <Edit2 className="h-4 w-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(port.id)}
-                          disabled={deletingId === port.id}
-                          className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          title="Delete"
-                        >
-                          {deletingId === port.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
-                          )}
-                        </button>
+                        {canManagePorts && (
+                          <button
+                            onClick={() => handleEditClick(port)}
+                            className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
+                            title="Edit"
+                          >
+                            <Edit2 className="h-4 w-4" />
+                          </button>
+                        )}
+                        {canManagePorts && (
+                          <button
+                            onClick={() => handleDelete(port.id)}
+                            disabled={deletingId === port.id}
+                            className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            title="Delete"
+                          >
+                            {deletingId === port.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

@@ -15,6 +15,10 @@ use App\Services\RadiusQueueService;
 use App\Models\RadiusConfig;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Auth;
+use App\Models\ActivityLog;
+use App\Models\AuditTrailLog;
+use App\Models\Role;
+use App\Models\ServiceOrder;
 
 class ServiceOrderApiController extends Controller
 {
@@ -535,6 +539,21 @@ class ServiceOrderApiController extends Controller
                 ], 403);
             }
 
+            // A technician works their queue from the top. Enforced here as well
+            // as in the UI so the lock cannot be stepped over by calling the API
+            // directly with another service order's id.
+            if ($this->isServiceOrderLockedForTechnician($serviceOrder, $this->resolveActingUser($request))) {
+                Log::warning('Service order update blocked: locked for technician', [
+                    'id' => $id,
+                    'user_email' => optional($this->resolveActingUser($request))->email,
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This job order is locked. Finish the job order at the top of your list first, or ask an administrator to enable this one.',
+                ], 403);
+            }
+
             $updatedByUser = $request->input('updated_by_user') ?: ($request->input('updated_by') ?: (Auth::user()->name ?? 'System'));
 
             $accountRef = $serviceOrder->account_no;
@@ -1037,10 +1056,31 @@ class ServiceOrderApiController extends Controller
             // any other casing. 'reactivation' is accepted too because the
             // repair-category lookup spells it that way and the two get mixed up.
             $reactivateConcerns = ['reactivate', 'reactivation'];
-            $isAlreadyResolvedReactivate = in_array(strtolower(trim($originalConcern)), $reactivateConcerns, true)
+
+            // Read from the repair category as well as the concern.
+            //
+            // A reactivation gets recorded in either field depending on who files
+            // it — support sets the concern, the technician picks the repair
+            // category — and the pullout trigger further down already reads
+            // repair_category for exactly that reason. Matching only `concern`
+            // here meant a resolved Reactivation ticket could leave the account
+            // pulled out with no way back, because this branch is the ONLY place
+            // in the codebase that sets users.active to 1.
+            $reactivateRepairCategory = strtolower(trim($request->input('repair_category') ?? ''));
+            if ($reactivateRepairCategory === '' && isset($serviceOrder->repair_category)) {
+                $reactivateRepairCategory = strtolower(trim($serviceOrder->repair_category));
+            }
+
+            $isReactivateRequest = in_array($normalizedConcern, $reactivateConcerns, true)
+                || in_array($reactivateRepairCategory, $reactivateConcerns, true);
+
+            $isAlreadyResolvedReactivate = (
+                    in_array(strtolower(trim($originalConcern)), $reactivateConcerns, true)
+                    || in_array(strtolower(trim($originalRepairCategory)), $reactivateConcerns, true)
+                )
                 && $originalSupportStatus === 'resolved';
 
-            if (in_array($normalizedConcern, $reactivateConcerns, true) && $supportStatus === 'resolved') {
+            if ($isReactivateRequest && $supportStatus === 'resolved') {
                 // Forced, and deliberately outside the billing check below.
                 // Gating this on "billing is not already Active" is exactly what
                 // kept users.active at 0: four other paths restore
@@ -1119,7 +1159,33 @@ class ServiceOrderApiController extends Controller
                 $repairCategory = strtolower(trim($serviceOrder->repair_category));
             }
 
-            if ($repairCategory === 'pullout' && $visitStatus === 'done' && !$isAlreadyPulloutDone) {
+
+            // The pullout itself is decided on what the ticket says AFTER this
+            // request's write, not on $request and not on the pre-update copy above.
+            //
+            // This is the write that disables the customer's portal login, so the
+            // request-or-stored fallbacks are too loose for it in both directions:
+            //   • a request that only sets the category to Pullout would inherit a
+            //     'Done' left behind by an earlier, unrelated visit, and disable the
+            //     login without any pullout visit having been completed;
+            //   • a request that merely claims visit_status=Done would be trusted
+            //     even if that value never reached the row.
+            // Reading the row back closes both: no completed pullout visit on the
+            // record, no deactivation.
+            $pulloutRow = DB::table('service_orders')->where('id', $id)->first();
+            $pulloutVisitStatus = strtolower(trim((string) ($pulloutRow->visit_status ?? '')));
+            $pulloutRepairCategory = strtolower(trim((string) ($pulloutRow->repair_category ?? '')));
+
+            // 'for pullout' is accepted next to 'pullout' because the two spellings are
+            // used interchangeably for these tickets. Only 'Pullout' ever reaches
+            // repair_category today (the auto-generated requests put 'For Pullout' in
+            // `concern` and leave the category empty), so this widens nothing on
+            // existing data — it just stops the spelling from mattering later.
+            $pulloutCategories = ['pullout', 'for pullout'];
+            $isPulloutVisitDone = in_array($pulloutRepairCategory, $pulloutCategories, true)
+                && $pulloutVisitStatus === 'done';
+
+            if ($isPulloutVisitDone && !$isAlreadyPulloutDone) {
                 $billingAccount = BillingAccount::where('account_no', $serviceOrder->account_no)->first();
                 if ($billingAccount) {
                     \Log::info('Triggering auto-pullout for Service Order with Pullout repair category', [
@@ -1356,6 +1422,244 @@ class ServiceOrderApiController extends Controller
                 'error'   => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Release a service order to its technician ahead of their queue.
+     *
+     * Technicians work In Progress first and oldest first within that: only the
+     * record at the top of their list is actionable, everything else active is
+     * greyed out. An administrator calls this to unlock one specific service
+     * order early. Restricted to administrators by the `role` middleware on the
+     * route — technician_enabled is not fillable, so this is the only way it can
+     * be set.
+     */
+    public function enableForTechnician(Request $request, $id): JsonResponse
+    {
+        try {
+            $currentUser = $this->resolveActingUser($request);
+            $organizationId = $currentUser ? $currentUser->organization_id : null;
+            $isSuperAdmin = !$currentUser || (int) $currentUser->role_id === Role::SUPER_ADMIN || !$organizationId;
+
+            $serviceOrder = DB::table('service_orders')->where('id', $id)->first();
+
+            if (!$serviceOrder) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Service order not found'
+                ], 404);
+            }
+
+            if (!$isSuperAdmin && $organizationId && $serviceOrder->organization_id !== $organizationId) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unauthorized access to service order'
+                ], 403);
+            }
+
+            // Already released — answer successfully with the current state rather
+            // than writing an audit entry for a no-op.
+            if (!empty($serviceOrder->technician_enabled)) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'This service order is already enabled for the technician.',
+                    'data' => [
+                        'id' => $serviceOrder->id,
+                        'technician_enabled' => true,
+                    ],
+                ]);
+            }
+
+            $performedBy = $request->input('updated_by_user')
+                ?? optional($currentUser)->email_address
+                ?? optional($currentUser)->email
+                ?? 'System';
+
+            DB::table('service_orders')->where('id', $id)->update([
+                'technician_enabled' => 1,
+                'updated_by_user' => $performedBy,
+                'updated_at' => Carbon::now(),
+            ]);
+
+            AuditTrailLog::create([
+                'old_details' => [
+                    'type' => 'serviceorders',
+                    'id' => $serviceOrder->id,
+                    'data' => ['technician_enabled' => false],
+                ],
+                'new_details' => [
+                    'type' => 'serviceorders',
+                    'id' => $serviceOrder->id,
+                    'data' => ['technician_enabled' => true],
+                ],
+                'created_by_user' => $performedBy,
+                'updated_by_user' => $performedBy,
+            ]);
+
+            ActivityLog::log(
+                'Service Order Enabled For Technician',
+                "Service Order #{$serviceOrder->id} unlocked for technician access by {$performedBy}",
+                'info',
+                [
+                    'user_email' => $performedBy,
+                    'resource_type' => 'ServiceOrder',
+                    'resource_id' => $serviceOrder->id,
+                ]
+            );
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Service order enabled for technician access.',
+                'data' => [
+                    'id' => $serviceOrder->id,
+                    'technician_enabled' => true,
+                ],
+            ]);
+        }
+        catch (\Exception $e) {
+            Log::error('Failed to enable service order for technician', [
+                'service_order_id' => $id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to enable service order for technician',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * The signed-in user, however this request authenticated.
+     *
+     * The service-orders routes sit outside the `auth:sanctum` group, so the
+     * default session guard resolves the web portal (cookie based) but NOT the
+     * mobile app, which sends a bearer token. Asking Sanctum's guard covers both,
+     * and it is asked only for the technician queue checks below — the rest of
+     * this controller keeps using auth()->user() exactly as it did.
+     */
+    private function resolveActingUser(Request $request)
+    {
+        if ($user = $request->user()) {
+            return $user;
+        }
+
+        try {
+            return $request->user('sanctum');
+        }
+        catch (\Throwable $e) {
+            // No sanctum guard configured — treat as unidentified.
+            return null;
+        }
+    }
+
+    /**
+     * Is this service order locked for the signed-in user because it is not their
+     * next one in the queue?
+     *
+     * Only ever true for technicians. A service order is open when any of these
+     * hold:
+     *   • it heads the queue of work still assigned to them — the oldest In
+     *     Progress visit, or the oldest other active one when they have none in
+     *     progress, or the oldest rescheduled one when that is all that is left.
+     *     A reschedule sorts last, so it reaches the head only when there is no
+     *     active work in front of it;
+     *   • an administrator enabled it (technician_enabled);
+     *   • they have already started it and not yet closed it — a visit in flight
+     *     must never become unreachable;
+     *   • it is done, resolved, failed or cancelled: nothing is left to act on.
+     *
+     * A rescheduled service order is deliberately NOT open on its status alone.
+     * It stays out of the queue's way, so it never blocks the work behind it, but
+     * booking the return visit back in is an administrator's call.
+     *
+     * A service order that is not part of the technician's own assigned queue is
+     * left alone: this restriction governs the order of their own work, and must
+     * not start blocking records reached some other way.
+     *
+     * Mirrors JobOrderController::isJobOrderLockedForTechnician() and the two
+     * clients' utils/technicianServiceOrderAccess.ts.
+     */
+    private function isServiceOrderLockedForTechnician($serviceOrder, $currentUser): bool
+    {
+        if (!$currentUser || (int) $currentUser->role_id !== Role::TECHNICIAN) {
+            return false;
+        }
+
+        if (!empty($serviceOrder->technician_enabled)) {
+            return false;
+        }
+
+        $visitStatus = strtolower(trim((string) ($serviceOrder->visit_status ?? '')));
+        if (in_array($visitStatus, ServiceOrder::TECHNICIAN_QUEUE_CLOSED_VISIT_STATUSES, true)) {
+            return false;
+        }
+
+        // Already in flight for this technician. A zero date counts as unset, the
+        // same way the two clients read these columns.
+        $isTimeSet = static function ($value): bool {
+            $normalised = strtolower(trim((string) $value));
+            return !in_array($normalised, ['', '0000-00-00 00:00:00', 'not set', '-', 'none', 'null'], true);
+        };
+
+        if ($isTimeSet($serviceOrder->start_time ?? null) && !$isTimeSet($serviceOrder->end_time ?? null)) {
+            return false;
+        }
+
+        $technicianEmail = $currentUser->email ?? $currentUser->email_address ?? null;
+        if (!$technicianEmail) {
+            return false;
+        }
+
+        // The technician's open queue, in the order the two clients paint their
+        // list: In Progress first, then other active work, then deferred work
+        // last, oldest first within each band on the ticket's own timestamp
+        // falling back to the row's creation date. So the head of this list is the
+        // record that appears at the top of the technician's screen.
+        //
+        // Deferred work is ranked here rather than excluded with the finished
+        // work. Sorting last is what keeps it from taking the slot away from
+        // active work; excluding it made it neither next nor locked.
+        //
+        // Membership of THIS list is also what decides whether the service order
+        // is one of theirs to queue at all. Testing ownership separately would
+        // mean two comparisons of the same email that can disagree — and a
+        // disagreement fails open, because an empty queue never blocks.
+        $inProgressFirst = sprintf(
+            "CASE WHEN LOWER(TRIM(COALESCE(visit_status, ''))) IN ('%s') THEN 0 ELSE 1 END",
+            implode("', '", ServiceOrder::TECHNICIAN_IN_PROGRESS_VISIT_STATUSES)
+        );
+
+        $deferredLast = sprintf(
+            "CASE WHEN LOWER(TRIM(COALESCE(visit_status, ''))) IN ('%s') THEN 1 ELSE 0 END",
+            implode("', '", ServiceOrder::TECHNICIAN_QUEUE_DEFERRED_VISIT_STATUSES)
+        );
+
+        $queue = DB::table('service_orders')
+            ->where('assigned_email', $technicianEmail)
+            ->whereNotIn(
+                DB::raw("LOWER(TRIM(COALESCE(visit_status, '')))"),
+                ServiceOrder::TECHNICIAN_QUEUE_CLOSED_VISIT_STATUSES
+            )
+            ->when($currentUser->organization_id, function ($q) use ($currentUser) {
+                $q->where('organization_id', $currentUser->organization_id);
+            }, function ($q) {
+                $q->whereNull('organization_id');
+            })
+            ->orderBy(DB::raw($deferredLast))
+            ->orderBy(DB::raw($inProgressFirst))
+            ->orderBy(DB::raw('COALESCE(`timestamp`, `created_at`)'))
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id);
+
+        // Not part of their own queue — leave the existing behaviour alone.
+        if (!$queue->contains((int) $serviceOrder->id)) {
+            return false;
+        }
+
+        return $queue->first() !== (int) $serviceOrder->id;
     }
 
     public function destroy($id): JsonResponse

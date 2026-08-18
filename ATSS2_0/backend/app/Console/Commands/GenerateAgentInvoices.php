@@ -11,40 +11,64 @@ use Throwable;
 /**
  * Weekly agent referral invoices.
  *
- * Runs every Monday at 00:00 (Asia/Manila) and bills the week that has just
- * ended — one invoice per team, one per agent who belongs to no team.
+ * Runs every Monday at 00:00 (Asia/Manila) and bills the seven days immediately
+ * before the run — one invoice per team, one per agent who belongs to no team.
+ * A run on Monday 17 August bills 10 August 00:00:00 to 16 August 23:59:59; the
+ * day of the run is never included.
  *
- * Safe to run as often as you like. An owner already invoiced for the week is
+ * Safe to run as often as you like. An owner already invoiced for the period is
  * skipped, and a customer already billed to that owner is refused by the
  * database, so a second run in the same morning creates nothing.
  *
  *     php artisan cron:generate-agent-invoices
  *
  * Options:
- *     --week=YYYY-MM-DD   bill the week containing this date instead of the last
+ *     --as-of=YYYY-MM-DD  bill as though the run happened on this date, i.e. the
+ *                         seven days before it
+ *     --week=YYYY-MM-DD   deprecated alias for --as-of. NOTE the meaning changed
+ *                         with the move to a rolling window: it once meant "the
+ *                         calendar week containing this date", and now means the
+ *                         week BEFORE it. A notice is printed when it is used.
  *     --agent=ID          only the owner this agent belongs to (a team or
  *                         themselves), for testing one case
  *     --dry-run           report what would be billed without writing anything
+ *     --quiet-log         write the run log without the per-customer detail
+ *     --no-echo           do not mirror the run log to the console
+ *
+ * Every run writes a full log to storage/logs/agent-invoices/Agent_Invoices.log
+ * in the same form as the auto-disconnect worker's: a banner, the configuration
+ * it read, a numbered block per owner, and a summary with counts and a duration.
+ * When run from the console the same lines stream to stdout as they are written.
  */
 class GenerateAgentInvoices extends Command
 {
     protected $signature = 'cron:generate-agent-invoices
-                            {--week= : Bill the week containing this date (YYYY-MM-DD)}
+                            {--as-of= : Bill the seven days before this date (YYYY-MM-DD)}
+                            {--week= : Deprecated alias for --as-of}
                             {--agent= : Only the owner this agent id belongs to}
-                            {--dry-run : Report what would be billed without writing it}';
+                            {--dry-run : Report what would be billed without writing it}
+                            {--quiet-log : Omit the per-customer [VERBOSE] detail from the log}
+                            {--no-echo : Do not mirror the run log to the console}';
 
     protected $description = 'Generate the weekly referral invoice for every agent team and solo agent.';
 
     public function handle(AgentInvoiceService $service): int
     {
         $dryRun = (bool) $this->option('dry-run');
-        $weekOf = null;
+        $asOf = null;
 
-        if ($week = $this->option('week')) {
+        $given = $this->option('as-of') ?: $this->option('week');
+
+        if ($this->option('week') && !$this->option('as-of')) {
+            $this->warn('[AGENT INVOICES] --week is deprecated; use --as-of. It now means'
+                . ' the seven days BEFORE the date given, not the week containing it.');
+        }
+
+        if ($given) {
             try {
-                $weekOf = Carbon::parse($week);
+                $asOf = Carbon::parse($given);
             } catch (Throwable $e) {
-                $this->error("[AGENT INVOICES] Could not read --week=\"{$week}\": " . $e->getMessage());
+                $this->error("[AGENT INVOICES] Could not read \"{$given}\" as a date: " . $e->getMessage());
                 return self::FAILURE;
             }
         }
@@ -55,11 +79,19 @@ class GenerateAgentInvoices extends Command
         $this->info('[AGENT INVOICES] Starting...' . ($dryRun ? ' (dry run)' : ''));
 
         if ($dryRun) {
-            return $this->reportDryRun($service, $weekOf, $agentId);
+            return $this->reportDryRun($service, $asOf, $agentId);
         }
 
+        // Detail on by default, and streamed to the console — the same defaults
+        // the auto-disconnect worker runs with, so a scheduled run leaves a log
+        // that can be read afterwards and a manual one can be watched.
+        $service->setVerbose(
+            !$this->option('quiet-log'),
+            !$this->option('no-echo')
+        );
+
         try {
-            $summary = $service->generateForWeek($weekOf, $agentId);
+            $summary = $service->generateForWeek($asOf, $agentId);
         } catch (Throwable $e) {
             $this->error('[AGENT INVOICES] Fatal error: ' . $e->getMessage());
             Log::channel('single')->error('[AGENT INVOICES] Fatal error: ' . $e->getMessage(), [
@@ -89,7 +121,7 @@ class GenerateAgentInvoices extends Command
     }
 
     /** List the owners that would be billed, writing nothing. */
-    private function reportDryRun(AgentInvoiceService $service, ?Carbon $weekOf, ?int $agentId): int
+    private function reportDryRun(AgentInvoiceService $service, ?Carbon $asOf, ?int $agentId): int
     {
         try {
             $owners = $service->resolveOwners($agentId);
@@ -98,11 +130,15 @@ class GenerateAgentInvoices extends Command
             return self::FAILURE;
         }
 
-        $anchor = $weekOf ? $weekOf->copy() : Carbon::now()->subDay();
+        // Asked of the service, not worked out again here: a dry run that
+        // reported a different week from the one a real run would bill would be
+        // worse than no dry run at all.
+        [$periodStart, $periodEnd] = $service->periodFor($asOf);
         $this->line(sprintf(
-            '  week %s to %s',
-            $anchor->copy()->startOfWeek()->format('Y-m-d'),
-            $anchor->copy()->endOfWeek()->format('Y-m-d')
+            '  billing %s 00:00:00 to %s 23:59:59  (the 7 days before %s)',
+            $periodStart->format('Y-m-d'),
+            $periodEnd->format('Y-m-d'),
+            ($asOf ? $asOf->copy() : Carbon::now())->format('Y-m-d')
         ));
 
         foreach ($owners as $owner) {

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Role;
+use App\Support\Permissions;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
@@ -40,10 +41,14 @@ class RoleController extends Controller
 
     public function store(Request $request)
     {
+        // Each entry must be a key the system actually recognises. A role
+        // carrying an unknown key would silently grant nothing, which reads as
+        // "the permission system is broken" rather than as the typo it is.
         $validator = Validator::make($request->all(), [
             'role_name' => 'required|string|max:255|unique:roles',
             'description' => 'nullable|string',
             'permissions' => 'nullable|array',
+            'permissions.*' => 'string|in:' . implode(',', Permissions::all()),
         ]);
 
         if ($validator->fails()) {
@@ -107,6 +112,7 @@ class RoleController extends Controller
             'role_name' => 'sometimes|string|max:255|unique:roles,role_name,' . $id,
             'description' => 'sometimes|nullable|string',
             'permissions' => 'sometimes|nullable|array',
+            'permissions.*' => 'string|in:' . implode(',', Permissions::all()),
         ]);
 
         if ($validator->fails()) {

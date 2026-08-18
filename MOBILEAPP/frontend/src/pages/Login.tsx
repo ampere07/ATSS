@@ -137,6 +137,13 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           full_name: response.data.user.full_name,
           role: response.data.user.role,
           role_id: response.data.user.role_id,
+          // The role's effective permission keys, as the server resolved them.
+          // These were dropped here before, so a custom role signed in with no
+          // permissions at all and the app fell back to whatever its role name
+          // happened to match.
+          permissions: response.data.user.permissions || null,
+          // The section this role lands on.
+          home: response.data.user.home || null,
           organization: response.data.user.organization
         };
         if (response.data.token) {

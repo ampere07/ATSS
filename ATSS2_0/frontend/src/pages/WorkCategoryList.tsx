@@ -5,6 +5,7 @@ import { API_BASE_URL } from '../config/api';
 import AddWorkCategoryModal from '../modals/AddWorkCategoryModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
+import { authFetch } from '../config/api';
 
 interface WorkCategory {
   id: number;
@@ -144,7 +145,7 @@ const WorkCategoryList: React.FC = () => {
   const loadWorkCategorys = async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/work-categories`, {
+      const response = await authFetch(`${API_BASE_URL}/work-categories`, {
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
@@ -193,7 +194,7 @@ const WorkCategoryList: React.FC = () => {
     showGlobalModal('loading', 'Deleting', `Removing category "${workCategory.category}"...`);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/work-categories/${workCategory.id}`, {
+      const response = await authFetch(`${API_BASE_URL}/work-categories/${workCategory.id}`, {
         method: 'DELETE',
         headers: {
           'Accept': 'application/json',

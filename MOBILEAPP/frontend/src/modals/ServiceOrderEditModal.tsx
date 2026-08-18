@@ -184,6 +184,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
 
                   {formData.supportStatus === 'Failed' && (
                     <ImagePreview
+                              saveToGalleryOnCapture={false}
                       label="Proof Image *"
                       imageUrl={imageFiles.proofImageFile?.uri || formData.proofImage}
                       onUpload={(file) => handleImageUpload('proofImageFile', file)}
@@ -451,15 +452,16 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                           </View>
 
                           {/* IMAGE UPLOAD SECTION - Grouped together above items */}
-                          <ImagePreview label="Time In Image" required={true} imageUrl={imageFiles.timeInFile?.uri || formData.timeIn} onUpload={(file) => handleImageUpload('timeInFile', file)} error={errors.timeInFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
+                          <ImagePreview saveToGalleryOnCapture={false} label="Time In Image" required={true} imageUrl={imageFiles.timeInFile?.uri || formData.timeIn} onUpload={(file) => handleImageUpload('timeInFile', file)} error={errors.timeInFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
 
                           {formData.repairCategory?.toLowerCase() !== 'reactivation' && (
-                            <ImagePreview label="Modem Setup Image" required={true} imageUrl={imageFiles.modemSetupFile?.uri || formData.modemSetupImage} onUpload={(file) => handleImageUpload('modemSetupFile', file)} error={errors.modemSetupFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
+                            <ImagePreview saveToGalleryOnCapture={false} label="Modem Setup Image" required={true} imageUrl={imageFiles.modemSetupFile?.uri || formData.modemSetupImage} onUpload={(file) => handleImageUpload('modemSetupFile', file)} error={errors.modemSetupFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
                           )}
 
                           {formData.repairCategory?.toLowerCase() === 'reactivation' && (
                             <>
                               <ImagePreview
+                              saveToGalleryOnCapture={false}
                                 label="Setup Image *"
                                 imageUrl={imageFiles.setupImageFile?.uri || formData.setupImage}
                                 onUpload={(file) => handleImageUpload('setupImageFile', file)}
@@ -468,6 +470,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                                 colorPrimary={activeColor}
                               />
                               <ImagePreview
+                              saveToGalleryOnCapture={false}
                                 label="Router Reading Image *"
                                 imageUrl={imageFiles.routerReadingImageFile?.uri || formData.routerReadingImage}
                                 onUpload={(file) => handleImageUpload('routerReadingImageFile', file)}
@@ -476,6 +479,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                                 colorPrimary={activeColor}
                               />
                               <ImagePreview
+                              saveToGalleryOnCapture={false}
                                 label="Box Reading Image *"
                                 imageUrl={imageFiles.boxReadingImageFile?.uri || formData.boxReadingImage}
                                 onUpload={(file) => handleImageUpload('boxReadingImageFile', file)}
@@ -484,6 +488,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                                 colorPrimary={activeColor}
                               />
                               <ImagePreview
+                              saveToGalleryOnCapture={false}
                                 label="Port Label Image *"
                                 imageUrl={imageFiles.portLabelImageFile?.uri || formData.portLabelImage}
                                 onUpload={(file) => handleImageUpload('portLabelImageFile', file)}
@@ -494,7 +499,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                             </>
                           )}
 
-                          <ImagePreview label="Time Out Image *" required={true} imageUrl={imageFiles.timeOutFile?.uri || formData.timeOut} onUpload={(file) => handleImageUpload('timeOutFile', file)} error={errors.timeOutFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
+                          <ImagePreview saveToGalleryOnCapture={false} label="Time Out Image *" required={true} imageUrl={imageFiles.timeOutFile?.uri || formData.timeOut} onUpload={(file) => handleImageUpload('timeOutFile', file)} error={errors.timeOutFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
 
                           {/* ITEMS SECTION */}
                           <View style={styles.inputGroup}>
@@ -551,7 +556,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                           <SearchablePickerTrigger label="Visit With Other" value={formData.visitWithOther} onPress={() => { setActiveTechField('visitWithOther'); setActivePicker('technician'); }} error={errors.visitWithOther} isDarkMode={isDarkMode} required />
                           {renderInput('visitRemarks', 'Visit Remarks')}
                           {formData.visitStatus === 'Failed' && (
-                            <ImagePreview label="Proof Image" required={true} imageUrl={imageFiles.proofImageFile?.uri || formData.proofImage} onUpload={(file) => handleImageUpload('proofImageFile', file)} error={errors.proofImageFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
+                            <ImagePreview saveToGalleryOnCapture={false} label="Proof Image" required={true} imageUrl={imageFiles.proofImageFile?.uri || formData.proofImage} onUpload={(file) => handleImageUpload('proofImageFile', file)} error={errors.proofImageFile} isDarkMode={isDarkMode} colorPrimary={activeColor} />
                           )}
                         </>
                       )}

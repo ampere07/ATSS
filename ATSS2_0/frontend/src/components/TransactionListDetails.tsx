@@ -17,6 +17,7 @@ import TransactionRevertModal from '../modals/TransactionRevertModal';
 import TransactionFormModal from '../modals/TransactionFormModal';
 import BillingDetails from './CustomerDetails';
 import { BillingDetailRecord } from '../types/billing';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface Transaction {
   id: string;
@@ -235,14 +236,10 @@ const TransactionListDetails: React.FC<TransactionListDetailsProps> = ({
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole?.role || '').toLowerCase().trim();
-    const roleId = Number(userRole?.role_id || 0);
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   useEffect(() => {
     const observer = new MutationObserver(() => {

@@ -10,6 +10,7 @@ import { getCities, City } from '../services/cityService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import pusher from '../services/pusherService';
 import { exportToCSV } from '../utils/exportUtils';
+import { usePermissions } from '../hooks/usePermissions';
 
 const hexToRgba = (hex: string, opacity: number) => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -199,13 +200,10 @@ const Discounts: React.FC = () => {
     }
   }, []);
 
-  const hasPermission = (permission: string): boolean => {
-    const lowerRole = (userRole || '').toLowerCase().trim();
-    if (lowerRole === 'administrator' || lowerRole === 'superadmin' || roleId === 1 || roleId === 7) {
-      return true;
-    }
-    return userPermissions.includes(permission);
-  };
+  // Resolved centrally (hooks/usePermissions) so a seeded role such as
+  // Technician is answered from the role table rather than from a stored
+  // permissions array it does not have.
+  const { can: hasPermission } = usePermissions();
 
   useEffect(() => {
     selectedDiscountRef.current = selectedDiscount;

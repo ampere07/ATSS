@@ -152,7 +152,19 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
 
     // Derived here, above the loading early-return below, so the Pay Now sync hook that
     // depends on them keeps a fixed position in the hook order (react-hooks/rules-of-hooks).
-    const balance = customerDetail?.billingAccount?.accountBalance || 0;
+    const rawBalance = customerDetail?.billingAccount?.accountBalance;
+    const balance = Number(rawBalance) || 0;
+
+    // Is the balance actually known? A settled account legitimately reads 0, so only a
+    // missing/unparsable value counts as "not loaded yet" — otherwise a delayed response
+    // renders a confident ₱0 that is simply wrong.
+    //
+    // A load in progress counts as not-known too: the store publishes customerDetail as
+    // soon as the first call returns and keeps fetching, so the card can be on screen
+    // while figures are still arriving.
+    const balanceReady = !isLoading
+        && rawBalance !== null && rawBalance !== undefined
+        && String(rawBalance).trim() !== '' && !isNaN(Number(rawBalance));
 
     // An outstanding (positive) balance must be settled in full, so Pay Now is pinned to the
     // balance and locked. At zero or on a credit balance the customer chooses the amount.
@@ -166,7 +178,45 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         }
     }, [balance, isBalancePositive]);
 
-    if (isLoading && !customerDetail) return <div className="p-8 flex justify-center bg-gray-50 min-h-screen"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div></div>;
+    // Nothing at all yet: lay out the page as skeletons so the balance card never
+    // flashes a placeholder number, and the shape of what is coming is visible.
+    if (isLoading && !customerDetail) return (
+        <div className="bg-gray-50 min-h-screen p-4 md:p-8" aria-busy="true" aria-label="Loading dashboard">
+            <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2 space-y-8">
+                    <div className="rounded-3xl p-8 md:p-12 bg-slate-900">
+                        <div className="mx-auto h-3 w-40 rounded bg-white/20 animate-pulse" />
+                        <div className="mx-auto mt-4 h-12 md:h-16 w-56 md:w-72 rounded-2xl bg-white/25 animate-pulse" />
+                        <div className="mx-auto mt-4 h-3 w-64 rounded bg-white/20 animate-pulse" />
+                        <div className="mt-8 flex justify-center gap-4">
+                            <div className="h-12 w-36 rounded-full bg-white/25 animate-pulse" />
+                            <div className="h-12 w-36 rounded-full bg-white/10 animate-pulse" />
+                        </div>
+                    </div>
+                    <div className="rounded-3xl bg-white p-6 space-y-4 border border-gray-100">
+                        <div className="h-4 w-40 rounded bg-gray-200 animate-pulse" />
+                        {[0, 1, 2].map((i) => (
+                            <div key={i} className="flex items-center justify-between">
+                                <div className="space-y-2">
+                                    <div className="h-3 w-48 rounded bg-gray-200 animate-pulse" />
+                                    <div className="h-3 w-32 rounded bg-gray-100 animate-pulse" />
+                                </div>
+                                <div className="h-6 w-20 rounded bg-gray-200 animate-pulse" />
+                            </div>
+                        ))}
+                    </div>
+                </div>
+                <div className="space-y-8">
+                    <div className="rounded-3xl bg-white p-6 space-y-3 border border-gray-100">
+                        <div className="h-4 w-32 rounded bg-gray-200 animate-pulse" />
+                        <div className="h-3 w-full rounded bg-gray-100 animate-pulse" />
+                        <div className="h-3 w-5/6 rounded bg-gray-100 animate-pulse" />
+                        <div className="h-3 w-2/3 rounded bg-gray-100 animate-pulse" />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
 
     const getStatusColor = (status: string) => {
         switch (status) {
@@ -180,6 +230,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     // Use detailed data if available, otherwise fall back to auth data or placeholders
     const displayName = customerDetail?.fullName || user?.full_name || 'Customer';
     const accountNo = customerDetail?.billingAccount?.accountNo || user?.username || 'N/A';
+    // "No Plan" is a claim about the account, so it is only said once the record is
+    // here. Every customer in the database has a plan, so a blank one meant the fetch
+    // had not landed — while the fields around it still looked right because they fall
+    // back to the stored session rather than to this record.
+    const planKnown = !!customerDetail;
     const planName = customerDetail?.desiredPlan || 'No Plan';
     const address = customerDetail?.address || 'No Address';
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
@@ -343,7 +398,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                         <div className="mt-8 space-y-4 text-left">
                             <div className="flex justify-between border-b border-gray-50 pb-3">
                                 <span className="text-gray-400 text-sm">Plan</span>
-                                <span className="text-gray-900 font-bold text-sm uppercase">{planName}</span>
+                                {planKnown ? (
+                                    <span className="text-gray-900 font-bold text-sm uppercase">{planName}</span>
+                                ) : (
+                                    <span className="h-4 w-24 rounded bg-gray-200 animate-pulse" aria-label="Loading" />
+                                )}
                             </div>
                             <div className="flex justify-between border-b border-gray-50 pb-3">
                                 <span className="text-gray-400 text-sm">Installed</span>
@@ -381,22 +440,30 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                     {/* Balance Card */}
                     <div className="rounded-3xl p-8 md:p-12 text-center text-white relative overflow-hidden" style={{ background: `linear-gradient(135deg, ${colorPalette?.primary || '#0f172a'} 0%, #000000 100%)` }}>
                         <h3 className="text-white text-sm font-medium tracking-wide uppercase mb-2 opacity-80">Total Amount Due</h3>
-                        <div className="text-5xl md:text-6xl font-bold mb-4">₱{balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</div>
+                        {balanceReady ? (
+                            <div className="text-5xl md:text-6xl font-bold mb-4">₱{balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</div>
+                        ) : (
+                            <div className="mb-4 flex justify-center" aria-busy="true" aria-label="Loading total amount due">
+                                <div className="h-12 md:h-16 w-56 md:w-72 rounded-2xl bg-white/25 animate-pulse" />
+                            </div>
+                        )}
                         <div className="text-white text-sm mb-8 flex items-center justify-center space-x-2 opacity-90">
                             <span>Reference: <span className="text-white font-medium">{accountNo}</span></span>
                             {/* Due date could come from SOA service ideally */}
                             <span>|</span>
-                            <span>Due: <span className="text-white">{dueDateString}</span></span>
+                            <span>Due: {balanceReady
+                                ? <span className="text-white">{dueDateString}</span>
+                                : <span className="inline-block h-3 w-20 align-middle rounded bg-white/25 animate-pulse" />}</span>
                         </div>
 
                         <div className="flex justify-center space-x-4">
                             <button
                                 onClick={handlePayNow}
-                                disabled={isPaymentProcessing}
+                                disabled={isPaymentProcessing || !balanceReady}
                                 className="bg-white text-slate-900 px-8 py-3 rounded-full font-bold hover:bg-gray-100 transition min-w-[140px] disabled:opacity-50 disabled:cursor-not-allowed flex flex-col items-center justify-center leading-tight"
                                 style={{ color: colorPalette?.primary || '#0f172a' }}
                             >
-                                <span>{isPaymentProcessing ? 'Processing' : (pendingPayment && pendingPayment.payment_url) ? 'PROCEED PAYMENT' : 'PAY NOW'}</span>
+                                <span>{!balanceReady ? 'LOADING' : isPaymentProcessing ? 'Processing' : (pendingPayment && pendingPayment.payment_url) ? 'PROCEED PAYMENT' : 'PAY NOW'}</span>
                             </button>
                             <button
                                 onClick={() => onNavigate?.('customer-bills', 'payments')}
@@ -548,7 +615,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                                     </button>
                                     <button
                                         onClick={handleProceedToCheckout}
-                                        disabled={isPaymentProcessing || (paymentAmount > 0 && paymentAmount < balance) || paymentAmount < 1}
+                                        disabled={!balanceReady || isPaymentProcessing || (paymentAmount > 0 && paymentAmount < balance) || paymentAmount < 1}
                                         className="flex-1 px-4 py-3 rounded font-bold text-white transition-colors disabled:opacity-50"
                                         style={{ background: `linear-gradient(135deg, ${colorPalette?.primary || '#0f172a'} 0%, #000000 100%)` }}
                                     >

@@ -8,9 +8,10 @@ import {
   useWindowDimensions,
   StyleSheet,
   DeviceEventEmitter,
-  Alert
+  Alert,
+  ActivityIndicator
 } from 'react-native';
-import { X, ExternalLink, Play, Square, Paperclip } from 'lucide-react-native';
+import { X, ExternalLink, Play, Square, Paperclip, Lock } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -21,7 +22,13 @@ dayjs.extend(timezone);
 
 import { WorkOrderDetailsProps } from '../types/workOrder';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
-import { updateWorkOrder } from '../services/workOrderService';
+import { updateWorkOrder, enableWorkOrderForTechnician } from '../services/workOrderService';
+import {
+  buildTechnicianLockedWorkOrderIds,
+  isClosedForTechnicianQueue,
+  isTechnicianEnabled,
+  TECHNICIAN_LOCKED_MESSAGE,
+} from '../utils/technicianWorkOrderAccess';
 import ConfirmationModal from '../modals/MoveToJoModal';
 import StartTimerModal from '../modals/StartTimerModal';
 import { useServiceOrderContext } from '../contexts/ServiceOrderContext';
@@ -159,6 +166,86 @@ const WorkOrderDetails: React.FC<WorkOrderDetailsProps & { isDarkMode?: boolean;
   const [isStartTimerModalOpen, setIsStartTimerModalOpen] = useState(false);
   const [isStarted, setIsStarted] = useState(checkIsStarted(workOrder?.start_time));
   const [isEnded, setIsEnded] = useState(checkIsStarted(workOrder?.end_time));
+  const [isEnablingTechnician, setIsEnablingTechnician] = useState(false);
+  /**
+   * Local echo of technician_enabled after a successful enable.
+   *
+   * The list refresh is what makes the change permanent everywhere; this only
+   * keeps the button honest in the moment between the two. Cleared whenever a
+   * different work order is opened so it can never leak across records.
+   */
+  const [technicianEnabledOverride, setTechnicianEnabledOverride] = useState<boolean | null>(null);
+
+  // ── Technician queue release ────────────────────────────────────────────────
+  // Technicians work their work orders In Progress first and oldest first within
+  // that: everything else active is greyed out until either the work ahead of it
+  // moves forward or an administrator releases one early.
+
+  const isAdminUser = (userRole || '').toLowerCase() === 'administrator'
+    || (userRole || '').toLowerCase() === 'superadmin'
+    || userRoleId === 1 || userRoleId === 7;
+
+  const technicianEnabled = technicianEnabledOverride ?? isTechnicianEnabled(workOrder);
+
+  const isTechnicianViewer = userRole === 'technician' || userRoleId === 2 || String(userRoleId) === '2';
+
+  /**
+   * Is this work order still waiting its turn in the technician's queue?
+   *
+   * The same rule the list greys rows out with. Starting and editing wait until
+   * it is their next work order or an administrator releases it; reading never
+   * does. WorkOrderApiController::isWorkOrderLockedForTechnician() refuses the
+   * update either way, so gating the buttons is what keeps the technician from
+   * filling in a form that cannot be saved.
+   */
+  const technicianLocked = React.useMemo(() => {
+    if (!isTechnicianViewer || technicianEnabled || !workOrder) return false;
+    return buildTechnicianLockedWorkOrderIds(workOrders, { email: userEmail, fullName: userFullName })
+      .has(String(workOrder.id));
+  }, [isTechnicianViewer, technicianEnabled, workOrders, workOrder, userEmail, userFullName]);
+
+  // Offered for administrators on any record a technician still owes work on,
+  // including one that is deferred — that is precisely the case where they cannot
+  // pick it back up on their own. Only work that is finished, failed or cancelled
+  // has nothing left to release.
+  const shouldShowEnableTechnicianButton = () =>
+    isAdminUser && !!workOrder && !isClosedForTechnicianQueue(workOrder);
+
+  const handleEnableTechnicianClick = async () => {
+    if (isEnablingTechnician || technicianEnabled) return;
+
+    if (!workOrder?.id) {
+      setError('Cannot enable work order: Missing ID');
+      return;
+    }
+
+    setError(null);
+    setIsEnablingTechnician(true);
+
+    try {
+      const response = await enableWorkOrderForTechnician(workOrder.id);
+
+      if (response?.success) {
+        setTechnicianEnabledOverride(true);
+        setSuccessMessage('Work order enabled. The technician can now start it.');
+        setShowSuccessModal(true);
+        if (onRefresh) onRefresh();
+      } else {
+        setError((response as any)?.message || 'Failed to enable work order for the technician');
+      }
+    } catch (err: any) {
+      setError(
+        err.response?.data?.message || err.message || 'Failed to enable work order for the technician'
+      );
+    } finally {
+      setIsEnablingTechnician(false);
+    }
+  };
+
+  // A different record is a different lock state.
+  useEffect(() => {
+    setTechnicianEnabledOverride(null);
+  }, [workOrder?.id]);
   const [now, setNow] = useState(dayjs().tz('Asia/Manila').add(8, 'hour'));
 
   useEffect(() => {
@@ -473,12 +560,34 @@ const WorkOrderDetails: React.FC<WorkOrderDetailsProps & { isDarkMode?: boolean;
         </View>
 
         <View style={st.headerActions}>
+          {shouldShowEnableTechnicianButton() && (
+            <Pressable
+              style={[st.actionBtn, { backgroundColor: technicianEnabled ? '#e5e7eb' : '#059669', marginRight: 8 }]}
+              onPress={handleEnableTechnicianClick}
+              disabled={technicianEnabled || isEnablingTechnician}
+            >
+              {isEnablingTechnician && (
+                <ActivityIndicator size="small" color="#ffffff" style={{ marginRight: 6 }} />
+              )}
+              <Text style={[st.actionBtnText, { color: technicianEnabled ? '#6b7280' : '#ffffff', fontSize: isMobile ? 14 : 16 }]}>
+                {technicianEnabled ? 'Enabled' : (isEnablingTechnician ? 'Enabling...' : 'Enable')}
+              </Text>
+            </Pressable>
+          )}
+
           {(workOrder.work_status?.toLowerCase().includes('pending') || workOrder.work_status?.toLowerCase().includes('in progress')) && (
             <Pressable
-              style={[st.actionBtn, { backgroundColor: colorPalette?.primary || '#7c3aed', marginRight: 8 }]}
-              onPress={onEdit}
+              style={[st.actionBtn, { backgroundColor: technicianLocked ? '#d1d5db' : (colorPalette?.primary || '#7c3aed'), marginRight: 8 }]}
+              onPress={() => {
+                if (technicianLocked) {
+                  Alert.alert('Work Order Locked', TECHNICIAN_LOCKED_MESSAGE, [{ text: 'OK' }]);
+                  return;
+                }
+                onEdit?.();
+              }}
+              disabled={technicianLocked}
             >
-              <Text style={[st.actionBtnText, { color: '#ffffff', fontSize: isMobile ? 14 : 16 }]}>Edit</Text>
+              <Text style={[st.actionBtnText, { color: technicianLocked ? '#6b7280' : '#ffffff', fontSize: isMobile ? 14 : 16 }]}>Edit</Text>
             </Pressable>
           )}
 
@@ -488,11 +597,13 @@ const WorkOrderDetails: React.FC<WorkOrderDetailsProps & { isDarkMode?: boolean;
             <>
               {(!isStarted || (['reschedule'].includes(workOrder.work_status?.toLowerCase().trim() || '') && isStarted && isEnded)) && (
                 <Pressable
-                  style={[st.iconBtn, { backgroundColor: colorPalette?.primary || '#10b981', marginRight: 8 }]}
+                  style={[st.iconBtn, { backgroundColor: technicianLocked ? '#d1d5db' : (colorPalette?.primary || '#10b981'), marginRight: 8 }]}
                   onPress={handleStartTimer}
-                  disabled={loading}
+                  disabled={loading || technicianLocked}
                 >
-                  <Play width={18} height={18} color="#ffffff" />
+                  {technicianLocked
+                    ? <Lock width={18} height={18} color="#6b7280" />
+                    : <Play width={18} height={18} color="#ffffff" />}
                 </Pressable>
               )}
             </>

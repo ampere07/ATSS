@@ -3,7 +3,6 @@ import { View, Text, Pressable, Image, Alert, Modal, Platform } from 'react-nati
 import { Camera, X, Upload, Image as ImageIcon } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
 
 interface ImagePreviewProps {
     label: string;
@@ -13,7 +12,15 @@ interface ImagePreviewProps {
     isDarkMode?: boolean;
     colorPrimary?: string;
     required?: boolean;
-    jobOrderName?: string;
+    /**
+     * Whether taking a photo also files it in the phone's gallery there and then.
+     *
+     * On by default, which is what most forms want. Set it false on a form that
+     * saves its own photos when it is submitted (see utils/saveImagesToGallery)
+     * — otherwise every picture lands in the gallery twice, once under the
+     * picker's own name and once under the form's.
+     */
+    saveToGalleryOnCapture?: boolean;
 }
 
 const ImagePreview: React.FC<ImagePreviewProps> = ({
@@ -24,7 +31,7 @@ const ImagePreview: React.FC<ImagePreviewProps> = ({
     isDarkMode = false,
     colorPrimary = '#7c3aed',
     required = false,
-    jobOrderName
+    saveToGalleryOnCapture = true
 }) => {
     const [modalVisible, setModalVisible] = useState(false);
 
@@ -72,29 +79,20 @@ const ImagePreview: React.FC<ImagePreviewProps> = ({
         if (!result.canceled && result.assets && result.assets.length > 0) {
             const asset = result.assets[0];
 
-            // Save image to phone gallery automatically before upload
-            try {
-                const { status: mediaStatus } = await MediaLibrary.requestPermissionsAsync(true);
-                if (mediaStatus === 'granted') {
-                    let localUri = asset.uri;
-                    if (jobOrderName) {
-                        // Sanitize jobOrderName and label to form a valid filename
-                        const sanitizedJobOrderName = jobOrderName.replace(/[^a-zA-Z0-9_.-]/g, '_');
-                        const sanitizedLabel = label.replace(/[^a-zA-Z0-9_.-]/g, '_');
-                        const newFilename = `${sanitizedJobOrderName}_${sanitizedLabel}.jpg`;
-                        const newUri = `${FileSystem.cacheDirectory}${newFilename}`;
-                        await FileSystem.copyAsync({
-                            from: asset.uri,
-                            to: newUri
-                        });
-                        localUri = newUri;
+            // Save the photo to the gallery as it is taken, unless the form
+            // saves its own on submission — in which case doing it here as well
+            // would file the same picture twice under two different names.
+            if (saveToGalleryOnCapture) {
+                try {
+                    const { status: mediaStatus } = await MediaLibrary.requestPermissionsAsync(true);
+                    if (mediaStatus === 'granted') {
+                        await MediaLibrary.createAssetAsync(asset.uri);
+                    } else {
+                        console.warn('Media library permission not granted, skipping save to gallery');
                     }
-                    await MediaLibrary.createAssetAsync(localUri);
-                } else {
-                    console.warn('Media library permission not granted, skipping save to gallery');
+                } catch (mediaError) {
+                    console.error('Failed to save photo to gallery:', mediaError);
                 }
-            } catch (mediaError) {
-                console.error('Failed to save photo to gallery:', mediaError);
             }
 
             const file = {

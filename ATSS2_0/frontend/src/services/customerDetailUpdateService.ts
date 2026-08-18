@@ -1,4 +1,4 @@
-import apiClient from '../config/api';
+import apiClient, { authFetch } from '../config/api';
 
 const API_URL = process.env.REACT_APP_API_BASE_URL;
 
@@ -75,7 +75,7 @@ export const customerDetailUpdateService = {
         headers['Content-Type'] = 'application/json';
       }
 
-      const response = await fetch(`${API_URL}/customer-detail/${accountNo}`, {
+      const response = await authFetch(`${API_URL}/customer-detail/${accountNo}`, {
         method,
         headers,
         body,
