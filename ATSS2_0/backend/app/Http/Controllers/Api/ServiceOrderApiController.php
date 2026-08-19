@@ -635,6 +635,11 @@ class ServiceOrderApiController extends Controller
                 $request->filled('new_vlan') ||
                 $request->filled('new_router_modem_sn');
 
+            // Captured where the swap is detected, applied only after the writes
+            // below have landed: SmartOLT is an external HTTP API and must never be
+            // called with a database write still in flight.
+            $smartOltSync = null;
+
             if ($hasNewTechnicalDetails) {
                 Log::info('New technical details detected, updating technical_details table');
 
@@ -741,6 +746,14 @@ class ServiceOrderApiController extends Controller
                             'vlan' => $newVlan,
                         ]);
                     }
+
+                    // A replaced router is the SN actually changing. Comparing the
+                    // stored SN against the new one is what keeps a re-saved order
+                    // from unbinding an ONU that is already correctly assigned.
+                    $smartOltSync = [
+                        'old_sn' => trim((string) $technicalDetails->router_modem_sn),
+                        'new_sn' => trim((string) $newSN),
+                    ];
                 }
             }
 
@@ -909,6 +922,23 @@ class ServiceOrderApiController extends Controller
             // ──────────────────────────────────────────────────────────────────
 
             DB::table('service_orders')->where('id', $id)->update($data);
+
+            // Hand the ONU over in SmartOLT: unbind the router that came out, name the
+            // one that went in. Runs after every write above has landed, so SmartOLT is
+            // only ever told about a swap that actually persisted.
+            //
+            // Best-effort by design — a SmartOLT outage must never fail a visit the
+            // technician already saved, so the service swallows and logs every failure
+            // to the smartoltrelated channel. Idempotent: re-saving the same order
+            // skips the unbind (the SNs now match) and re-posts identical details.
+            if ($smartOltSync !== null) {
+                app(\App\Services\SmartOltService::class)->syncOnuForRouterReplacement(
+                    $serviceOrder->account_no,
+                    $smartOltSync['old_sn'],
+                    $smartOltSync['new_sn'],
+                    '[API SERVICE ORDER REPLACE ROUTER]'
+                );
+            }
 
             if (isset($data['assigned_email']) && $data['assigned_email'] !== ($serviceOrder->assigned_email ?? null)) {
                 try {

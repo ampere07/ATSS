@@ -259,6 +259,20 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         { id: 'system-logs', label: 'System Logs', icon: FileText }
       ]
     },
+    {
+      id: 'tools-group',
+      label: 'Tools',
+      icon: Wrench,
+      children: [
+        { id: 'smartolt-tool', label: 'SmartOLT Tool', icon: Network },
+        { id: 'mikrotik-radius-tool', label: 'Mikrotik Radius Tool', icon: Router },
+        // Payment reconciliation settles real money against real accounts, so it is
+        // deliberately not offered to HeadTechnician the way the network tools are.
+        // Visibility is decided by ROLE_PERMISSIONS in config/permissions.ts, which is
+        // the same key the page itself checks.
+        { id: 'xendit-reconcile-tool', label: 'Xendit Reconciliation', icon: CreditCard }
+      ]
+    },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 

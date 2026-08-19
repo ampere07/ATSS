@@ -420,6 +420,12 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     // The RADIUS retry queue. Read-only, and an operational screen rather than
     // a configuration one.
     'radius-queue',
+    // Tools suite. Every one of these mutates live state — subscriber ONUs,
+    // RADIUS accounts, posted payments — so they are granted deliberately
+    // rather than inherited from a group.
+    'smartolt-tool',
+    'mikrotik-radius-tool',
+    'xendit-reconcile-tool',
   ],
 
   [ROLE.TECHNICIAN]: [
@@ -474,6 +480,11 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'location-list',
     'lcp',
     'nap',
+    // The two network tools. Xendit Reconciliation is deliberately NOT here:
+    // it settles real money against real accounts, which is an Administrator
+    // and SuperAdmin concern rather than a field-operations one.
+    'smartolt-tool',
+    'mikrotik-radius-tool',
   ],
 };
 

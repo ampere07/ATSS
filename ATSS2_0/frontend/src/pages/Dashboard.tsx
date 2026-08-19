@@ -60,6 +60,9 @@ import LcpNapLocation from './LcpNapLocation';
 import BillingConfig from './BillingConfig';
 import RadiusConfig from './RadiusConfig';
 import SmartOltConfig from './SmartOltConfig';
+import SmartOltTool from './SmartOltTool';
+import MikrotikRadiusTool from './MikrotikRadiusTool';
+import XenditReconcileTool from './XenditReconcileTool';
 import SmsConfig from './SmsConfig';
 import SMSTemplate from './SMSTemplate';
 import EmailTemplates from './EmailTemplates';
@@ -438,6 +441,12 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <Logs />;
             case 'soa-generation':
                 return <SOAGeneration />;
+            case 'smartolt-tool':
+                return <SmartOltTool isDarkMode={isDarkMode} />;
+            case 'mikrotik-radius-tool':
+                return <MikrotikRadiusTool isDarkMode={isDarkMode} />;
+            case 'xendit-reconcile-tool':
+                return <XenditReconcileTool isDarkMode={isDarkMode} />;
             case 'settings':
                 return <Settings />;
             case 'dashboard':

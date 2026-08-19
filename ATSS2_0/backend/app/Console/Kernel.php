@@ -260,6 +260,83 @@ class Kernel extends ConsoleKernel
                  });
 
         // ===================================================================
+        // TOOLS SUITE — SmartOLT / MikroTik RADIUS reconciliation
+        // ===================================================================
+
+        // SmartOLT: refresh the ONU inventory, align ONU names to their RADIUS
+        // usernames by MAC, and unprovision ONUs that have been dark past the
+        // threshold.
+        // Uses: SmartOltReconciliationService
+        // Dependencies: SmartOLT API, MikroTik User Manager REST
+        // Logs: storage/logs/smartolt/daily-automation.log
+        //
+        // Safe if it runs late, twice, or is cut short. Every phase recomputes
+        // what is left to do from current state rather than replaying a cursor:
+        // an ONU already named for its subscriber is skipped and a deleted ONU
+        // is gone from the inventory, so a second run applies nothing. A run
+        // stopped by a SmartOLT quota limit checkpoints in `tool_jobs` and the
+        // next run resumes from there.
+        $schedule->command('cron:smartolt-daily-automation')
+                 ->dailyAt('02:15')
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onSuccess(function () {
+                     \Illuminate\Support\Facades\Log::info('SmartOLT daily automation completed successfully');
+                 })
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('SmartOLT daily automation failed');
+                 });
+
+        // MikroTik RADIUS: adopt missing PPPoE passwords, settle plan groups,
+        // enforce restriction on accounts billing has written off.
+        // Uses: RadiusReconciliationService
+        // Dependencies: MikroTik User Manager REST
+        // Logs: storage/logs/radiusreconcile/daily-reconcile.log
+        //
+        // 03:15 — an hour after the SmartOLT pass so the two never contend for
+        // the same RouterOS devices, and after the disconnect sweep so the
+        // restriction phase acts on settled billing statuses.
+        //
+        // Safe if it runs late or twice: every mutation compares current state
+        // first and skips when both sides already agree, so a re-run applies
+        // nothing. It creates no records and enqueues nothing. Account creation,
+        // deletion and duplicate resolution are deliberately NOT automated —
+        // they stay in the operator's tool.
+        $schedule->command('cron:radius-reconcile-daily')
+                 ->dailyAt('03:15')
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onSuccess(function () {
+                     \Illuminate\Support\Facades\Log::info('RADIUS daily reconciliation completed successfully');
+                 })
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('RADIUS daily reconciliation failed');
+                 });
+
+        // Tools suite: advance operator-started background jobs.
+        // Uses: SmartOltReconciliationService::driveJobs()
+        // Dependencies: SmartOLT API, MikroTik User Manager REST (per job type)
+        // Logs: storage/logs/smartolt/tool-jobs.log
+        //
+        // Every minute, because this is what decouples a sweep from the browser
+        // that started it. The tool starts a job and polls its progress; this is
+        // what actually advances it, so closing the tab no longer strands a
+        // four-thousand-ONU sync partway through.
+        //
+        // Safe if it runs late, twice, or alongside an operator with the tool
+        // still open. It starts no work of its own — it only advances rows that
+        // startJob() already created — and each job is claimed with a conditional
+        // UPDATE before any step is applied, so no two drivers can ever run the
+        // same queue index.
+        $schedule->command('cron:tool-jobs-drain')
+                 ->everyMinute()
+                 ->withoutOverlapping()
+                 ->runInBackground()
+                 ->onFailure(function () {
+                     \Illuminate\Support\Facades\Log::error('Tool job drain failed');
+                 });
+
+        // ===================================================================
         // MAINTENANCE & CLEANUP
         // ===================================================================
 
