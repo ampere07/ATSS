@@ -22,6 +22,7 @@ import {
   ChevronRight,
   Download,
   Filter,
+  SlidersHorizontal,
   RefreshCw,
   X,
 } from 'lucide-react-native';
@@ -34,6 +35,8 @@ import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { BillingDetailRecord } from '../types/billing';
 import { exportToCSV } from '../utils/exportUtils';
+import SOAFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/SOAFunnelFilter';
+import { matchesFunnelFilters, activeFunnelKeys } from '../utils/funnelFilter';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 const isDarkMode = false;
@@ -132,6 +135,8 @@ const SOA: React.FC = () => {
   const [statementDateTo, setStatementDateTo] = useState<string>('');
   const [isDateDropdownOpen, setIsDateDropdownOpen] = useState<boolean>(false);
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(false);
+  const [isFunnelFilterOpen, setIsFunnelFilterOpen] = useState<boolean>(false);
+  const [funnelFilters, setFunnelFilters] = useState<FilterValues>({});
 
   const [currentPage, setCurrentPage] = useState(1);
   const [sortColumn, setSortColumn] = useState<string | null>('id');
@@ -246,10 +251,56 @@ const SOA: React.FC = () => {
     return { all: globalFilteredRecords.length, dates: sortedDates };
   }, [globalFilteredRecords]);
 
+  // SOAFunnelFilter names its columns exactly as SOARecordUI spells its fields,
+  // so a plain lookup covers almost everything. Statement date is the exception:
+  // the display value is already localised, and Date() cannot be trusted to parse
+  // that back, so the raw column is preferred when the store kept it.
+  const readFunnelValue = useCallback((record: any, key: string) => {
+    if (key === 'statementDate') return record.statementDateRaw ?? record.statementDate;
+    return record[key];
+  }, []);
+
+  const activeFilterKeys = useMemo(() => activeFunnelKeys(funnelFilters as any), [funnelFilters]);
+
+  // Same storage key as the web build's localStorage entry, so a filter set stays
+  // recognisable across the two clients.
+  useEffect(() => {
+    AsyncStorage.getItem('soaFunnelFilters')
+      .then(saved => { if (saved) setFunnelFilters(JSON.parse(saved)); })
+      .catch(() => { });
+  }, []);
+
+  const persistFunnelFilters = useCallback(async (next: FilterValues) => {
+    setFunnelFilters(next);
+    try { await AsyncStorage.setItem('soaFunnelFilters', JSON.stringify(next)); } catch { /* ignore */ }
+  }, []);
+
+  const removeFunnelFilter = useCallback((key: string) => {
+    const next = { ...funnelFilters };
+    delete next[key];
+    persistFunnelFilters(next);
+  }, [funnelFilters, persistFunnelFilters]);
+
+  const describeFilter = (filter: any): string => {
+    if (!filter) return '';
+    if (filter.type === 'checklist') return `${(filter.value || []).length} selected`;
+    if (filter.type === 'text') return String(filter.value ?? '');
+    const from = filter.from ?? '';
+    const to = filter.to ?? '';
+    if (from && to) return `${from} - ${to}`;
+    return String(from || to || '');
+  };
+
   const filteredRecords = useMemo(() => {
     let filtered = globalFilteredRecords.filter((r: SOARecordUI) =>
       selectedDate === 'All' || r.statementDate === selectedDate
     );
+
+    if (activeFilterKeys.length > 0) {
+      filtered = filtered.filter((r: SOARecordUI) =>
+        matchesFunnelFilters(r, funnelFilters as any, readFunnelValue)
+      );
+    }
     if (sortColumn) {
       filtered = [...filtered].sort((a, b) => {
         const numericCols = ['balanceFromPreviousBill','paymentReceivedPrevious','remainingBalancePrevious','monthlyServiceFee','serviceCharge','rebate','discounts','staggered','vat','amountDue','totalAmountDue'];
@@ -273,7 +324,7 @@ const SOA: React.FC = () => {
       });
     }
     return filtered;
-  }, [globalFilteredRecords, selectedDate, sortColumn, sortDirection]);
+  }, [globalFilteredRecords, selectedDate, sortColumn, sortDirection, funnelFilters, activeFilterKeys, readFunnelValue]);
 
   const totalPages = Math.ceil(filteredRecords.length / ITEMS_PER_PAGE);
 
@@ -600,6 +651,17 @@ const SOA: React.FC = () => {
           </TouchableOpacity>
         )}
 
+        {/* Column funnel filter — the location sidebar above narrows by place,
+            this narrows by any column, the same split as the web toolbar. */}
+        {userRole !== 'customer' && (
+          <TouchableOpacity
+            style={[styles.toolBtn, activeFilterKeys.length > 0 && { borderColor: '#ef4444' }]}
+            onPress={() => setIsFunnelFilterOpen(true)}
+          >
+            <SlidersHorizontal size={18} color={activeFilterKeys.length > 0 ? '#ef4444' : TEXT} />
+          </TouchableOpacity>
+        )}
+
         {/* Pay Now for customers */}
         {userRole === 'customer' && (
           <TouchableOpacity
@@ -633,6 +695,52 @@ const SOA: React.FC = () => {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Active filter chips — same shape as the application list, so what is
+          narrowing the view is visible without reopening the drawer. */}
+      {activeFilterKeys.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={{ backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}
+          contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8 }}
+        >
+          <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1 }}>FILTERS:</Text>
+          {activeFilterKeys.map((filterKey) => {
+            const col = filterColumns.find((c: any) => c.key === filterKey);
+            return (
+              <View
+                key={filterKey}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  backgroundColor: `${primary}15`,
+                  borderRadius: 99,
+                  paddingLeft: 10,
+                  paddingRight: 6,
+                  paddingVertical: 4,
+                  borderWidth: 1,
+                  borderColor: `${primary}30`,
+                  gap: 4,
+                }}
+              >
+                <Text style={{ fontSize: 11, color: primary }}>
+                  <Text style={{ opacity: 0.7 }}>{col?.label || filterKey}: </Text>
+                  {describeFilter((funnelFilters as any)[filterKey])}
+                </Text>
+                <TouchableOpacity onPress={() => removeFunnelFilter(filterKey)}>
+                  <X size={12} color={primary} />
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+          <TouchableOpacity onPress={() => persistFunnelFilters({})} style={{ paddingHorizontal: 8 }}>
+            <Text style={{ fontSize: 11, fontWeight: '700', color: primary, textDecorationLine: 'underline' }}>
+              Clear all
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
+      )}
 
       {/* Pagination info */}
       {filteredRecords.length > 0 && (
@@ -856,6 +964,17 @@ const SOA: React.FC = () => {
           </View>
         </View>
       </Modal>
+      <SOAFunnelFilter
+        isOpen={isFunnelFilterOpen}
+        onClose={() => setIsFunnelFilterOpen(false)}
+        onApplyFilters={(next) => {
+          persistFunnelFilters(next);
+          setIsFunnelFilterOpen(false);
+          setCurrentPage(1);
+        }}
+        currentFilters={funnelFilters}
+        records={globalFilteredRecords}
+      />
     </View>
   );
 };

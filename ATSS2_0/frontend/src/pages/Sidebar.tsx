@@ -169,6 +169,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     { id: 'application-management', label: 'Application', icon: FileCheck },
     { id: 'job-order', label: 'Job Order', icon: Wrench },
     { id: 'service-order', label: 'Service Order', icon: Wrench },
+    { id: 'radius-queue', label: 'Radius Queue', icon: RefreshCw },
     { id: 'work-order', label: 'Work Order', icon: Wrench },
     { id: 'lcp-nap-location', label: 'LCP/NAP Location', icon: MapPinned },
     { id: 'sms-blast', label: 'SMS Blast', icon: MessageSquare },

@@ -122,6 +122,7 @@ export const PAGES = [
   'expenses-log',
   'smart-olt-logs',
   'radius-logs',
+  'radius-queue',
   'system-logs',
 
   'soa-generation',
@@ -259,6 +260,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'expenses-log': 'Expenses Log',
   'smart-olt-logs': 'Smart OLT Logs',
   'radius-logs': 'Radius Logs',
+  'radius-queue': 'Radius Queue',
   'system-logs': 'System Logs',
   'soa-generation': 'SOA Generation',
   'settings': 'Settings',
@@ -317,8 +319,8 @@ export const PERMISSION_GROUPS: Array<{ label: string; pages: string[] }> = [
   {
     label: 'Operations',
     pages: [
-      'application-management', 'job-order', 'service-order', 'work-order',
-      'lcp-nap-location', 'sms-blast', 'reports',
+      'application-management', 'job-order', 'service-order', 'radius-queue',
+      'work-order', 'lcp-nap-location', 'sms-blast', 'reports',
     ],
   },
   {
@@ -415,6 +417,9 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'email-logs',
     'data-logs',
     'expenses-log',
+    // The RADIUS retry queue. Read-only, and an operational screen rather than
+    // a configuration one.
+    'radius-queue',
   ],
 
   [ROLE.TECHNICIAN]: [

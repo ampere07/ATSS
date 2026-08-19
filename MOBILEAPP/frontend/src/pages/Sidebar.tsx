@@ -9,7 +9,7 @@ import {
   Menu as MenuIcon, Package, List, ClipboardCheck, X, ChevronUp,
   CreditCard, FileText, Receipt, Clock,
   MessageSquare, Network, AlertCircle, Router, Server, Wifi, Send, Cable, MapPin, Mail,
-  MessageSquareText, Wallet, Gauge, Layers, Ticket, Users
+  MessageSquareText, Wallet, Gauge, Layers, Ticket, Users, RefreshCw, Coins, FileWarning
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -92,7 +92,15 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
         { id: 'customer-bills', label: 'Bills', icon: ReceiptText },
         { id: 'customer', label: 'Customer', icon: Users },
         { id: 'transaction-list', label: 'Transactions', icon: Receipt },
+        { id: 'transactions-revert', label: 'Revert Requests', icon: RefreshCw },
+        { id: 'payment-portal', label: 'Payment Portal', icon: CreditCard },
+        { id: 'soa', label: 'Statements', icon: FileText },
+        { id: 'invoice', label: 'Invoice', icon: ReceiptText },
         { id: 'overdue', label: 'Overdue', icon: Clock },
+        // 'so-charges' is the section id the Dashboard switch and Menu page use;
+        // permissions.ts maps it to the 'so-charge' key.
+        { id: 'so-charges', label: 'SO Charge', icon: Coins },
+        { id: 'dc-notice', label: 'DC Notice', icon: FileWarning },
       ],
     },
     {

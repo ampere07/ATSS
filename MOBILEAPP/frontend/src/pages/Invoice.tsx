@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import {
   Linking,
   StyleSheet,
 } from 'react-native';
-import { RefreshCw, FileText, ChevronLeft, ChevronRight } from 'lucide-react-native';
+import { RefreshCw, FileText, ChevronLeft, ChevronRight, SlidersHorizontal, Download, X } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import InvoiceDetails from '../components/InvoiceDetails';
 import BillingDetails from '../components/CustomerDetails';
@@ -23,6 +23,9 @@ import { paymentService, PendingPayment } from '../services/paymentService';
 import { useInvoiceContext, InvoiceRecordUI } from '../contexts/InvoiceContext';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { BillingDetailRecord } from '../types/billing';
+import InvoiceFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/InvoiceFunnelFilter';
+import { matchesFunnelFilters, activeFunnelKeys } from '../utils/funnelFilter';
+import { exportToCSV } from '../utils/exportUtils';
 
 const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): BillingDetailRecord => {
   return {
@@ -85,6 +88,8 @@ const Invoice: React.FC = () => {
   const { invoiceRecords, isLoading, error, silentRefresh } = useInvoiceContext();
   const [selectedDate, setSelectedDate] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isFunnelFilterOpen, setIsFunnelFilterOpen] = useState<boolean>(false);
+  const [funnelFilters, setFunnelFilters] = useState<FilterValues>({});
   const [selectedRecord, setSelectedRecord] = useState<InvoiceRecordUI | null>(null);
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [userRole, setUserRole] = useState<string>('');
@@ -152,9 +157,53 @@ const Invoice: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // InvoiceFunnelFilter names its columns the way InvoiceRecordUI spells its
+  // fields, so a plain lookup covers almost all of them. The two dates are the
+  // exception: the displayed value is already localised and Date() cannot be
+  // trusted to read it back, so the raw column wins when the store kept one.
+  const readFunnelValue = useCallback((record: any, key: string) => {
+    if (key === 'invoiceDate') return record.invoiceDateRaw ?? record.invoiceDate;
+    if (key === 'dueDate') return record.dueDateRaw ?? record.dueDate;
+    return record[key];
+  }, []);
+
+  const activeFilterKeys = useMemo(() => activeFunnelKeys(funnelFilters as any), [funnelFilters]);
+
+  // Same storage key as the web build's localStorage entry.
+  useEffect(() => {
+    AsyncStorage.getItem('invoiceFunnelFilters')
+      .then(saved => { if (saved) setFunnelFilters(JSON.parse(saved)); })
+      .catch(() => { });
+  }, []);
+
+  const persistFunnelFilters = useCallback(async (next: FilterValues) => {
+    setFunnelFilters(next);
+    try { await AsyncStorage.setItem('invoiceFunnelFilters', JSON.stringify(next)); } catch { /* ignore */ }
+  }, []);
+
+  const removeFunnelFilter = useCallback((key: string) => {
+    const next = { ...funnelFilters };
+    delete next[key];
+    persistFunnelFilters(next);
+  }, [funnelFilters, persistFunnelFilters]);
+
+  const describeFilter = (filter: any): string => {
+    if (!filter) return '';
+    if (filter.type === 'checklist') return `${(filter.value || []).length} selected`;
+    if (filter.type === 'text') return String(filter.value ?? '');
+    const from = filter.from ?? '';
+    const to = filter.to ?? '';
+    if (from && to) return `${from} - ${to}`;
+    return String(from || to || '');
+  };
+
   const filteredRecords = useMemo(() => {
     return invoiceRecords.filter((record) => {
       const matchesDate = selectedDate === 'All' || record.invoiceDate === selectedDate;
+      const matchesFunnel =
+        activeFilterKeys.length === 0 ||
+        matchesFunnelFilters(record, funnelFilters as any, readFunnelValue);
+      if (!matchesFunnel) return false;
       const q = searchQuery.toLowerCase();
       const matchesSearch =
         searchQuery === '' ||
@@ -166,7 +215,39 @@ const Invoice: React.FC = () => {
         (record.transactionId && record.transactionId.toLowerCase().includes(q));
       return matchesDate && matchesSearch;
     });
-  }, [invoiceRecords, selectedDate, searchQuery]);
+  }, [invoiceRecords, selectedDate, searchQuery, funnelFilters, activeFilterKeys, readFunnelValue]);
+
+  const handleExport = useCallback(async () => {
+    if (filteredRecords.length === 0) return;
+
+    // The columns the web export writes, in the same order.
+    const cols = [
+      { key: 'accountNo', label: 'Account No.' },
+      { key: 'fullName', label: 'Full Name' },
+      { key: 'contactNumber', label: 'Contact Number' },
+      { key: 'emailAddress', label: 'Email Address' },
+      { key: 'address', label: 'Address' },
+      { key: 'plan', label: 'Plan' },
+      { key: 'invoiceDate', label: 'Invoice Date' },
+      { key: 'dueDate', label: 'Due Date' },
+      { key: 'invoiceBalance', label: 'Invoice Balance' },
+      { key: 'serviceCharge', label: 'Service Charge' },
+      { key: 'rebate', label: 'Rebate' },
+      { key: 'discounts', label: 'Discounts' },
+      { key: 'staggered', label: 'Staggered' },
+      { key: 'totalAmount', label: 'Total Amount' },
+      { key: 'receivedPayment', label: 'Received Payment' },
+      { key: 'status', label: 'Invoice Status' },
+      { key: 'paymentPortalLogRef', label: 'Reference No.' },
+      { key: 'transactionId', label: 'Transaction ID' },
+    ];
+
+    try {
+      await exportToCSV('invoices_export', cols, filteredRecords, (record: any, key: string) => record[key]);
+    } catch (err) {
+      console.error('Invoice export failed:', err);
+    }
+  }, [filteredRecords]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -344,6 +425,23 @@ const Invoice: React.FC = () => {
               <Text style={styles.payNowText}>{isPaymentProcessing ? '...' : 'Pay Now'}</Text>
             </TouchableOpacity>
           ) : null}
+          {userRole !== 'customer' ? (
+            <>
+              <TouchableOpacity
+                onPress={() => setIsFunnelFilterOpen(true)}
+                style={[styles.iconBtn, { backgroundColor: activeFilterKeys.length > 0 ? '#ef4444' : primaryColor }]}
+              >
+                <SlidersHorizontal size={16} color="#fff" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleExport}
+                disabled={isLoading || filteredRecords.length === 0}
+                style={[styles.iconBtn, { backgroundColor: primaryColor, opacity: filteredRecords.length === 0 ? 0.5 : 1 }]}
+              >
+                <Download size={16} color="#fff" />
+              </TouchableOpacity>
+            </>
+          ) : null}
           <TouchableOpacity onPress={handleRefresh} disabled={isLoading} style={[styles.iconBtn, { backgroundColor: primaryColor }]}>
             {isLoading ? <ActivityIndicator size="small" color="#fff" /> : <RefreshCw size={16} color="#fff" />}
           </TouchableOpacity>
@@ -365,6 +463,47 @@ const Invoice: React.FC = () => {
                 </TouchableOpacity>
               );
             })}
+          </ScrollView>
+        ) : null}
+
+        {/* Active funnel chips — what is narrowing the list, without reopening
+            the drawer. Same shape as the application and SOA screens. */}
+        {activeFilterKeys.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+            <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1, alignSelf: 'center' }}>FILTERS:</Text>
+            {activeFilterKeys.map((filterKey) => {
+              const col = filterColumns.find((c: any) => c.key === filterKey);
+              return (
+                <View
+                  key={filterKey}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: `${primaryColor}15`,
+                    borderRadius: 99,
+                    paddingLeft: 10,
+                    paddingRight: 6,
+                    paddingVertical: 4,
+                    borderWidth: 1,
+                    borderColor: `${primaryColor}30`,
+                    gap: 4,
+                  }}
+                >
+                  <Text style={{ fontSize: 11, color: primaryColor }}>
+                    <Text style={{ opacity: 0.7 }}>{col?.label || filterKey}: </Text>
+                    {describeFilter((funnelFilters as any)[filterKey])}
+                  </Text>
+                  <TouchableOpacity onPress={() => removeFunnelFilter(filterKey)}>
+                    <X size={12} color={primaryColor} />
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+            <TouchableOpacity onPress={() => persistFunnelFilters({})} style={{ paddingHorizontal: 8, alignSelf: 'center' }}>
+              <Text style={{ fontSize: 11, fontWeight: '700', color: primaryColor, textDecorationLine: 'underline' }}>
+                Clear all
+              </Text>
+            </TouchableOpacity>
           </ScrollView>
         ) : null}
       </View>
@@ -532,6 +671,16 @@ const Invoice: React.FC = () => {
           </View>
         </View>
       </Modal>
+      <InvoiceFunnelFilter
+        isOpen={isFunnelFilterOpen}
+        onClose={() => setIsFunnelFilterOpen(false)}
+        onApplyFilters={(next) => {
+          persistFunnelFilters(next);
+          setIsFunnelFilterOpen(false);
+          setCurrentPage(1);
+        }}
+        currentFilters={funnelFilters}
+      />
     </View>
   );
 };

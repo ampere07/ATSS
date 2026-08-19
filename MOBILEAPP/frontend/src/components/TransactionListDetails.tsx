@@ -23,6 +23,8 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { transactionService } from '../services/transactionService';
 import TransactionFormModal from '../modals/TransactionFormModal';
+import TransactionRevertModal from '../modals/TransactionRevertModal';
+import { usePermissions } from '../hooks/usePermissions';
 import { relatedDataService } from '../services/relatedDataService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from './common/LoadingModalGlobal';
@@ -60,6 +62,8 @@ interface Transaction {
   };
   payment_method_info?: { payment_method: string };
   processor?: { email_address?: string };
+  /** Set once a revert request exists for this transaction; blocks filing a second. */
+  revert_request?: unknown;
 }
 
 interface TransactionListDetailsProps {
@@ -87,6 +91,8 @@ const TransactionListDetails: React.FC<TransactionListDetailsProps> = ({
 }) => {
   const [loading, setLoading] = useState(false);
   const [loadingPercentage, setLoadingPercentage] = useState(0);
+  const [showRevertRequestModal, setShowRevertRequestModal] = useState(false);
+  const { can } = usePermissions();
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [expandedInvoices, setExpandedInvoices] = useState(false);
   const [relatedInvoices, setRelatedInvoices] = useState<any[]>([]);
@@ -230,36 +236,17 @@ const TransactionListDetails: React.FC<TransactionListDetailsProps> = ({
     );
   };
 
+  /**
+   * Opens the revert request form.
+   *
+   * This used to call transactionService.revertTransaction() straight away, which
+   * reversed the payment on the spot and skipped the approval workflow the Revert
+   * Requests screen exists to serve. The web build routes the same button through
+   * this form — it files a request at status 'pending' for someone else to approve
+   * — and its direct-revert path is dead code, so the two now behave the same way.
+   */
   const handleRevertRequest = () => {
-    Alert.alert(
-      'Revert Transaction',
-      'Are you sure you want to revert this transaction?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Revert',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              setLoading(true);
-              setLoadingPercentage(40);
-              const result = await transactionService.revertTransaction(transaction.id, await getCurrentUserEmail());
-              setLoadingPercentage(100);
-              setLoading(false);
-              if (result.success) {
-                Alert.alert('Success', result.message || 'Transaction reverted successfully');
-                onApprovalSuccess?.();
-              } else {
-                Alert.alert('Error', result.message || 'Failed to revert transaction');
-              }
-            } catch (err: any) {
-              setLoading(false);
-              Alert.alert('Error', `Failed to revert: ${err.message || err}`);
-            }
-          },
-        },
-      ]
-    );
+    setShowRevertRequestModal(true);
   };
 
   const handleDelete = () => {
@@ -341,8 +328,12 @@ const TransactionListDetails: React.FC<TransactionListDetailsProps> = ({
           { key: 'failed', label: 'Mark Failed', Icon: XCircle, onPress: handleMarkAsFailed, tone: 'danger' as const },
         ]
       : []),
-    ...(statusLower === 'done' || statusLower === 'completed'
-      ? [{ key: 'revert', label: 'Revert', Icon: RotateCcw, onPress: handleRevertRequest, tone: 'danger' as const }]
+    // Same three conditions as the web: the permission key, a completed
+    // transaction, and no request already filed against it.
+    ...((statusLower === 'done' || statusLower === 'completed')
+      && can('transaction-list.revert-request')
+      && !transaction.revert_request
+      ? [{ key: 'revert', label: 'Revert Request', Icon: RotateCcw, onPress: handleRevertRequest, tone: 'danger' as const }]
       : []),
     { key: 'edit', label: 'Edit', Icon: Edit3, onPress: () => setShowEditModal(true) },
     { key: 'delete', label: 'Delete', Icon: Trash2, onPress: handleDelete, tone: 'danger' as const },
@@ -593,6 +584,16 @@ const TransactionListDetails: React.FC<TransactionListDetailsProps> = ({
             initialTransactionData={transaction}
           />
         )}
+
+        <TransactionRevertModal
+          isOpen={showRevertRequestModal}
+          onClose={() => setShowRevertRequestModal(false)}
+          transactionId={transaction.id}
+          onSuccess={() => {
+            setShowRevertRequestModal(false);
+            onApprovalSuccess?.();
+          }}
+        />
       </View>
     </Modal>
   );

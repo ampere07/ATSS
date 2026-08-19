@@ -182,6 +182,8 @@ Route::put('/smart-olt/{id}', [\App\Http\Controllers\SmartOltController::class ,
 Route::delete('/smart-olt/{id}', [\App\Http\Controllers\SmartOltController::class , 'destroy']);
 Route::get('/reconnection-logs', [ReconnectionLogsController::class , 'index']);
 Route::get('/data-logs', [\App\Http\Controllers\Api\DataLogsController::class , 'index']);
+// The RADIUS retry queue, read-only.
+Route::get('/radius-queue', [\App\Http\Controllers\Api\RadiusQueueController::class , 'index']);
 
 // File-based Log Viewers (SmartOLT & Radius)
 Route::get('/file-logs/{type}', [\App\Http\Controllers\FileLogController::class, 'getLogFile']);

@@ -19,6 +19,7 @@ import ReconnectionLogs from './ReconnectionLogs';
 import SmsLogs from './SmsLogs';
 import EmailLogs from './EmailLogs';
 import DataLogs from './DataLogs';
+import RadiusQueue from './radiusqueue';
 import FileLogViewer from './FileLogViewer';
 import Sidebar from './Sidebar';
 import Header from './Header';
@@ -357,6 +358,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <FileLogViewer type="smartolt" title="Smart OLT Logs" />;
             case 'radius-logs':
                 return <FileLogViewer type="radius" title="Radius Logs" />;
+            case 'radius-queue':
+                return <RadiusQueue />;
             case 'agent-management':
                 return <UserManagement agentOnly />;
             case 'user-management':

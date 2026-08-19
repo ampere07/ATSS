@@ -124,6 +124,7 @@ final class Permissions
         'expenses-log',
         'smart-olt-logs',
         'radius-logs',
+        'radius-queue',
         'system-logs',
 
         'soa-generation',
@@ -287,6 +288,10 @@ final class Permissions
             'email-logs',
             'data-logs',
             'expenses-log',
+            // The RADIUS retry queue. Read-only, and an operational screen
+            // rather than a configuration one, so it sits with the roles that
+            // chase failed disconnects rather than with Settings.
+            'radius-queue',
         ],
 
         // Field technician: their own job orders and service orders, plus the
