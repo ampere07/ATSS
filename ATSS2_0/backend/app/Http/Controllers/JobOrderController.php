@@ -812,8 +812,13 @@ class JobOrderController extends Controller
             
             if (($data['onsite_status'] ?? null) === 'Done' && $oldStatus !== 'Done') {
                 $this->broadcastJobOrderDone($jobOrder);
-                
-                // Trigger RADIUS account creation
+
+                // Trigger RADIUS account creation.
+                //
+                // Deliberately synchronous: the subscriber has to be able to
+                // authenticate the moment the visit is saved, so a Done that did not
+                // reach RADIUS is not a Done. Once every attempt is spent the update
+                // fails, and the technician is shown what actually went wrong.
                 $radiusResult = $this->createRadiusAccountInternal($jobOrder);
                 if (!$radiusResult['success']) {
                     $detailedError = $radiusResult['error'] ?? $radiusResult['message'] ?? 'radius api error occured contact support';
@@ -916,13 +921,25 @@ class JobOrderController extends Controller
                 'trace' => $e->getTraceAsString()
             ]);
 
-            // Precise mapping as requested by user
-            if (str_contains($errorMessage, 'Failed to connect to RADIUS server') || 
-                str_contains($errorMessage, 'Connection refused') || 
-                str_contains($errorMessage, 'cURL error 7')) {
+            // Precise mapping as requested by user.
+            // cURL 7 is a refused connection, 28 a timeout, 6/35 a DNS or TLS
+            // failure — all of them mean the same thing to a technician: the
+            // server could not be reached. Only 7 was matched before, so a
+            // timeout fell through and showed the raw cURL string instead.
+            if (str_contains($errorMessage, 'Failed to connect to RADIUS server') ||
+                str_contains($errorMessage, 'Connection refused') ||
+                str_contains($errorMessage, 'Timeout was reached') ||
+                str_contains($errorMessage, 'cURL error 6') ||
+                str_contains($errorMessage, 'cURL error 7') ||
+                str_contains($errorMessage, 'cURL error 28') ||
+                str_contains($errorMessage, 'cURL error 35')) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Radius Offline',
+                    // Name the actual failure rather than just "Radius Offline" —
+                    // a timeout, a refused port and a TLS failure need different
+                    // people to fix them, and the technician on site is the one
+                    // who has to relay it.
+                    'message' => 'Failed to connect to RADIUS server: ' . $this->describeConnectionFailure($errorMessage),
                     'error' => $errorMessage
                 ], 400);
             }
@@ -959,6 +976,33 @@ class JobOrderController extends Controller
                 'error' => $errorMessage,
             ], 500);
         }
+    }
+
+    /**
+     * Turn a raw cURL failure into the one line that says what to go and fix.
+     *
+     * The underlying message is still returned in the 'error' field; this is the
+     * part a technician can read off the screen and pass on.
+     */
+    private function describeConnectionFailure(string $errorMessage): string
+    {
+        if (str_contains($errorMessage, 'cURL error 28') || str_contains($errorMessage, 'Timeout was reached')) {
+            return 'no response before the timeout. The server is offline, or a firewall is dropping the connection.';
+        }
+
+        if (str_contains($errorMessage, 'cURL error 7') || str_contains($errorMessage, 'Connection refused')) {
+            return 'the connection was refused. The server is reachable but nothing is listening on that port.';
+        }
+
+        if (str_contains($errorMessage, 'cURL error 6')) {
+            return 'the host name could not be resolved. Check the IP or host in the RADIUS config.';
+        }
+
+        if (str_contains($errorMessage, 'cURL error 35')) {
+            return 'the secure connection failed. Check whether the RADIUS config should be http instead of https.';
+        }
+
+        return 'the server could not be reached.';
     }
 
     private function broadcastJobOrderDone($jobOrder)
@@ -2011,8 +2055,23 @@ class JobOrderController extends Controller
                 'password' => $pppoePassword
             ];
 
-            // Try radius_config #1 up to 3 times; if it never succeeds, fall back to #2.
-            $maxAttemptsPerConfig = 3;
+            // Try radius_config #1 up to 5 times; if it never succeeds, fall back to #2.
+            //
+            // The attempts are spaced out rather than fired back to back, so a
+            // server that is rebooting or briefly saturated gets a chance to answer
+            // instead of having all five attempts spent inside the same second.
+            // The gaps grow (1s, 2s, 3s, 4s) and are only taken between attempts,
+            // never after the last one.
+            //
+            // The whole loop has to finish inside the request, so the budget is
+            // bounded: 5 attempts x 3s connect + 10s of waiting is ~25s per config,
+            // ~50s if both are tried. The explicit timeouts matter here — the
+            // framework defaults (10s connect, 30s total) would make the same loop
+            // take minutes and blow past PHP's max_execution_time.
+            $maxAttemptsPerConfig = 5;
+            $retryWaitSeconds = [1, 2, 3, 4];
+            $connectTimeout = 3;
+            $requestTimeout = 8;
             $positionsToTry = [1];
             if ($configs->count() >= 2) {
                 $positionsToTry[] = 2;
@@ -2038,11 +2097,25 @@ class JobOrderController extends Controller
                 ]);
 
                 for ($attempt = 1; $attempt <= $maxAttemptsPerConfig; $attempt++) {
+                    // Wait before every attempt except the first.
+                    if ($attempt > 1) {
+                        $wait = $retryWaitSeconds[$attempt - 2] ?? end($retryWaitSeconds);
+                        \Log::channel('radiusrelated')->info('Waiting before RADIUS retry for JobOrder: ' . $id, [
+                            'job_order_id'  => $id,
+                            'position'      => $position,
+                            'next_attempt'  => $attempt,
+                            'wait_seconds'  => $wait,
+                        ]);
+                        sleep($wait);
+                    }
+
                     try {
                         $response = Http::withOptions([
                             'verify' => false
                         ])
                         ->withBasicAuth($radiusUsername, $radiusPassword)
+                        ->connectTimeout($connectTimeout)
+                        ->timeout($requestTimeout)
                         ->put($radiusUrl, $payload);
 
                         $statusCode = $response->status();
@@ -2064,14 +2137,19 @@ class JobOrderController extends Controller
                             'radius_config_id' => $radiusConfig->id,
                             'radius_ip' => $radiusConfig->ip,
                         ]);
+
+                        // 4xx other than a lock/conflict is a rejection of this exact
+                        // payload — the same PUT will be rejected identically.
+                        if ($statusCode >= 400 && $statusCode < 500 && $statusCode !== 409 && $statusCode !== 429) {
+                            break;
+                        }
                     } catch (\Exception $mikrotikException) {
                         $radiusError = $mikrotikException->getMessage();
                         $lastFailureWasConnection = true;
                         \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [
                             'error' => $radiusError,
-                            'trace' => $mikrotikException->getTraceAsString(),
                             'position' => $position,
-                            'attempt' => $attempt,
+                            'attempt' => $attempt . '/' . $maxAttemptsPerConfig,
                             'radius_config_id' => $radiusConfig->id,
                             'radius_ip' => $radiusConfig->ip,
                         ]);

@@ -309,6 +309,7 @@ class AgentInvoiceService
                 'u.organization_id',
                 'a.team_name',
                 'ab.incentives_value',
+                'ab.quota',
                 'ab.commission'
             );
 
@@ -328,6 +329,9 @@ class AgentInvoiceService
                 'unit_price'      => $row->incentives_value !== null && (float) $row->incentives_value > 0
                     ? (float) $row->incentives_value
                     : (float) config('agent_invoices.unit_price', 100),
+                // Referrals needed to earn the incentive once. Zero means the
+                // agent is not on the quota scheme and bills no incentive.
+                'quota'           => (int) ($row->quota ?? 0),
                 // The agent's own commission rate, read the same way the payout
                 // screens read it. Each referral on the invoice earns this, so a
                 // team whose members are on different rates still bills each
@@ -434,7 +438,25 @@ class AgentInvoiceService
         $unitPrice = (float) ($owner['members'][0]['unit_price'] ?? config('agent_invoices.unit_price', 100));
         $count     = count($billable);
 
-        $totalAmount     = round($count * $unitPrice, 2);
+        // The incentive is earned by REACHING the quota, once per completed
+        // quota — not by each referral. 25 customers against a quota of 10 bill
+        // two incentives.
+        //
+        // A quota of 0 means the agent is not on the incentive scheme, so no
+        // incentive is billed; their commission (below) is untouched by this.
+        //
+        // WARNING — the remainder is lost, unlike in AgentIncentiveService.
+        // Every billable customer is written to agent_invoice_customers below
+        // and the unique key on (owner_key, application_id) bars them from any
+        // later invoice, so the 5 left over here never count toward a future
+        // quota. An owner installing fewer than `quota` customers in a week
+        // therefore bills no incentive at all, ever, while the cron pays them
+        // because it carries its remainder forward. Counting per invoice period
+        // is what the old per-referral rule made harmless; under a quota rule it
+        // needs the count to span periods.
+        $quota           = (int) ($owner['members'][0]['quota'] ?? 0);
+        $quotasReached   = $quota > 0 ? intdiv($count, $quota) : 0;
+        $totalAmount     = round($quotasReached * $unitPrice, 2);
         $installationFee = (float) config('agent_invoices.installation_fee', 0);
 
         // Commission is earned per referral, at the rate of the agent who
@@ -523,14 +545,24 @@ class AgentInvoiceService
         $summary['amount_invoiced']  += $subtotal;
 
         $this->writeVerbose(sprintf(
-            '%s   %d customer(s) × ₱%s = ₱%s, commission ₱%s, installation fee ₱%s',
+            '%s   %d customer(s), quota %s → %d completed quota(s) × ₱%s = ₱%s, commission ₱%s, installation fee ₱%s',
             $tag,
             $count,
+            $quota > 0 ? (string) $quota : 'not set',
+            $quotasReached,
             number_format($unitPrice, 2),
             number_format($totalAmount, 2),
             number_format($commission, 2),
             number_format($installationFee, 2)
         ));
+
+        if ($quota > 0 && ($count % $quota) !== 0) {
+            $this->writeVerbose(sprintf(
+                '%s   %d customer(s) short of the next quota — carried to a later invoice',
+                $tag,
+                $count % $quota
+            ));
+        }
 
         $this->writeLog(
             "{$tag} ✓ SUCCESS - {$invoice->invoice_number} issued — {$count} customer(s), subtotal ₱"

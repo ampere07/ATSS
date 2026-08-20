@@ -15,6 +15,29 @@ class RadiusStatusSyncService
     private const MAX_RETRIES = 3;
     private const RETRY_DELAY = 2;
 
+    /**
+     * A connection failure is not worth three tries. Nothing answered, so each
+     * attempt costs a full timeout and the next one will cost the same; one retry
+     * covers a dropped packet, after that the server is down.
+     */
+    private const MAX_CONNECTION_ATTEMPTS = 2;
+
+    private const CONNECT_TIMEOUT = 3;
+    private const REQUEST_TIMEOUT = 15;
+
+    /**
+     * Only the fields this sync actually reads.
+     *
+     * Asking User Manager for whole records makes it serialise every attribute of
+     * every subscriber — the expensive part of this job on a RouterOS box, and the
+     * reason a sync can leave it too busy to accept new connections. `.proplist`
+     * cuts the response to these columns. A build that does not understand it
+     * rejects the request, and callRadiusApiForConfig() then drops the parameter
+     * and asks for the full record set instead.
+     */
+    private const USER_PROPS    = '.id,name,group,disabled';
+    private const SESSION_PROPS = '.id,user,user-address,calling-station-id,upload,download';
+
     public function syncRadiusStatus(): array
     {
         $stats = [
@@ -151,7 +174,7 @@ class RadiusStatusSyncService
 
         foreach ($radiusConfigs as $index => $config) {
             $label = 'Radius Config ' . ($index + 1);
-            $response = $this->callRadiusApiForConfig($config, '/rest/user-manage/user', 'GET');
+            $response = $this->callRadiusApiForConfig($config, '/rest/user-manage/user', 'GET', self::USER_PROPS);
 
             if ($response === null || !is_array($response)) {
                 $perConfig[$label] = 0;
@@ -213,7 +236,7 @@ class RadiusStatusSyncService
 
         foreach ($radiusConfigs as $index => $config) {
             $label = 'Radius Config ' . ($index + 1);
-            $response = $this->callRadiusApiForConfig($config, '/rest/user-manage/session', 'GET');
+            $response = $this->callRadiusApiForConfig($config, '/rest/user-manage/session', 'GET', self::SESSION_PROPS);
 
             if ($response === null || !is_array($response)) {
                 $perConfig[$label] = 0;
@@ -284,8 +307,6 @@ class RadiusStatusSyncService
                 $group = null;
                 $sessionId = null;
                 $ip = null;
-                $mac = null;
-                $download = null;
                 $mac = null;
                 $download = null;
                 $upload = null;
@@ -368,24 +389,31 @@ class RadiusStatusSyncService
     }
 
     /**
-     * Call the RADIUS API for a SINGLE config, trying https then http with retries.
+     * Call the RADIUS API for a SINGLE config, with retries.
      * Returns the decoded array on success, or null if this server is unreachable —
      * the caller isolates the failure and continues with the other server(s).
+     *
+     * The protocol order comes from the config's own ssl_type, via the same
+     * resolver the rest of the app uses, with the other protocol kept as a
+     * fallback. It used to be hardcoded https-then-http: against an http-only
+     * server every run opened three doomed TLS handshakes per path per config and
+     * waited out the timeout on each before getting to the protocol that works.
      */
-    private function callRadiusApiForConfig($config, string $path, string $method): ?array
+    private function callRadiusApiForConfig($config, string $path, string $method, ?string $proplist = null): ?array
     {
-        $protocols = ['https', 'http'];
+        $resolver = app(RadiusServerResolver::class);
 
-        foreach ($protocols as $protocol) {
-            $url = sprintf('%s://%s:%s%s', $protocol, $config->ip, $config->port, $path);
+        foreach ($resolver->baseUrlsFor($config) as $baseUrl) {
+            $connectionFailures = 0;
 
             for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
+                $url = $baseUrl . $path . ($proplist !== null ? '?.proplist=' . $proplist : '');
+
                 try {
                     $response = Http::withBasicAuth($config->username, $config->password)
-                        ->withOptions([
-                            'verify' => false,
-                            'timeout' => 5,
-                        ])
+                        ->withOptions(['verify' => false])
+                        ->connectTimeout(self::CONNECT_TIMEOUT)
+                        ->timeout(self::REQUEST_TIMEOUT)
                         ->$method($url);
 
                     if ($response->successful()) {
@@ -399,12 +427,30 @@ class RadiusStatusSyncService
                         'body' => $response->body()
                     ]);
 
+                    // The server answered but refused the request. If we narrowed
+                    // the field list, that is the most likely reason — drop it and
+                    // ask for whole records for the rest of this call.
+                    if ($proplist !== null) {
+                        Log::info('RADIUS API rejected .proplist; retrying with full records', [
+                            'url' => $url,
+                        ]);
+                        $proplist = null;
+                        continue;
+                    }
+
                 } catch (\Exception $e) {
+                    $connectionFailures++;
                     Log::warning('RADIUS API request exception', [
                         'url' => $url,
                         'attempt' => $attempt,
                         'error' => $e->getMessage()
                     ]);
+
+                    // Nothing is answering on this protocol — stop spending
+                    // timeouts on it and let the fallback protocol have a go.
+                    if ($connectionFailures >= self::MAX_CONNECTION_ATTEMPTS) {
+                        break;
+                    }
                 }
 
                 if ($attempt < self::MAX_RETRIES) {

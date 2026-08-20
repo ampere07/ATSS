@@ -14,11 +14,14 @@ use Throwable;
  *
  * For each agent it counts the agent's COMPLETED ("Done") Job Orders that have
  * not yet been counted, and for every full multiple of the agent's quota it
- * pays the configured `incentives_value` for EACH Job Order in that quota:
+ * pays the configured `incentives_value` ONCE:
  *
- *     incentive earned = quota x incentives_value
+ *     incentive earned = number of completed quotas x incentives_value
  *
- * A quota of 10 with an incentive value of 100 earns 1,000 per completed quota.
+ * A quota of 10 with an incentive value of 100 earns 100 per completed quota.
+ * Reaching the quota is what earns the incentive; the referrals inside it are
+ * what it takes to get there, not separately paid units. (Commission is the
+ * per-referral part of the scheme and is unaffected by this.)
  *
  * Each full quota cycle is a "batch". An agent with 20 completed Job Orders and
  * a quota of 10 is awarded 2 batches in one run (10 Job Orders tagged to each),
@@ -259,27 +262,30 @@ class AgentIncentiveService
         $processCount  = $cycles * $quota;
         $idsToProcess  = array_slice($jobOrderIds, 0, $processCount);
 
-        // The incentive value is what ONE referral earns, so a completed quota
-        // pays for every referral in it: quota x incentive value. A quota of 10
-        // at 100 each earns 1,000, not 100.
+        // Reaching the quota is what earns the incentive, so a completed cycle
+        // pays the incentive value ONCE — not once per referral in it. A quota
+        // of 10 at 100 earns 100 per completed quota, not 1,000.
         //
-        // Summed from each job order's own stored rate rather than multiplying
-        // one figure, so a quota made up of referrals approved at different
-        // rates pays what each was actually settled at. Where every job order
-        // carries the same rate this is exactly quota x value.
-        //
-        // This is also what the history records — one row per job order, each
-        // carrying its own value — so the balance agrees with the ledger that
-        // explains it.
-        $awardFor = function (array $ids) use ($rateFor): float {
-            $sum = 0.0;
-            foreach ($ids as $id) {
-                $sum += $rateFor[$id] ?? 0.0;
+        // The rate applied is the one carried by the job order that COMPLETED
+        // the cycle, so a batch pays what was in force at the moment the quota
+        // was reached. Job orders are consumed oldest-first, so that is the
+        // most recent referral in the batch.
+        $awardForCycle = function (array $cycleIds) use ($rateFor): float {
+            if (empty($cycleIds)) {
+                return 0.0;
             }
-            return round($sum, 2);
+            $completingId = end($cycleIds);
+            return round((float) ($rateFor[$completingId] ?? 0.0), 2);
         };
 
-        $totalAward = $awardFor($idsToProcess);
+        // Worked out per cycle up front: the same figures drive the log, the
+        // ledger rows and the balance, so the three cannot drift apart.
+        $cycleAwards = [];
+        for ($c = 0; $c < $cycles; $c++) {
+            $cycleAwards[$c] = $awardForCycle(array_slice($idsToProcess, $c * $quota, $quota));
+        }
+
+        $totalAward = round(array_sum($cycleAwards), 2);
         $awardStr      = number_format($totalAward, 2, '.', ''); // numeric-only, safe for raw SQL
         $now           = Carbon::now();
         $orgId         = $balance->organization_id ?? null;
@@ -294,15 +300,17 @@ class AgentIncentiveService
         $endBatch   = $startBatch + $cycles - 1;
 
         $this->writeLog("  [CALC] Quota reached x{$cycles} → awarding " . number_format($totalAward, 2)
-            . " (summed from the rate each job order was approved at, {$quota} per batch)"
+            . " (the incentive value once per completed quota of {$quota}, not once per job order)"
             . " — batch(es) {$startBatch}" . ($cycles > 1 ? "-{$endBatch}" : ""));
 
         // Per-cycle detail (auditable, mirrors AutoDisconnect's per-item logging).
         for ($c = 0; $c < $cycles; $c++) {
             $cycleIds     = array_slice($idsToProcess, $c * $quota, $quota);
             $batchNumber  = $startBatch + $c;
-            $this->writeLog("    [BATCH {$batchNumber}] (cycle " . ($c + 1) . "/{$cycles}) +" . number_format($awardFor($cycleIds), 2)
-                . " (" . count($cycleIds) . " job order(s)) for job order ID(s): " . implode(', ', $cycleIds));
+            $completingId = end($cycleIds);
+            $this->writeLog("    [BATCH {$batchNumber}] (cycle " . ($c + 1) . "/{$cycles}) +" . number_format($cycleAwards[$c], 2)
+                . " (quota of " . count($cycleIds) . " completed by job order #{$completingId})"
+                . " for job order ID(s): " . implode(', ', $cycleIds));
         }
 
         $this->writeLog("  [DB] Recording {$processCount} job order(s) to agent_incentive_history and updating balance...");
@@ -310,20 +318,27 @@ class AgentIncentiveService
         // All-or-nothing per agent: record the ledger rows and bump the balance
         // together. If the history insert collides (UNIQUE job_order_id) the whole
         // award rolls back, so a Job Order can never be paid without being recorded.
-        DB::transaction(function () use ($idsToProcess, $quota, $rateFor, $orgId, $now, $balance, $awardStr, $startBatch) {
+        DB::transaction(function () use ($idsToProcess, $quota, $cycleAwards, $orgId, $now, $balance, $awardStr, $startBatch) {
             $rows = [];
             foreach ($idsToProcess as $index => $jobOrderId) {
                 // Every $quota job orders form one cycle → the next batch number.
-                $batchNumber = $startBatch + intdiv($index, $quota);
+                $cycleIndex  = intdiv($index, $quota);
+                $batchNumber = $startBatch + $cycleIndex;
+
+                // The award belongs to the cycle, not to each job order in it.
+                // It is recorded against the job order that COMPLETED the cycle
+                // — the one whose arrival earned it — and the rest of the batch
+                // carries 0. Every job order is still recorded (that is what
+                // stops it being counted twice), and summing the column over the
+                // history reproduces the balance exactly.
+                $completesCycle = (($index + 1) % $quota) === 0;
+
                 $rows[] = [
                     'agent_id'        => (int) $balance->agent_id,
                     'job_order_id'    => $jobOrderId,
                     'quota_reached'   => $quota,
                     'batch_number'    => $batchNumber,
-                    // The rate this job order was approved at, so the ledger
-                    // explains the amount rather than merely restating today's
-                    // setting.
-                    'incentive_value' => $rateFor[$jobOrderId] ?? 0.0,
+                    'incentive_value' => $completesCycle ? ($cycleAwards[$cycleIndex] ?? 0.0) : 0.0,
                     'organization_id' => $orgId,
                     'processed_at'    => $now,
                     'created_at'      => $now,

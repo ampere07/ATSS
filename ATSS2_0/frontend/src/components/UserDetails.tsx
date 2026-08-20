@@ -85,7 +85,7 @@ const UserDetails: React.FC<UserDetailsProps> = ({
     'organization',
     'activeStatus',
     'memberSince',
-    ...(isAgent ? ['commissionRate'] : [])
+    ...(isAgent ? ['commissionRate', 'quota', 'incentiveValue'] : [])
   ];
 
   const [fieldVisibility, setFieldVisibility] = useState<Record<string, boolean>>(() => {
@@ -150,7 +150,9 @@ const UserDetails: React.FC<UserDetailsProps> = ({
       organization: 'Organization',
       activeStatus: 'Account Status',
       memberSince: 'Member Since',
-      commissionRate: 'Commission Rate'
+      commissionRate: 'Commission Rate',
+      quota: 'Quota',
+      incentiveValue: 'Incentive Value'
     };
     return labels[fieldKey] || fieldKey;
   };
@@ -394,6 +396,33 @@ const UserDetails: React.FC<UserDetailsProps> = ({
             <div className={valueClass}>
               {displayUser.agent_balance?.commission !== undefined && displayUser.agent_balance?.commission !== null
                 ? `₱${Number(displayUser.agent_balance.commission).toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+                : '₱0.00'}
+            </div>
+          </div>
+        );
+      case 'quota':
+        if (!isAgent) return null;
+        return (
+          <div className={baseFieldClass}>
+            <div className={labelClass}>Quota:</div>
+            {/* A count of completed referrals per incentive batch, not an amount. */}
+            <div className={valueClass}>
+              {(() => {
+                const quota = Number(displayUser.agent_balance?.quota ?? 0);
+                if (!quota) return 'Not set';
+                return `${quota.toLocaleString()} ${quota === 1 ? 'referral' : 'referrals'}`;
+              })()}
+            </div>
+          </div>
+        );
+      case 'incentiveValue':
+        if (!isAgent) return null;
+        return (
+          <div className={baseFieldClass}>
+            <div className={labelClass}>Incentive Value:</div>
+            <div className={valueClass}>
+              {displayUser.agent_balance?.incentives_value !== undefined && displayUser.agent_balance?.incentives_value !== null
+                ? `₱${Number(displayUser.agent_balance.incentives_value).toLocaleString(undefined, { minimumFractionDigits: 2 })}`
                 : '₱0.00'}
             </div>
           </div>
