@@ -1972,7 +1972,17 @@ class RadiusReconciliationService
     ): array {
         $lastError = 'No RADIUS endpoint responded.';
 
-        foreach ($this->resolver->baseUrlsFor($config) as $baseUrl) {
+        $baseUrls = \App\Support\RadiusCircuitBreaker::usable($this->resolver->baseUrlsFor($config));
+
+        if ($baseUrls === []) {
+            $lastError = 'Endpoint is in cool-off after repeated connection failures.';
+            if ($trace !== null) {
+                $this->trace($trace, trim($label . ' skipped: ' . $lastError), 'WARNING');
+            }
+            return ['success' => false, 'status' => 0, 'data' => null, 'error' => $lastError];
+        }
+
+        foreach ($baseUrls as $baseUrl) {
             try {
                 $request = Http::withOptions(['verify' => false])
                     ->withBasicAuth($config->username, $config->password)
@@ -1991,10 +2001,22 @@ class RadiusReconciliationService
                     default  => throw new \InvalidArgumentException("Unsupported HTTP method '{$method}'."),
                 };
 
+                // Answered, whatever the status: the endpoint is alive.
+                \App\Support\RadiusCircuitBreaker::recordSuccess($baseUrl);
+
                 if ($response->successful()) {
                     if ($trace !== null) {
                         $this->trace($trace, trim($label . ' ' . strtoupper($method) . ' ' . $path) . ' → HTTP ' . $response->status(), 'DEBUG');
                     }
+
+                    // Anything other than a read has just changed this device,
+                    // so the status sync's cached user list no longer describes
+                    // it. Every mutation in this service goes through here, so
+                    // one call covers all of them.
+                    if (strtoupper($method) !== 'GET') {
+                        RadiusStatusSyncService::invalidateUserCache();
+                    }
+
                     return ['success' => true, 'status' => $response->status(), 'data' => $response->json(), 'error' => ''];
                 }
 
@@ -2006,6 +2028,8 @@ class RadiusReconciliationService
                 }
                 return ['success' => false, 'status' => $response->status(), 'data' => $response->json(), 'error' => $lastError];
             } catch (Throwable $e) {
+                \App\Support\RadiusCircuitBreaker::recordFailure($baseUrl);
+
                 // Connection or TLS failure — worth retrying on the alternate protocol.
                 $lastError = $e->getMessage();
                 if ($trace !== null) {

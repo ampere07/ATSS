@@ -6,10 +6,36 @@ use App\Models\OnlineStatus;
 use App\Models\BillingAccount;
 use App\Models\TechnicalDetail;
 use App\Models\RadiusConfig;
+use App\Support\RadiusStatusSyncPolicy;
+use App\Support\RadiusCircuitBreaker;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * Mirrors RADIUS (User Manager) state into the online_status table.
+ *
+ * Shape of a run, and why it is split this way:
+ *
+ *  1. Seed  - every account that has a PPPoE username gets an online_status row
+ *             (INSERT IGNORE), walked in id windows rather than as one statement
+ *             over the whole table.
+ *  2. Fetch - users and sessions are read from each RADIUS server in BULK: two
+ *             requests per server, whatever the size of the estate. This part is
+ *             deliberately not batched. RouterOS answers one list request far
+ *             more cheaply than it answers thousands of per-user lookups, and
+ *             per-account requests are what actually floods a RADIUS box.
+ *  3. Apply - the local database work IS batched. Accounts are walked in batches
+ *             of RadiusStatusSyncPolicy::batchSize(); each batch is read,
+ *             compared and committed before the next one is read.
+ *
+ * The batching in step 3 is what keeps a large estate safe: peak memory stays
+ * flat, no transaction spans the run, a failure costs one batch instead of the
+ * whole sync, and work already committed is never thrown away. The sync is
+ * idempotent - status is derived from the fetched maps, never from what is
+ * already stored - so anything one run misses the next run re-derives.
+ */
 class RadiusStatusSyncService
 {
     private const MAX_RETRIES = 3;
@@ -22,28 +48,64 @@ class RadiusStatusSyncService
      */
     private const MAX_CONNECTION_ATTEMPTS = 2;
 
-    private const CONNECT_TIMEOUT = 3;
-    private const REQUEST_TIMEOUT = 15;
-
     /**
      * Only the fields this sync actually reads.
      *
      * Asking User Manager for whole records makes it serialise every attribute of
-     * every subscriber — the expensive part of this job on a RouterOS box, and the
+     * every subscriber - the expensive part of this job on a RouterOS box, and the
      * reason a sync can leave it too busy to accept new connections. `.proplist`
      * cuts the response to these columns. A build that does not understand it
      * rejects the request, and callRadiusApiForConfig() then drops the parameter
      * and asks for the full record set instead.
+     *
+     * USER_PROPS is down to the two fields the status logic actually consumes.
+     * It used to ask for `.id` and `disabled` as well, which nothing ever read:
+     * RouterOS serialised them, the network carried them, and the merged map held
+     * them for the length of the run, all for nothing.
      */
-    private const USER_PROPS    = '.id,name,group,disabled';
+    private const USER_PROPS    = 'name,group';
     private const SESSION_PROPS = '.id,user,user-address,calling-station-id,upload,download';
 
-    public function syncRadiusStatus(): array
+    /**
+     * Where the reusable user list lives. One fixed key, with the server set
+     * recorded inside the entry, so any caller can drop it by name.
+     */
+    private const USER_CACHE_KEY = 'radius:status-sync:users';
+
+    /**
+     * The online_status columns this sync owns.
+     *
+     * A row is only rewritten when one of these differs from what the sync is
+     * about to write (see rowNeedsUpdate()). updated_at is deliberately absent:
+     * it changes on every run by definition, so including it would defeat the
+     * comparison entirely.
+     */
+    private const SYNCED_COLUMNS = [
+        'account_no',
+        'username',
+        'session_status',
+        'session_group',
+        'session_id',
+        'ip_address',
+        'session_mac_address',
+        'total_download',
+        'total_upload',
+        'active_sessions',
+        'updated_by_user',
+    ];
+
+    /**
+     * @param  int|null  $batchSize  Accounts per batch for this run; null uses the configured size.
+     */
+    public function syncRadiusStatus(?int $batchSize = null, bool $refreshUsers = false): array
     {
+        $batchSize = RadiusStatusSyncPolicy::batchSize($batchSize);
+
         $stats = [
             'synced' => 0,
             'inserted' => 0,
             'updated' => 0,
+            'unchanged' => 0,
             'skipped' => 0,
             'not_found' => 0,
             'offline' => 0,
@@ -55,6 +117,10 @@ class RadiusStatusSyncService
             'radius_sessions_per_config' => [],
             'duplicate_records' => 0,
             'unique_records' => 0,
+'users_from_cache' => false,
+            'duplicate_accounts' => 0,
+            'batches' => 0,
+            'batch_size' => $batchSize,
         ];
 
         try {
@@ -69,7 +135,7 @@ class RadiusStatusSyncService
 
             // Step 2: Fetch from EVERY radius config, merged and de-duplicated by username.
             // Each server is queried independently — one being down does not stop the others.
-            $usersReport    = $this->fetchRadiusUsers($radiusConfigs);
+            $usersReport    = $this->fetchRadiusUsersCached($radiusConfigs, $refreshUsers);
             $sessionsReport = $this->fetchRadiusSessions($radiusConfigs);
 
             $radiusUsers    = $usersReport['users'];
@@ -80,6 +146,7 @@ class RadiusStatusSyncService
             $stats['radius_sessions_per_config'] = $sessionsReport['per_config'];
             $stats['duplicate_records']          = $usersReport['duplicates'];
             $stats['unique_records']             = $usersReport['unique'];
+            $stats['users_from_cache']           = (bool) ($usersReport['from_cache'] ?? false);
 
             foreach ($usersReport['per_config'] as $label => $count) {
                 Log::info("[STATUS SYNC] {$label}: {$count} user record(s) retrieved");
@@ -93,37 +160,31 @@ class RadiusStatusSyncService
                 throw new \RuntimeException('All RADIUS servers were unreachable for user data; aborting to avoid mass status changes.');
             }
 
-            // Anti-timeout: ensure DB connection is alive after API calls
-            try {
-                DB::connection()->getPdo()->query('SELECT 1');
-            } catch (\Throwable $e) {
-                Log::warning('DB connection lost before processing accounts, attempting reconnect', [
-                    'error' => $e->getMessage(),
-                ]);
-                $default = config('database.default');
-                DB::purge($default);
-                DB::reconnect($default);
-            }
+            // Anti-timeout: the fetch phase can outlast the server's wait_timeout,
+            // so make sure the connection is alive before the batches start writing.
+            $this->ensureDatabaseConnection();
 
-            // Step 3: Process and update DB within a short transaction
-            DB::beginTransaction();
-
-            $this->processAccounts($radiusUsers, $radiusSessions, $stats);
+            // Step 3: Process and update the DB batch by batch. Each batch commits
+            // on its own — there is no run-wide transaction, so a late failure
+            // cannot roll back the work that already succeeded.
+            $this->processAccounts($radiusUsers, $radiusSessions, $stats, $batchSize);
 
             // Update the radius config timestamp to reflect last sync
             if ($radiusConfigs->first()) {
                 $radiusConfigs->first()->touch();
             }
 
-            DB::commit();
-
             Log::info('[STATUS SYNC] Complete', [
                 'unique_records' => $stats['unique_records'],
                 'duplicates'     => $stats['duplicate_records'],
                 'inserted'       => $stats['inserted'],
                 'updated'        => $stats['updated'],
+                'unchanged'      => $stats['unchanged'],
                 'skipped'        => $stats['skipped'],
                 'errors'         => $stats['errors'],
+                'batches'        => $stats['batches'],
+                'batch_size'     => $stats['batch_size'],
+                'users_cached'   => $stats['users_from_cache'],
             ]);
 
             return $stats;
@@ -141,27 +202,150 @@ class RadiusStatusSyncService
         }
     }
 
+    /**
+     * Give every account that has a PPPoE username an online_status row.
+     *
+     * Walked in id windows instead of one INSERT ... SELECT over the whole join:
+     * on a first run, or after a bulk import, the single-statement form inserts
+     * every account inside one transaction, holding locks on online_status and
+     * writing one enormous binlog event. A window is a short statement that
+     * commits on its own.
+     */
     private function syncAccountsToOnlineStatus(array &$stats): void
     {
-        $inserted = DB::statement("
-            INSERT IGNORE INTO online_status (account_id, account_no, username, created_at, updated_at)
-            SELECT ba.id, ba.account_no, td.username, NOW(), NOW()
-            FROM billing_accounts ba
-            LEFT JOIN technical_details td ON ba.id = td.account_id
-            WHERE td.username IS NOT NULL AND TRIM(td.username) != ''
-        ");
+        $batchSize = RadiusStatusSyncPolicy::seedBatchSize();
+        $lastId    = 0;
+        $inserted  = 0;
+        $windows   = 0;
 
-        if ($inserted) {
-            $insertedCount = DB::select("SELECT ROW_COUNT() as count")[0]->count ?? 0;
-            $stats['inserted'] = $insertedCount;
-            Log::info('Synced new accounts to online_status', ['count' => $insertedCount]);
+        while (true) {
+            // Take the id window first. INSERT IGNORE reports how many rows it
+            // actually inserted — zero on a settled system — so it cannot tell us
+            // whether there are more accounts left to walk.
+            $window = DB::table('billing_accounts')
+                ->where('id', '>', $lastId)
+                ->orderBy('id')
+                ->limit($batchSize)
+                ->pluck('id');
+
+            if ($window->isEmpty()) {
+                break;
+            }
+
+            $windowStart = $lastId;
+            $lastId      = (int) $window->last();
+            $windows++;
+
+            DB::statement("
+                INSERT IGNORE INTO online_status (account_id, account_no, username, created_at, updated_at)
+                SELECT ba.id, ba.account_no, td.username, NOW(), NOW()
+                FROM billing_accounts ba
+                LEFT JOIN technical_details td ON ba.id = td.account_id
+                WHERE td.username IS NOT NULL AND TRIM(td.username) != ''
+                  AND ba.id > ? AND ba.id <= ?
+            ", [$windowStart, $lastId]);
+
+            $inserted += (int) (DB::select("SELECT ROW_COUNT() as count")[0]->count ?? 0);
         }
+
+        $stats['inserted'] = $inserted;
+
+        if ($inserted > 0) {
+            Log::info('Synced new accounts to online_status', [
+                'count'   => $inserted,
+                'windows' => $windows,
+            ]);
+        }
+    }
+
+    /**
+     * The merged user list, from cache when it is still fresh enough.
+     *
+     * Of the two bulk requests this sync makes per server, the session list is
+     * the one that has to be live — it is what changes from minute to minute.
+     * The user list only says which group each subscriber is in, and on a settled
+     * estate it comes back identical run after run, having made RouterOS
+     * serialise its entire subscriber table to say nothing new.
+     *
+     * With radius.status_sync.user_cache_minutes set, that half is fetched on a
+     * slower beat while sessions stay live. At zero (the default) this is a
+     * straight pass-through and the behaviour is exactly as before.
+     */
+    private function fetchRadiusUsersCached($radiusConfigs, bool $forceRefresh = false): array
+    {
+        $minutes = RadiusStatusSyncPolicy::userCacheMinutes();
+
+        if ($minutes <= 0) {
+            return $this->fetchRadiusUsers($radiusConfigs);
+        }
+
+        // The server set is recorded inside the entry rather than in the key, so
+        // that invalidateUserCache() can clear it without having to know which
+        // radius_configs were in play when it was written.
+        $signature = $radiusConfigs->pluck('id')->implode(',');
+
+        if (!$forceRefresh) {
+            $cached = Cache::get(self::USER_CACHE_KEY);
+
+            if (is_array($cached)
+                && ($cached['signature'] ?? null) === $signature
+                && !empty($cached['users'])) {
+                Log::info('[STATUS SYNC] Reusing cached RADIUS user list', [
+                    'users'       => count($cached['users']),
+                    'cached_at'   => $cached['cached_at'] ?? null,
+                    'ttl_minutes' => $minutes,
+                ]);
+
+                $cached['from_cache'] = true;
+
+                return $cached;
+            }
+        }
+
+        $report = $this->fetchRadiusUsers($radiusConfigs);
+        $report['from_cache'] = false;
+
+        // Only a COMPLETE snapshot is worth keeping. Caching a partial one —
+        // taken while a server was unreachable — would leave every account on
+        // that server reading "Not Found" for the whole TTL, long after it came
+        // back. A partial result is still used for this run; it just is not kept.
+        if ($report['reachable'] === $radiusConfigs->count() && $report['users'] !== []) {
+            $report['signature'] = $signature;
+            $report['cached_at'] = now()->toDateTimeString();
+            Cache::put(self::USER_CACHE_KEY, $report, now()->addMinutes($minutes));
+        } else {
+            Log::info('[STATUS SYNC] User list not cached: incomplete snapshot', [
+                'reachable' => $report['reachable'],
+                'servers'   => $radiusConfigs->count(),
+            ]);
+        }
+
+        return $report;
+    }
+
+    /**
+     * Drop the cached user list so the next sync re-reads groups from RADIUS.
+     *
+     * Anything that changes a subscriber's group on a RADIUS server should call
+     * this. Without it, a restrict or reconnect applied through the app would not
+     * show up in online_status until the cache expired — the one way a cached
+     * user list can be visibly wrong, and the one case the app itself can see
+     * coming. Harmless to call when caching is switched off.
+     */
+    public static function invalidateUserCache(): void
+    {
+        Cache::forget(self::USER_CACHE_KEY);
     }
 
     /**
      * Fetch users from EVERY radius config, merge them, and de-duplicate by username
      * (the unique identifier). Each server is queried independently; a failure on one
      * server is logged and skipped so the remaining server(s) still contribute.
+     *
+     * One request per server, not one per account: reading each list in bulk is
+     * the point. RouterOS answers a single list request far more cheaply than it
+     * answers thousands of individual lookups, and it has live subscribers to
+     * authenticate at the same time.
      *
      * @return array{users: array, per_config: array<string,int>, duplicates: int, unique: int, reachable: int}
      */
@@ -200,13 +384,18 @@ class RadiusStatusSyncService
                     continue;
                 }
 
+                // Only 'group' is read downstream; 'source' costs nothing (every
+                // entry shares one interned string) and says which server an
+                // account came from when a status looks wrong.
                 $merged[$username] = [
-                    'id'       => $user['.id'] ?? '',
-                    'group'    => $user['group'] ?? '',
-                    'disabled' => ($user['disabled'] ?? 'false') === 'true',
-                    'source'   => $label,
+                    'group'  => $user['group'] ?? '',
+                    'source' => $label,
                 ];
             }
+
+            // Release the decoded response before the next server is queried, so
+            // peak memory is one payload rather than every payload at once.
+            unset($response);
 
             $perConfig[$label] = $count;
             Log::info("[STATUS SYNC] Fetched RADIUS users from {$label}", ['count' => $count]);
@@ -271,6 +460,8 @@ class RadiusStatusSyncService
                 ];
             }
 
+            unset($response);
+
             $perConfig[$label] = $count;
             Log::info("[STATUS SYNC] Fetched RADIUS sessions from {$label}", ['count' => $count]);
         }
@@ -282,110 +473,374 @@ class RadiusStatusSyncService
         ];
     }
 
-    private function processAccounts(array $radiusUsers, array $radiusSessions, array &$stats): void
+    /**
+     * Apply the fetched RADIUS state to every eligible account, batch by batch.
+     *
+     * chunkById keeps this off the whole-table `get()` path: it pages on
+     * billing_accounts.id, so each round trip carries one batch and the walk ends
+     * only when a page comes back short — which is what guarantees that every
+     * eligible account is reached. The cursor moves strictly forward, so an
+     * account is visited exactly once: rows inserted behind it mid-run are not
+     * re-read, and nothing ahead of it is skipped.
+     */
+    private function processAccounts(array $radiusUsers, array $radiusSessions, array &$stats, int $batchSize): void
     {
-        $accounts = DB::table('billing_accounts as ba')
+        Log::info('Processing accounts for RADIUS sync', [
+            'batch_size'     => $batchSize,
+            'skip_unchanged' => RadiusStatusSyncPolicy::skipsUnchanged(),
+        ]);
+
+        $pause = RadiusStatusSyncPolicy::batchPauseMicroseconds();
+
+        DB::table('billing_accounts as ba')
             ->leftJoin('technical_details as td', 'ba.id', '=', 'td.account_id')
             ->select('ba.id as account_id', 'ba.account_no', 'td.username')
             ->whereNotNull('td.username')
             ->whereRaw("TRIM(td.username) <> ''")
-            ->get();
+            ->orderBy('ba.id')
+            ->chunkById($batchSize, function ($accounts) use ($radiusUsers, $radiusSessions, &$stats, $pause): void {
+                $stats['batches']++;
 
-        Log::info('Processing accounts for RADIUS sync', ['count' => count($accounts)]);
+                $this->processAccountBatch($accounts, $radiusUsers, $radiusSessions, $stats);
+
+                // Optional breather, so a long sync leaves headroom for
+                // interactive traffic instead of monopolising the database.
+                if ($pause > 0) {
+                    usleep($pause);
+                }
+            }, 'ba.id', 'account_id');
+
+        $stats['synced'] = $stats['updated'];
+
+        Log::info('[STATUS SYNC] All batches processed', [
+            'batches'   => $stats['batches'],
+            'accounts'  => $stats['updated'],
+            'unchanged' => $stats['unchanged'],
+            'skipped'   => $stats['skipped'],
+            'errors'    => $stats['errors'],
+        ]);
+    }
+
+    /**
+     * One batch: work out what every account in it should look like, read the rows
+     * it is going to touch, write them — and only then move on to the next batch.
+     *
+     * Split into three phases so the write can be replayed. Phase 1 is pure
+     * computation and phase 2 is a single read, which means a batch whose
+     * transaction fails can be written again without re-deriving anything.
+     */
+    private function processAccountBatch($accounts, array $radiusUsers, array $radiusSessions, array &$stats): void
+    {
+        // --- Phase 1: decide, without touching the database ---
+        $payloads = [];
 
         foreach ($accounts as $account) {
+            $accountId = (int) $account->account_id;
+
+            // An account can carry more than one technical_details row and the
+            // join returns each of them. Only the first is applied, so a run
+            // never writes the same account twice.
+            if (isset($payloads[$accountId])) {
+                $stats['duplicate_accounts']++;
+                continue;
+            }
+
+            $username = trim($account->username ?? '');
+            if ($username === '') {
+                // Skip records with empty usernames
+                $stats['skipped']++;
+                continue;
+            }
+
+            $payloads[$accountId] = $this->buildStatusPayload($account, $username, $radiusUsers, $radiusSessions, $stats);
+        }
+
+        if ($payloads === []) {
+            return;
+        }
+
+        // --- Phase 2: one indexed read of the rows this batch will touch ---
+        // One lookup for the batch, in place of the SELECT that updateOrInsert
+        // would otherwise issue for every single row.
+        $existing = $this->currentStatusRows(array_keys($payloads));
+
+        // --- Phase 3: write the batch, then commit it ---
+        $before = [
+            'updated'   => $stats['updated'],
+            'unchanged' => $stats['unchanged'],
+            'errors'    => $stats['errors'],
+        ];
+
+        try {
+            DB::beginTransaction();
+            $this->writeStatusRows($payloads, $existing, $stats);
+            DB::commit();
+        } catch (\Throwable $e) {
+            if (DB::transactionLevel() > 0) {
+                DB::rollBack();
+            }
+
+            // The batch failed as a whole — a deadlock, a lock wait timeout, a
+            // dropped connection. Nothing was persisted, so the counters go back
+            // to where they started and the batch is replayed outside a
+            // transaction, where a row that cannot be written costs that row
+            // alone. Only a second, systemic failure stops the sync.
+            $stats['updated']   = $before['updated'];
+            $stats['unchanged'] = $before['unchanged'];
+            $stats['errors']    = $before['errors'];
+
+            Log::warning('RADIUS status sync batch failed; replaying it row by row', [
+                'accounts' => count($payloads),
+                'error'    => $e->getMessage(),
+            ]);
+            \Log::channel('radiusrelated')->warning('[STATUS SYNC BATCH ERROR] ' . count($payloads) . ' account(s) - Error: ' . $e->getMessage());
+
+            $this->ensureDatabaseConnection();
+            $this->writeStatusRows($payloads, $existing, $stats);
+        }
+    }
+
+    /**
+     * Work out the online_status values for one account.
+     *
+     * This is the synchronisation logic itself, and batching leaves it alone: it
+     * reads only the merged RADIUS maps and the account row, so an account gets
+     * the same result whichever batch it happens to fall into.
+     */
+    private function buildStatusPayload($account, string $username, array $radiusUsers, array $radiusSessions, array &$stats): array
+    {
+        $status = 'Offline';
+        $group = null;
+        $sessionId = null;
+        $ip = null;
+        $mac = null;
+        $download = null;
+        $upload = null;
+        $activeSessions = 0;
+
+        if (isset($radiusUsers[$username])) {
+            $user = $radiusUsers[$username];
+            $group = $user['group'];
+            $hasSession = isset($radiusSessions[$username]);
+
+            // NEW ALGO
+            $isRestricted = ($group === 'Restricted' || $group === 'Mikrotik-Group:Restricted');
+            $isDisconnected = ($group === 'Disconnected' || $group === 'Mikrotik-Group:Disconnected');
+
+            if ($isRestricted) {
+                $status = 'Restricted';
+                $stats['restricted']++;
+            } elseif ($isDisconnected) {
+                $status = 'Disconnected';
+                $stats['disconnected']++;
+            } else {
+                if ($hasSession) {
+                    $status = 'Online';
+                    $stats['online']++;
+                } else {
+                    $status = 'Offline';
+                    $stats['offline']++;
+                }
+            }
+
+            if ($hasSession) {
+                $sessionInfo = $radiusSessions[$username];
+                $activeSessions = $sessionInfo['active_count'];
+                $session = $sessionInfo['last_session'];
+                
+                $sessionId = $session['session_id'];
+                $ip = $session['ip'];
+                $mac = $session['mac'];
+                $download = $session['download'];
+                $upload = $session['upload'];
+            }
+        } else {
+            $status = 'Not Found';
+            $stats['not_found']++;
+        }
+
+        return [
+            'account_no' => $account->account_no,
+            'username' => $username,
+            'session_status' => $status,
+            'session_group' => $group,
+            'session_id' => $sessionId,
+            'ip_address' => $ip,
+            'session_mac_address' => $mac,
+            'total_download' => $download,
+            'total_upload' => $upload,
+            'active_sessions' => $activeSessions,
+            'updated_at' => now(),
+            'updated_by_user' => 'system',
+        ];
+    }
+
+    /**
+     * The current online_status rows for one batch, keyed by account_id.
+     *
+     * @param  int[]  $accountIds
+     * @return array<int, object>
+     */
+    private function currentStatusRows(array $accountIds): array
+    {
+        return DB::table('online_status')
+            ->whereIn('account_id', $accountIds)
+            ->select(array_merge(['account_id'], self::SYNCED_COLUMNS))
+            ->get()
+            ->keyBy('account_id')
+            ->all();
+    }
+
+    /**
+     * Write one batch of payloads.
+     *
+     * Every row is guarded on its own, so a row that cannot be written — one
+     * tripping the unique index on username or MAC, say — is counted and logged
+     * while the rest of the batch, and the rest of the sync, carries on.
+     *
+     * Counting stays what it always was: `updated` is the number of accounts
+     * brought up to date, which is what `synced` reports, whether or not a write
+     * turned out to be necessary. `unchanged` is a subset of it, saying how many
+     * of those already held the right values.
+     *
+     * @param  array<int, array>   $payloads
+     * @param  array<int, object>  $existing
+     */
+    private function writeStatusRows(array $payloads, array $existing, array &$stats): void
+    {
+        $skipUnchanged = RadiusStatusSyncPolicy::skipsUnchanged();
+
+        foreach ($payloads as $accountId => $payload) {
             try {
-                $username = trim($account->username ?? '');
-                if ($username === '') {
-                    // Skip records with empty usernames
-                    $stats['skipped']++;
+                $current = $existing[$accountId] ?? null;
+
+                if ($current === null) {
+                    // No row yet: the account arrived after this run seeded
+                    // online_status. updateOrInsert keeps the insert safe if
+                    // another process created the row in the meantime.
+                    DB::table('online_status')->updateOrInsert(
+                        ['account_id' => $accountId],
+                        $payload + ['created_at' => now()]
+                    );
+
+                    $stats['updated']++;
                     continue;
                 }
-                $accountNo = $account->account_no;
 
-                $status = 'Offline';
-                $group = null;
-                $sessionId = null;
-                $ip = null;
-                $mac = null;
-                $download = null;
-                $upload = null;
-                $activeSessions = 0;
-
-                if (isset($radiusUsers[$username])) {
-                    $user = $radiusUsers[$username];
-                    $group = $user['group'];
-                    $hasSession = isset($radiusSessions[$username]);
-
-                    // NEW ALGO
-                    $isRestricted = ($group === 'Restricted' || $group === 'Mikrotik-Group:Restricted');
-                    $isDisconnected = ($group === 'Disconnected' || $group === 'Mikrotik-Group:Disconnected');
-
-                    if ($isRestricted) {
-                        $status = 'Restricted';
-                        $stats['restricted']++;
-                    } elseif ($isDisconnected) {
-                        $status = 'Disconnected';
-                        $stats['disconnected']++;
-                    } else {
-                        if ($hasSession) {
-                            $status = 'Online';
-                            $stats['online']++;
-                        } else {
-                            $status = 'Offline';
-                            $stats['offline']++;
-                        }
-                    }
-
-                    if ($hasSession) {
-                        $sessionInfo = $radiusSessions[$username];
-                        $activeSessions = $sessionInfo['active_count'];
-                        $session = $sessionInfo['last_session'];
-                        
-                        $sessionId = $session['session_id'];
-                        $ip = $session['ip'];
-                        $mac = $session['mac'];
-                        $download = $session['download'];
-                        $upload = $session['upload'];
-                    }
-                } else {
-                    $status = 'Not Found';
-                    $stats['not_found']++;
+                if ($skipUnchanged && !$this->rowNeedsUpdate($current, $payload)) {
+                    $stats['unchanged']++;
+                    $stats['updated']++;
+                    continue;
                 }
 
                 DB::table('online_status')
-                    ->updateOrInsert(
-                        ['account_id' => $account->account_id],
-                        [
-                            'account_no' => $accountNo,
-                            'username' => $username,
-                            'session_status' => $status,
-                            'session_group' => $group,
-                            'session_id' => $sessionId,
-                            'ip_address' => $ip,
-                            'session_mac_address' => $mac,
-                            'total_download' => $download,
-                            'total_upload' => $upload,
-                            'active_sessions' => $activeSessions,
-                            'updated_at' => now(),
-                            'updated_by_user' => 'system'
-                        ]
-                    );
+                    ->where('account_id', $accountId)
+                    ->update($payload);
 
                 $stats['updated']++;
 
             } catch (\Exception $e) {
+                // A deadlock or a dropped connection takes the whole transaction
+                // with it, including the rows written before this one, so it is
+                // not a single-row problem and must not be counted as one. Hand
+                // it to the batch, which rolls back, reconnects and replays the
+                // batch outside a transaction — where the same fault would cost
+                // this row alone.
+                if (DB::transactionLevel() > 0 && $this->isTransactionFatal($e)) {
+                    throw $e;
+                }
+
                 $stats['errors']++;
                 Log::error('Error processing account for RADIUS sync', [
-                    'account_no' => $account->account_no ?? 'unknown',
-                    'username' => $account->username ?? 'unknown',
+                    'account_no' => $payload['account_no'] ?? 'unknown',
+                    'username' => $payload['username'] ?? 'unknown',
                     'error' => $e->getMessage()
                 ]);
-                \Log::channel('radiusrelated')->error('[STATUS SYNC ACCOUNT ERROR] Account: ' . ($account->account_no ?? 'Unknown') . ' - Error: ' . $e->getMessage());
+                \Log::channel('radiusrelated')->error('[STATUS SYNC ACCOUNT ERROR] Account: ' . ($payload['account_no'] ?? 'Unknown') . ' - Error: ' . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * Is this failure one that has already taken the open transaction down with
+     * it, rather than a problem with the single row being written?
+     *
+     * A deadlock (1213) or a dropped connection (2006/2013) invalidates
+     * everything the transaction has written so far, and a lock wait timeout
+     * (1205) can do the same depending on innodb_rollback_on_timeout. Treating
+     * one of those as "this row failed, carry on" would silently lose the rows
+     * written before it. A constraint violation is the opposite case: the
+     * statement failed, the transaction did not, and the row really is the only
+     * casualty.
+     */
+    private function isTransactionFatal(\Throwable $e): bool
+    {
+        $errorInfo = $e->errorInfo ?? null;
+        $driverCode = is_array($errorInfo) ? ($errorInfo[1] ?? null) : null;
+
+        if (in_array((int) $driverCode, [1205, 1213, 2006, 2013], true)) {
+            return true;
+        }
+
+        $message = strtolower($e->getMessage());
+
+        foreach (['deadlock', 'lock wait timeout', 'server has gone away', 'lost connection'] as $needle) {
+            if (str_contains($message, $needle)) {
+                return true;
             }
         }
 
-        $stats['synced'] = $stats['updated'];
+        return false;
+    }
+
+    /**
+     * Does the stored row differ from what the sync is about to write?
+     */
+    private function rowNeedsUpdate(object $current, array $payload): bool
+    {
+        foreach (self::SYNCED_COLUMNS as $column) {
+            $stored = $this->comparable($current->{$column} ?? null);
+            $fresh  = $this->comparable($payload[$column] ?? null);
+
+            if ($stored !== $fresh) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * PDO hands integer columns back as strings, and the RADIUS API sends its
+     * counters as strings too, so comparing row against payload strictly would
+     * call every row changed and rewrite the whole table on every run. Compare on
+     * value instead, keeping NULL distinct from an empty string so a column that
+     * has genuinely been cleared is still noticed.
+     */
+    private function comparable($value): ?string
+    {
+        return $value === null ? null : (string) $value;
+    }
+
+    /**
+     * Make sure the connection is usable before writing.
+     *
+     * The fetch phase can outlast the server's wait_timeout, and a batch that
+     * failed may have failed because the connection went away, so this runs both
+     * before the first batch and before a failed batch is replayed.
+     */
+    private function ensureDatabaseConnection(): void
+    {
+        try {
+            DB::connection()->getPdo()->query('SELECT 1');
+        } catch (\Throwable $e) {
+            Log::warning('DB connection lost during RADIUS status sync, attempting reconnect', [
+                'error' => $e->getMessage(),
+            ]);
+            $default = config('database.default');
+            DB::purge($default);
+            DB::reconnect($default);
+        }
     }
 
     /**
@@ -403,7 +858,30 @@ class RadiusStatusSyncService
     {
         $resolver = app(RadiusServerResolver::class);
 
-        foreach ($resolver->baseUrlsFor($config) as $baseUrl) {
+        // Configurable, because the response timeout has to cover RouterOS
+        // serialising an entire user or session list: a figure that grows with the
+        // estate, and the usual reason behind a "the sync stopped working" report
+        // on a server that is in fact merely slow.
+        $connectTimeout = RadiusStatusSyncPolicy::connectTimeout();
+        $requestTimeout = RadiusStatusSyncPolicy::requestTimeout();
+
+        // An endpoint the breaker has marked down is skipped without opening a
+        // socket. When RADIUS is unreachable this turns a run that spent four
+        // connect timeouts per path into one that spends none.
+        $baseUrls = RadiusCircuitBreaker::usable($resolver->baseUrlsFor($config));
+
+        if ($baseUrls === []) {
+            \Log::channel('radiusrelated')->warning(sprintf(
+                '[STATUS SYNC] Config #%s (%s) is in cool-off; skipping %s without connecting.',
+                $config->id ?? '?',
+                $config->ip ?? '?',
+                $path
+            ));
+
+            return null;
+        }
+
+        foreach ($baseUrls as $baseUrl) {
             $connectionFailures = 0;
 
             for ($attempt = 1; $attempt <= self::MAX_RETRIES; $attempt++) {
@@ -412,9 +890,12 @@ class RadiusStatusSyncService
                 try {
                     $response = Http::withBasicAuth($config->username, $config->password)
                         ->withOptions(['verify' => false])
-                        ->connectTimeout(self::CONNECT_TIMEOUT)
-                        ->timeout(self::REQUEST_TIMEOUT)
+                        ->connectTimeout($connectTimeout)
+                        ->timeout($requestTimeout)
                         ->$method($url);
+
+                    // Answered, whatever the status: the endpoint is alive.
+                    RadiusCircuitBreaker::recordSuccess($baseUrl);
 
                     if ($response->successful()) {
                         return $response->json();
@@ -440,6 +921,8 @@ class RadiusStatusSyncService
 
                 } catch (\Exception $e) {
                     $connectionFailures++;
+                    RadiusCircuitBreaker::recordFailure($baseUrl);
+
                     Log::warning('RADIUS API request exception', [
                         'url' => $url,
                         'attempt' => $attempt,
@@ -469,5 +952,3 @@ class RadiusStatusSyncService
         return null;
     }
 }
-
-

@@ -167,12 +167,13 @@ class Kernel extends ConsoleKernel
         // RADIUS STATUS SYNC
         // ===================================================================
 
-        // Sync RADIUS user status and sessions every 2 minutes
+        // Sync RADIUS user status and sessions every 5 minutes
         // Uses: RadiusStatusSyncService
         // Dependencies: RadiusConfig, BillingAccounts, TechnicalDetails, OnlineStatus
+        // Applies accounts in batches of radius.status_sync.batch_size (default 500)
         // Logs: storage/logs/radiussync/radiussync.log
         $schedule->command('cron:sync-radius-status')
-                 ->everyTwoMinutes()
+                 ->everyFiveMinutes()
                  ->withoutOverlapping()
                  ->runInBackground()
                  ->onSuccess(function () {

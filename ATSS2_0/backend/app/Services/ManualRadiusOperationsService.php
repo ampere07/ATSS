@@ -874,6 +874,12 @@ class ManualRadiusOperationsService
                 if ($result !== false) {
                     $this->writeLog("[PATCH] Success at {$endpoint['url']}");
                     $patchHappened = true;
+
+                    // The group on the server just changed, so any cached user
+                    // list the status sync is holding is now wrong about this
+                    // account. Drop it rather than let the new status wait out
+                    // the TTL.
+                    \App\Services\RadiusStatusSyncService::invalidateUserCache();
                 } else {
                     $this->writeLog("[PATCH] Failed at {$endpoint['url']}");
                 }
@@ -1140,7 +1146,17 @@ class ManualRadiusOperationsService
             $urlsToTry[] = str_replace('http://', 'https://', $url);
         }
 
-        foreach ($urlsToTry as $tryUrl) {
+        // Endpoints already known to be down are skipped without opening a
+        // socket. This is what stops a queue run of 20 items each paying a
+        // connect timeout to rediscover the same dead server.
+        $usableUrls = \App\Support\RadiusCircuitBreaker::usable($urlsToTry);
+
+        if ($usableUrls === []) {
+            $this->writeLog("[API] All endpoints for this host are in cool-off; skipping without connecting.");
+            return false;
+        }
+
+        foreach ($usableUrls as $tryUrl) {
             for ($attempt = 1; $attempt <= $retries; $attempt++) {
                 try {
                     $this->writeLog("[API] Attempt $attempt/$retries: $method $tryUrl");
@@ -1167,6 +1183,10 @@ class ManualRadiusOperationsService
                             return false;
                     }
 
+                    // The endpoint answered. Whatever the status, it is alive —
+                    // that is all the breaker tracks.
+                    \App\Support\RadiusCircuitBreaker::recordSuccess($tryUrl);
+
                     if ($response->successful()) {
                         $data = $response->json();
                         return $data;
@@ -1176,6 +1196,10 @@ class ManualRadiusOperationsService
 
                 } catch (Exception $e) {
                     $this->writeLog("[API] Exception on attempt $attempt: " . $e->getMessage());
+
+                    // Could not connect. Enough of these and every later call
+                    // skips this endpoint instead of repeating the wait.
+                    \App\Support\RadiusCircuitBreaker::recordFailure($tryUrl);
 
                     if ($attempt < $retries) {
                         sleep(1);

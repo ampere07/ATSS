@@ -177,6 +177,10 @@ class RadiusReconnectionService
                 if ($result !== false) {
                     $this->writeLog("[PATCH] Success at {$endpoint['url']}");
                     $patchHappened = true;
+
+                    // Group changed on the server: drop the status sync's cached
+                    // user list so the new status is not held back by its TTL.
+                    \App\Services\RadiusStatusSyncService::invalidateUserCache();
                 }
             }
         }

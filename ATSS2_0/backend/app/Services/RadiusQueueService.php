@@ -413,6 +413,11 @@ class RadiusQueueService
 
                 if ($statusCode === 204 || $response->successful()) {
                     $this->writeLog("  [RADIUS] ✓ create_user SUCCESS (HTTP {$statusCode}) at {$baseUrl}");
+
+                    // A brand new user is absent from any cached user list, and
+                    // would read "Not Found" until that list expired.
+                    RadiusStatusSyncService::invalidateUserCache();
+
                     return true;
                 }
 
