@@ -4,6 +4,28 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | RADIUS estate topology
+    |--------------------------------------------------------------------------
+    |
+    | Which of the configured radius_config records this deployment expects to be
+    | answering.
+    |
+    |   'primary' - radius_config #1 carries the estate and the records after it
+    |               are failover targets that are normally dark. They are still
+    |               searched for an account and still merged into a session sweep
+    |               when they answer, but one being unreachable is the steady
+    |               state and is not reported as an outage.
+    |   'all'     - every record is a live production server and silence from any
+    |               of them is a real fault.
+    |
+    | Only the servers this names as live decide whether a session sweep
+    | succeeded - see RadiusServerResolver::activeConfigs(). The class constant
+    | DEFAULT_TOPOLOGY is the fallback when this key is absent.
+    */
+    'topology' => env('RADIUS_TOPOLOGY', 'primary'),
+
+    /*
+    |--------------------------------------------------------------------------
     | RADIUS operation queue
     |--------------------------------------------------------------------------
     |

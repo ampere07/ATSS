@@ -126,6 +126,15 @@ export interface BillingDetailRecord extends BillingRecord {
   relatedApprovedTransactions?: string;
   relatedAttachments?: string;
   logs?: string;
+  /** Raw document URL, kept alongside houseFrontPicture for the attachment viewer. */
+  houseFrontPictureUrl?: string;
+  pppoePassword?: string;
+  /** Legacy free-text VAT mode. vatEnabled below is what billing generation actually reads. */
+  vatType?: string;
+  /** Null when the account predates the boolean column - not the same as false. */
+  vatEnabled?: boolean | null;
+  withholdingEnabled?: boolean | null;
+  withholdingPercentage?: number | null;
 }
 
 export interface OnlineStatusRecord {

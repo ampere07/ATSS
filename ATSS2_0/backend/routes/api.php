@@ -91,6 +91,9 @@ Route::post('/reports', [ReportController::class , 'store']);
 Route::get('/reports/options', [ReportController::class , 'options']);
 // Registered before the /reports/{id} routes below, which have no numeric
 // constraint and would otherwise match "settings" as an id.
+// Draft preview: renders the form's current values without creating anything.
+// Registered with the other literal paths, ahead of /reports/{id}.
+Route::post('/reports/preview', [ReportController::class , 'previewDraft']);
 Route::get('/reports/settings', [ReportController::class , 'settings']);
 Route::put('/reports/settings', [ReportController::class , 'updateSettings'])
     ->middleware('permission:reports.manage');
@@ -3925,6 +3928,9 @@ Route::middleware('auth:sanctum')->prefix('radius-reconciliation')->group(functi
 
 Route::middleware('auth:sanctum')->prefix('smartolt-reconciliation')->group(function () {
     Route::get('/state', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'state']);
+    Route::get('/mac-discovery', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'macDiscovery']);
+    // Deprecated alias of /mac-discovery, kept so a deployed frontend on the old
+    // path keeps working. The crawl no longer reads optical power.
     Route::get('/optical-power', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'opticalPower']);
     Route::get('/alignment-preview', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'alignmentPreview']);
     Route::get('/mac-alignment', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'macAlignment']);
@@ -3961,6 +3967,26 @@ Route::middleware('auth:sanctum')->prefix('smartolt-reconciliation')->group(func
 | here and no transaction wrapped around a gateway call.
 |
 */
+
+/*
+|--------------------------------------------------------------------------
+| Billing Reconcile tool
+|--------------------------------------------------------------------------
+|
+| Why an account that should have been billed this cycle has no invoice, and the
+| ability to raise it by hand once the reason is fixed. The audit is read-only;
+| generation goes through the same generator the nightly cron uses and is safe to
+| repeat, because the per-cycle guards make a second run a skip.
+|
+*/
+Route::middleware('auth:sanctum')->prefix('billing-reconciliation')->group(function () {
+    Route::get('/audit', [\App\Http\Controllers\Api\BillingReconciliationController::class, 'audit']);
+    Route::get('/reasons', [\App\Http\Controllers\Api\BillingReconciliationController::class, 'reasons']);
+
+    Route::post('/generate', [\App\Http\Controllers\Api\BillingReconciliationController::class, 'generate']);
+    Route::post('/dismiss', [\App\Http\Controllers\Api\BillingReconciliationController::class, 'dismiss']);
+    Route::post('/restore', [\App\Http\Controllers\Api\BillingReconciliationController::class, 'restore']);
+});
 
 Route::middleware('auth:sanctum')->prefix('xendit-reconciliation')->group(function () {
     Route::get('/audit', [\App\Http\Controllers\Api\XenditPaymentController::class, 'reconciliationAudit']);

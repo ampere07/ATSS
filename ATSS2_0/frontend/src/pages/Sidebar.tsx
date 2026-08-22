@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, List, Router, DollarSign, Receipt, ReceiptText, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck } from 'lucide-react';
+import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, FileWarning, List, Router, DollarSign, Receipt, ReceiptText, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useTransactionStore } from '../store/transactionStore';
 import { useTransactionRevertStore } from '../store/transactionRevertStore';
@@ -270,7 +270,10 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         // deliberately not offered to HeadTechnician the way the network tools are.
         // Visibility is decided by ROLE_PERMISSIONS in config/permissions.ts, which is
         // the same key the page itself checks.
-        { id: 'xendit-reconcile-tool', label: 'Xendit Reconciliation', icon: CreditCard }
+        { id: 'xendit-reconcile-tool', label: 'Xendit Reconciliation', icon: CreditCard },
+        // Billing reconciliation decides whether a subscriber is invoiced at all, so
+        // it sits with the money tools rather than the network ones.
+        { id: 'billing-reconcile-tool', label: 'Billing Reconcile', icon: FileWarning }
       ]
     },
     { id: 'settings', label: 'Settings', icon: Settings },
