@@ -118,12 +118,18 @@ export const getStoredAgentIdentity = (): AgentIdentity => {
   }
 };
 
-// Agents only see job orders raised on or after this date. Everyone else sees
-// the full history — this cut-off applies to the agent view alone.
+// The agent view's cut-off date, or null for no cut-off at all.
 //
-// Change the date here to move the cut-off; it is read by both the web and the
-// mobile Job Order pages so the two can never disagree.
-export const AGENT_JOB_ORDER_START_DATE = '2026-08-10';
+// Currently null: agents see their FULL referral history, the same as everyone
+// else. Nothing is hidden for being old.
+//
+// Setting a date here restores the cut-off — agents would then only see job
+// orders raised on or after it. It is read by both the web and the mobile Job
+// Order pages so the two can never disagree, and it must be kept in step with
+// `agent.start_date` in the backend's config/agent.php, which decides the same
+// thing for incentives and achievements. A date here without the matching
+// backend value would show an agent referrals that earn them nothing.
+export const AGENT_JOB_ORDER_START_DATE: string | null = null;
 
 /**
  * The date a job order belongs to, for the purposes of the agent cut-off.
@@ -146,10 +152,15 @@ export const jobOrderDate = (jo: any): Date | null => {
 /**
  * Is this job order on or after the agent cut-off?
  *
+ * With no cut-off set (the current setting) every job order qualifies, so an
+ * agent's whole history is shown.
+ *
  * A record with no usable date is kept rather than hidden: losing a referral
  * from an agent's own list is worse than showing one that is slightly old.
  */
 export const isOnOrAfterAgentStartDate = (jo: any): boolean => {
+  if (!AGENT_JOB_ORDER_START_DATE) return true;
+
   const date = jobOrderDate(jo);
   if (!date) return true;
 

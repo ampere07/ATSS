@@ -32,6 +32,29 @@ export const ROLE = {
 export const LOCKED_ROLE_IDS: number[] = Object.values(ROLE);
 
 /**
+ * How each seeded role is written in Role Management's "Base role" picker.
+ *
+ * Mirrors Role::LOCKED_ROLE_NAMES. Named here rather than read from the roles
+ * list the API returns so the picker reads the same on a deployment whose
+ * seeded rows were renamed, and always in one order — widest access first,
+ * which is the order somebody choosing a starting point thinks in.
+ */
+export const BASE_ROLE_OPTIONS: Array<{ id: number; label: string }> = [
+  { id: ROLE.SUPER_ADMIN, label: 'SuperAdmin' },
+  { id: ROLE.ADMINISTRATOR, label: 'Administrator' },
+  { id: ROLE.HEAD_TECH, label: 'Head Technician' },
+  { id: ROLE.TECHNICIAN, label: 'Technician' },
+  { id: ROLE.OSP, label: 'OSP' },
+  { id: ROLE.INVENTORY_STAFF, label: 'Inventory Staff' },
+  { id: ROLE.AGENT, label: 'Agent' },
+  { id: ROLE.CUSTOMER, label: 'Customer' },
+];
+
+/** The seeded role's name, or '' when the id names no seeded role. */
+export const baseRoleLabel = (roleId?: number | string | null): string =>
+  BASE_ROLE_OPTIONS.find(option => option.id === Number(roleId))?.label ?? '';
+
+/**
  * Role names as they come back from the API (lowercased role_name), mapped onto
  * their ids.
  *
@@ -606,11 +629,25 @@ export const parsePermissions = (raw: unknown): string[] => {
 };
 
 /**
+ * The keys a seeded role holds — what a hybrid role inherits.
+ *
+ * Empty for anything that is not one of the eight, so a custom role can never
+ * be inherited from and a cleared base grants nothing.
+ */
+export const inheritedPermissions = (baseRoleId?: number | string | null): string[] => {
+  const base = Number(baseRoleId);
+
+  return isLockedRole(base) ? ROLE_PERMISSIONS[base] ?? [] : [];
+};
+
+/**
  * The keys a user effectively holds.
  *
  * A seeded role is answered from the table above, so it does not depend on the
  * server having sent a list. A custom role uses the list it was sent, which is
- * the only place that information exists. Either way the result also contains
+ * the only place that information exists — for a hybrid that list already has
+ * its base role's keys merged in, done server side so this copy cannot grant a
+ * tab from a base that has since changed. Either way the result also contains
  * the parent page of every sub action, matching the server.
  */
 export const permissionsFor = (auth?: AuthLike | null): string[] => {
@@ -666,6 +703,8 @@ export const homeSectionFor = (auth?: AuthLike | null): string => {
 
   // A custom role: the first page it was granted, preferring a real page over a
   // sub action so it does not land on something like "job-order.approve".
+  // A hybrid does not usually reach here — the server names its base role's
+  // landing page in `home`, which the first line above accepts.
   const firstPage = held.filter(key => !key.includes('.'))[0];
   return firstPage ? sectionForPermission(firstPage) : 'dashboard';
 };

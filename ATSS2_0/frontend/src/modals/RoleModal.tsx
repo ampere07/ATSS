@@ -1,8 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Role, ApiResponse } from '../types/api';
 import { roleService } from '../services/userService';
 import ModalUITemplate, { useModalTheme } from './ui-modal/ModalUITemplate';
-import { ACTIONS, labelFor, parsePermissions, permissionGroups } from '../config/permissions';
+import {
+  ACTIONS,
+  BASE_ROLE_OPTIONS,
+  WILDCARD,
+  inheritedPermissions,
+  labelFor,
+  parsePermissions,
+  permissionGroups,
+} from '../config/permissions';
 
 interface RoleModalProps {
   isOpen: boolean;
@@ -22,22 +30,72 @@ interface RoleModalProps {
  */
 const PERMISSION_GROUPS = permissionGroups();
 
+/**
+ * Keys that cannot both be held: one opens the technician's Done form, the
+ * other the administrator's.
+ *
+ * Ticking one clears the other. When a base role brings one of a pair in, the
+ * other is not offered at all — a hybrid cannot un-inherit half its base.
+ */
+const EXCLUSIVE_PARTNER: Record<string, string> = {
+  'job-order.tech-edit': 'job-order.admin-edit',
+  'job-order.admin-edit': 'job-order.tech-edit',
+  'service-order.tech-edit': 'service-order.admin-edit',
+  'service-order.admin-edit': 'service-order.tech-edit',
+};
+
+/** No base role — the standalone custom role this modal used to only build. */
+const NO_BASE = 0;
+
 const RoleForm: React.FC<{
   formData: any;
   handleInputChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
+  handleBaseRoleChange: (baseRoleId: number) => void;
   handlePermissionChange: (pageId: string, checked: boolean) => void;
   errors: Record<string, string>;
+  baseRoleId: number;
   selectedPermissions: string[];
-}> = ({ formData, handleInputChange, handlePermissionChange, errors, selectedPermissions }) => {
+  inherited: Set<string>;
+  inheritsEverything: boolean;
+}> = ({
+  formData,
+  handleInputChange,
+  handleBaseRoleChange,
+  handlePermissionChange,
+  errors,
+  baseRoleId,
+  selectedPermissions,
+  inherited,
+  inheritsEverything,
+}) => {
   const { isDarkMode } = useModalTheme();
 
-  const inputClass = (error?: string) => `w-full px-4 py-2.5 rounded-lg border transition-all duration-200 outline-none focus:ring-2 focus:ring-opacity-50 
+  const inputClass = (error?: string) => `w-full px-4 py-2.5 rounded-lg border transition-all duration-200 outline-none focus:ring-2 focus:ring-opacity-50
     ${isDarkMode
       ? `bg-gray-800 text-white ${error ? 'border-red-500 focus:ring-red-500/20' : 'border-gray-700 focus:ring-blue-500/20'}`
       : `bg-white text-gray-900 ${error ? 'border-red-500 focus:ring-red-500/20' : 'border-gray-200 focus:ring-blue-500/20'}`
     }`;
 
   const labelClass = `block text-sm font-medium mb-1.5 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`;
+
+  const baseLabel = BASE_ROLE_OPTIONS.find(option => option.id === baseRoleId)?.label ?? '';
+
+  /** Held because the base role holds it, rather than because it was ticked here. */
+  const isInherited = (key: string) => inheritsEverything || inherited.has(key);
+
+  /**
+   * A key is locked when the base already grants it, or when the base grants
+   * the key it is mutually exclusive with.
+   */
+  const isLocked = (key: string) =>
+    isInherited(key) || (!!EXCLUSIVE_PARTNER[key] && isInherited(EXCLUSIVE_PARTNER[key]));
+
+  const isChecked = (key: string) => isInherited(key) || selectedPermissions.includes(key);
+
+  const checkboxClass = (key: string) =>
+    `w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 ${
+      isLocked(key) ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+    }`;
 
   return (
     <div className="space-y-6">
@@ -72,8 +130,38 @@ const RoleForm: React.FC<{
           />
         </div>
 
+        {/* The hybrid picker. Choosing one of the eight starts the role from
+            that role's access; the ticks below then only add to it. */}
         <div>
-          <label className={labelClass}>Permissions (Page Access)</label>
+          <label className={labelClass}>Start From a System Role</label>
+          <select
+            value={baseRoleId}
+            onChange={(e) => handleBaseRoleChange(Number(e.target.value))}
+            className={inputClass()}
+          >
+            <option value={NO_BASE}>None — pick every page by hand</option>
+            {BASE_ROLE_OPTIONS.map(option => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+          </select>
+          <p className={`text-xs mt-1.5 ml-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+            {baseRoleId === NO_BASE
+              ? 'This role holds exactly what you tick below.'
+              : inheritsEverything
+                ? `Inherits everything a ${baseLabel} holds, including pages added later. There is nothing left to add.`
+                : `Inherits everything a ${baseLabel} holds — shown ticked and locked below — and follows that role as it changes. Tick anything extra this role should also see.`}
+          </p>
+        </div>
+
+        <div>
+          <div className="flex items-baseline justify-between mb-1.5">
+            <label className={labelClass.replace('mb-1.5', '')}>Permissions (Page Access)</label>
+            {baseRoleId !== NO_BASE && (
+              <span className={`text-[11px] ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                Locked ticks come from <span className="font-semibold">{baseLabel}</span>
+              </span>
+            )}
+          </div>
           <div className={`border rounded-lg overflow-hidden ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
             <div className={`grid grid-cols-[1.5fr_80px_2fr] px-4 py-2 text-xs font-bold uppercase tracking-wider border-b ${isDarkMode ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
               <div>Page Name</div>
@@ -91,13 +179,22 @@ const RoleForm: React.FC<{
 
                   {group.pages.map((pageId) => (
                     <div key={pageId} className="grid grid-cols-[1.5fr_80px_2fr] px-4 py-3 items-center transition-colors">
-                      <div className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{labelFor(pageId)}</div>
+                      <div className={`text-sm flex items-center gap-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                        <span>{labelFor(pageId)}</span>
+                        {isInherited(pageId) && (
+                          <span className={`px-1.5 py-0.5 text-[9px] font-bold rounded uppercase tracking-wide ${isDarkMode ? 'bg-blue-900/30 text-blue-400' : 'bg-blue-100 text-blue-600'}`}>
+                            Inherited
+                          </span>
+                        )}
+                      </div>
                       <div className="flex justify-center">
                         <input
                           type="checkbox"
-                          checked={selectedPermissions.includes(pageId)}
+                          checked={isChecked(pageId)}
+                          disabled={isLocked(pageId)}
+                          title={isInherited(pageId) ? `Granted by ${baseLabel}` : undefined}
                           onChange={(e) => handlePermissionChange(pageId, e.target.checked)}
-                          className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
+                          className={checkboxClass(pageId)}
                         />
                       </div>
                       <div className="flex items-center gap-x-6">
@@ -108,9 +205,17 @@ const RoleForm: React.FC<{
                             </span>
                             <input
                               type="checkbox"
-                              checked={selectedPermissions.includes(actionId)}
+                              checked={isChecked(actionId)}
+                              disabled={isLocked(actionId)}
+                              title={
+                                isInherited(actionId)
+                                  ? `Granted by ${baseLabel}`
+                                  : isLocked(actionId)
+                                    ? `${baseLabel} holds ${labelFor(EXCLUSIVE_PARTNER[actionId])}, which this cannot be combined with`
+                                    : undefined
+                              }
                               onChange={(e) => handlePermissionChange(actionId, e.target.checked)}
-                              className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600 cursor-pointer"
+                              className={checkboxClass(actionId)}
                             />
                           </div>
                         ))}
@@ -137,7 +242,21 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
     description: '',
   });
 
+  /** The seeded role this one builds on, or NO_BASE for a standalone role. */
+  const [baseRoleId, setBaseRoleId] = useState<number>(NO_BASE);
+
+  /**
+   * Only the keys ticked against this role.
+   *
+   * A hybrid's inherited keys are deliberately kept out: storing them would
+   * freeze a copy of the base role at the moment of saving, which is the thing
+   * hybrids exist to avoid.
+   */
   const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
+
+  const inheritedKeys = useMemo(() => inheritedPermissions(baseRoleId), [baseRoleId]);
+  const inheritsEverything = inheritedKeys.includes(WILDCARD);
+  const inherited = useMemo(() => new Set(inheritedKeys), [inheritedKeys]);
 
   useEffect(() => {
     if (isOpen) {
@@ -146,7 +265,9 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
           role_name: role.role_name || '',
           description: role.description || '',
         });
-        
+
+        setBaseRoleId(Number(role.base_role_id) || NO_BASE);
+
         // Array from Laravel's cast, or a JSON / comma-separated string on a
         // row written before that cast existed.
         setSelectedPermissions(parsePermissions(role.permissions));
@@ -155,6 +276,7 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
           role_name: '',
           description: '',
         });
+        setBaseRoleId(NO_BASE);
         setSelectedPermissions([]);
       }
       setErrors({});
@@ -169,45 +291,64 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
     }
   };
 
+  /**
+   * Switching base role rewrites the extras it makes redundant or impossible.
+   *
+   * Anything the new base already grants stops being an extra — leaving it
+   * would store a duplicate that then stops tracking the base — and anything
+   * mutually exclusive with what the base grants is dropped, since the base
+   * half of that pair cannot be given up.
+   */
+  const handleBaseRoleChange = (nextBaseRoleId: number) => {
+    setBaseRoleId(nextBaseRoleId);
+
+    const nextInherited = inheritedPermissions(nextBaseRoleId);
+
+    if (nextInherited.includes(WILDCARD)) {
+      setSelectedPermissions([]);
+      return;
+    }
+
+    const held = new Set(nextInherited);
+    setSelectedPermissions(prev =>
+      prev.filter(key => !held.has(key) && !(EXCLUSIVE_PARTNER[key] && held.has(EXCLUSIVE_PARTNER[key])))
+    );
+  };
+
   const handlePermissionChange = (pageId: string, checked: boolean) => {
     setSelectedPermissions(prev => {
       let newPermissions = [...prev];
-      
+
       if (checked) {
         if (!newPermissions.includes(pageId)) {
           newPermissions.push(pageId);
         }
-        
-        // If it's a sub-permission, auto-check the parent
+
+        // If it's a sub-permission, auto-check the parent — unless the base role
+        // already grants it, in which case there is nothing to add.
         if (pageId.includes('.')) {
           const parentId = pageId.split('.')[0];
-          if (!newPermissions.includes(parentId)) {
+          if (!newPermissions.includes(parentId) && !inherited.has(parentId)) {
             newPermissions.push(parentId);
           }
         }
 
-        // Handle mutual exclusivity for job-order.tech-edit and job-order.admin-edit
-        if (pageId === 'job-order.tech-edit') {
-          newPermissions = newPermissions.filter(id => id !== 'job-order.admin-edit');
-        } else if (pageId === 'job-order.admin-edit') {
-          newPermissions = newPermissions.filter(id => id !== 'job-order.tech-edit');
-        }
-
-        // Handle mutual exclusivity for service-order.tech-edit and service-order.admin-edit
-        if (pageId === 'service-order.tech-edit') {
-          newPermissions = newPermissions.filter(id => id !== 'service-order.admin-edit');
-        } else if (pageId === 'service-order.admin-edit') {
-          newPermissions = newPermissions.filter(id => id !== 'service-order.tech-edit');
+        // The tech-edit / admin-edit pairs are mutually exclusive. The partner
+        // can only be cleared here when it is an extra; an inherited one is
+        // never offered, so this cannot leave the pair both ticked.
+        const partner = EXCLUSIVE_PARTNER[pageId];
+        if (partner) {
+          newPermissions = newPermissions.filter(id => id !== partner);
         }
       } else {
         newPermissions = newPermissions.filter(id => id !== pageId);
-        
+
         // If it's a parent, auto-uncheck all sub-permissions
         if (!pageId.includes('.')) {
           newPermissions = newPermissions.filter(id => !id.startsWith(pageId + '.'));
         }
       }
-      
+
       return newPermissions;
     });
   };
@@ -228,7 +369,12 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
       const payload = {
         role_name: formData.role_name,
         description: formData.description,
-        permissions: selectedPermissions
+        base_role_id: baseRoleId === NO_BASE ? null : baseRoleId,
+        // Extras only. The server merges these with the base role's keys on
+        // every read, so an inherited key sent back here would only go stale.
+        permissions: inheritsEverything
+          ? []
+          : selectedPermissions.filter(key => !inherited.has(key)),
       };
 
       const authData = localStorage.getItem('authData');
@@ -273,9 +419,13 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
       <RoleForm
         formData={formData}
         handleInputChange={handleInputChange}
+        handleBaseRoleChange={handleBaseRoleChange}
         handlePermissionChange={handlePermissionChange}
         errors={errors}
+        baseRoleId={baseRoleId}
         selectedPermissions={selectedPermissions}
+        inherited={inherited}
+        inheritsEverything={inheritsEverything}
       />
     </ModalUITemplate>
   );

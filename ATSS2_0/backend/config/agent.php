@@ -7,21 +7,24 @@ return [
     | Agent programme start date
     |--------------------------------------------------------------------------
     |
-    | The day the agent programme begins counting. Referrals onboarded before
-    | this date are history: they earn no incentive and add nothing to weekly or
-    | monthly achievement progress.
+    | The day the agent programme begins counting, or null for no cut-off.
     |
-    | One value covers both, so an agent's incentive and their achievement
-    | progress can never disagree about which of their referrals count. The
-    | dashboards read the same date from their own shared copy — see
-    | AGENT_JOB_ORDER_START_DATE in the frontends' agentReferral helpers — so
-    | the Job Order list shows exactly the referrals these figures are built on.
+    | Currently null: an agent's WHOLE history counts. Every referral they have
+    | ever onboarded earns incentive progress and adds to weekly and monthly
+    | achievement progress, however old it is.
     |
-    | Set to null to count an agent's whole history, as before this was
-    | introduced.
+    | Setting a date restores the cut-off — referrals onboarded before it become
+    | history that earns nothing. One value covers incentives and achievements
+    | both, so the two can never disagree about which of an agent's referrals
+    | count. The dashboards carry their own copy of the same setting — see
+    | AGENT_JOB_ORDER_START_DATE in the frontends' agentReferral helpers, in
+    | ATSS2_0/frontend and MOBILEAPP/frontend — and BOTH must be changed with
+    | this one. A date here that the frontends do not have would hide referrals
+    | from an agent's Job Order list while still paying them; a date there that
+    | this file does not have would show referrals that earn nothing.
     |
     */
 
-    'start_date' => env('AGENT_START_DATE', '2026-08-10'),
+    'start_date' => env('AGENT_START_DATE', null),
 
 ];

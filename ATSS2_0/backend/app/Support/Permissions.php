@@ -23,6 +23,12 @@ use App\Models\Role;
  * carries its own list in roles.permissions — the same key strings, ticked in
  * the Role modal.
  *
+ * A custom role may also name one of the eight in roles.base_role_id, making it
+ * a *hybrid*: it holds everything that seeded role holds, resolved live from
+ * ROLE_PERMISSIONS on every read, plus the extra keys ticked against it. Nothing
+ * is copied at save time, so a hybrid follows its base role as that role
+ * changes. See Permissions::roleKeys().
+ *
  * Kept deliberately in step with:
  *   ATSS2_0/frontend/src/config/permissions.ts
  *   MOBILEAPP/frontend/src/config/permissions.ts
@@ -402,10 +408,11 @@ final class Permissions
      * The keys a user effectively holds.
      *
      * A locked role reads from ROLE_PERMISSIONS; a custom role reads its own
-     * `permissions` column. Either way the result also contains the parent page
-     * of every sub action it holds, so a check for "job-order" succeeds for a
-     * role that was only given "job-order.approve" — which is how the Role modal
-     * presents it (ticking a sub action ticks its page).
+     * `permissions` column, plus — if it is a hybrid — everything its
+     * `base_role_id` role holds. Either way the result also contains the parent
+     * page of every sub action it holds, so a check for "job-order" succeeds for
+     * a role that was only given "job-order.approve" — which is how the Role
+     * modal presents it (ticking a sub action ticks its page).
      *
      * @param  \App\Models\User|object|null  $user
      * @return string[]
@@ -462,7 +469,142 @@ final class Permissions
     }
 
     /**
-     * Read a custom role's stored permission list.
+     * The keys a seeded role holds, or [] for anything that is not one.
+     *
+     * This is what a hybrid role inherits. Read through here rather than from
+     * ROLE_PERMISSIONS directly so the "not a locked id" case has one answer.
+     *
+     * @return string[]
+     */
+    public static function inheritedKeys(int|string|null $baseRoleId): array
+    {
+        return Role::isLocked($baseRoleId)
+            ? (self::ROLE_PERMISSIONS[(int) $baseRoleId] ?? [])
+            : [];
+    }
+
+    /**
+     * Everything a custom role holds: its base role's keys plus its own.
+     *
+     * The inherited half is resolved here, on every read, rather than copied
+     * into `roles.permissions` when the role is saved. That is the whole point
+     * of a hybrid: a key added to Role::TECHNICIAN reaches every role built on
+     * the technician, and one removed from it leaves them, without anybody
+     * reopening the Role modal.
+     *
+     * A base of SuperAdmin inherits WILDCARD, which subsumes everything else —
+     * returned on its own so callers do not have to reason about a list that
+     * both contains "*" and enumerates keys.
+     *
+     * @param  \App\Models\Role|object|null  $role
+     * @return string[]
+     */
+    public static function roleKeys($role): array
+    {
+        if ($role === null) {
+            return [];
+        }
+
+        // A locked role's access is the table above; its own columns are not
+        // consulted, so a base or a stored list recorded against one is ignored.
+        if (Role::isLocked($role->id ?? null)) {
+            return self::ROLE_PERMISSIONS[(int) $role->id] ?? [];
+        }
+
+        $base = (int) ($role->base_role_id ?? 0);
+        $inherited = self::inheritedKeys($base);
+
+        if (in_array(self::WILDCARD, $inherited, true)) {
+            return [self::WILDCARD];
+        }
+
+        return array_values(array_unique(array_merge(
+            $inherited,
+            self::parseKeys($role->permissions ?? null)
+        )));
+    }
+
+    /**
+     * The seeded role this user's role is built on, or null.
+     *
+     * Null for a seeded role (its access is the table above, not an
+     * inheritance) and for a standalone custom role.
+     *
+     * @param  \App\Models\User|object|null  $user
+     */
+    public static function baseRoleIdFor($user): ?int
+    {
+        if ($user === null || Role::isLocked($user->role_id ?? null)) {
+            return null;
+        }
+
+        $role = self::roleOf($user);
+
+        if ($role === null) {
+            return null;
+        }
+
+        $base = (int) ($role->base_role_id ?? 0);
+
+        return Role::isLocked($base) ? $base : null;
+    }
+
+    /**
+     * Where a user lands after signing in.
+     *
+     * A seeded role has its own entry. A hybrid falls back to its base role's —
+     * a "Technician who also does Inventory" should still land on Job Order —
+     * and a standalone custom role has none, leaving the client to pick the
+     * first page it was granted.
+     *
+     * @param  \App\Models\User|object|null  $user
+     */
+    public static function homeFor($user): ?string
+    {
+        if ($user === null) {
+            return null;
+        }
+
+        $roleId = (int) ($user->role_id ?? 0);
+
+        if (isset(self::ROLE_HOME[$roleId])) {
+            return self::ROLE_HOME[$roleId];
+        }
+
+        $base = self::baseRoleIdFor($user);
+
+        return $base === null ? null : (self::ROLE_HOME[$base] ?? null);
+    }
+
+    /**
+     * Read a custom role's effective permission list.
+     *
+     * @return string[]
+     */
+    private static function customRoleKeys($user): array
+    {
+        return self::roleKeys(self::roleOf($user));
+    }
+
+    /**
+     * The user's role row.
+     *
+     * Prefers an already-loaded relation so this does not fire a query per
+     * request; falls back to a lookup when the caller did not eager-load it.
+     *
+     * @return \App\Models\Role|object|null
+     */
+    private static function roleOf($user)
+    {
+        if (isset($user->role) && $user->role !== null) {
+            return $user->role;
+        }
+
+        return empty($user->role_id) ? null : Role::find($user->role_id);
+    }
+
+    /**
+     * Read a stored permissions value.
      *
      * The column is cast to an array by the Role model, but rows written before
      * that cast existed hold a JSON string or a comma-separated list, so all
@@ -470,18 +612,8 @@ final class Permissions
      *
      * @return string[]
      */
-    private static function customRoleKeys($user): array
+    private static function parseKeys($raw): array
     {
-        $raw = null;
-
-        // Prefer an already-loaded relation so this does not fire a query per
-        // request; fall back to a lookup when the caller did not eager-load it.
-        if (isset($user->role) && $user->role !== null) {
-            $raw = $user->role->permissions ?? null;
-        } elseif (!empty($user->role_id)) {
-            $raw = optional(Role::find($user->role_id))->permissions;
-        }
-
         if (is_array($raw)) {
             return array_values(array_filter(array_map('strval', $raw), 'strlen'));
         }

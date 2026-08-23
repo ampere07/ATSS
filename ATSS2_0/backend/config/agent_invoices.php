@@ -15,11 +15,18 @@ return [
     'number_padding' => 6,
 
     /*
-    | What a referral is worth on the invoice.
+    | The fallback rate shown as UNIT PRICE when it cannot be derived.
     |
-    | Falls back to the agent's own configured incentive value where one is set,
-    | so an agent on a different rate is billed at their rate rather than this
-    | one. This is the default when they have none.
+    | It is only ever a DISPLAY figure now, and it does NOT drive any total.
+    | The invoice states the rate one completed quota was worth, and that is
+    | read back from the incentives the cron actually awarded, so the printed
+    | rate always agrees with the printed total even after an administrator
+    | changes the setting.
+    |
+    | This value stands in only where no rate can be derived — a week with no
+    | incentive at all, or a team whose members earned at different rates, where
+    | no single figure is the truth. It then falls back to the agent's own
+    | configured `agent_balance.incentives_value` before reaching this.
     */
     'unit_price' => env('AGENT_INVOICE_UNIT_PRICE', 100),
 
@@ -32,6 +39,13 @@ return [
     | on the referring agent's own record (agent_balance.commission), so the
     | invoice total is the sum across its customers. A team on one rate bills
     | customers x rate; a team on mixed rates bills each customer at theirs.
+    |
+    | TOTAL AMOUNT is the incentive, and it is NOT configured or calculated
+    | anywhere in the invoice run either. It is read from the completed quotas
+    | the incentive cron awarded inside the invoice's own billing week
+    | (agent_incentive_history), and each one is billed exactly once. Whether a
+    | quota was reached is the cron's decision to make, because only it can see
+    | progress accumulating across weeks.
     |
     | SUBTOTAL is TOTAL AMOUNT + COMMISSION.
     */

@@ -6,6 +6,7 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import RoleModal from '../modals/RoleModal';
 import { useRoleStore } from '../store/roleStore';
 import { roleService } from '../services/userService';
+import { baseRoleLabel } from '../config/permissions';
 
 const Roles: React.FC = () => {
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
@@ -196,6 +197,16 @@ const Roles: React.FC = () => {
                                                 {role.id <= 8 && (
                                                     <span className={`ml-2 px-1.5 py-0.5 text-[10px] font-bold rounded uppercase ${isDarkMode ? 'bg-blue-900/30 text-blue-400' : 'bg-blue-100 text-blue-600'}`}>
                                                         System
+                                                    </span>
+                                                )}
+                                                {/* A hybrid: it holds this seeded role's access plus its own
+                                                    extras, so the base is worth reading at a glance. */}
+                                                {role.id > 8 && baseRoleLabel(role.base_role_id) && (
+                                                    <span
+                                                        className={`ml-2 px-1.5 py-0.5 text-[10px] font-bold rounded uppercase ${isDarkMode ? 'bg-purple-900/30 text-purple-400' : 'bg-purple-100 text-purple-600'}`}
+                                                        title={`Inherits everything a ${baseRoleLabel(role.base_role_id)} holds, plus its own permissions`}
+                                                    >
+                                                        {baseRoleLabel(role.base_role_id)} +
                                                     </span>
                                                 )}
                                             </div>

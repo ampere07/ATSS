@@ -144,8 +144,6 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
   // holds, and a group appears when at least one of its children does.
   const menuItems: MenuItem[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    // Agent portal landing page — mirrors the mobile app's agent-dashboard tab.
-    { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'live-monitor', label: 'Monitoring', icon: Activity },
     {
       id: 'billing',

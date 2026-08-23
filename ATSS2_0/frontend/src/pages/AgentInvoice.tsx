@@ -4,6 +4,7 @@ import {
     ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, ChevronDown, X, Eye
 } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { ROLE, roleIdOf } from '../config/permissions';
 import { agentInvoiceService, AgentInvoiceRecord } from '../services/agentInvoiceService';
 import AgentInvoiceDetails from '../components/AgentInvoiceDetails';
 import GlobalSearch from './globalfunctions/GlobalSearch';
@@ -47,19 +48,95 @@ const formatDate = (value?: string | null): string => {
     return date.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
 };
 
-/** Status pill, coloured the way the billing invoice list colours its own. */
-const StatusBadge: React.FC<{ status: string; isDarkMode: boolean }> = ({ status, isDarkMode }) => {
+/**
+ * The statuses the list offers when changing one by hand.
+ *
+ * Mirrors AgentInvoice::SELECTABLE_STATUSES on the server. Sent and Cancelled
+ * are still accepted by the API so invoices already carrying them keep working,
+ * they are simply no longer offered as new choices.
+ */
+const STATUS_OPTIONS = ['Generated', 'Paid', 'Unpaid'];
+
+/** Status colours, matching the way the billing invoice list colours its own. */
+const statusTone = (status: string, isDarkMode: boolean): string => {
     const tone: Record<string, string> = {
         Generated: isDarkMode ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-50 text-blue-700',
         Sent: isDarkMode ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-50 text-amber-700',
         Paid: isDarkMode ? 'bg-emerald-900/40 text-emerald-300' : 'bg-emerald-50 text-emerald-700',
-        Cancelled: isDarkMode ? 'bg-rose-900/40 text-rose-300' : 'bg-rose-50 text-rose-700',
+        Unpaid: isDarkMode ? 'bg-rose-900/40 text-rose-300' : 'bg-rose-50 text-rose-700',
+        Cancelled: isDarkMode ? 'bg-gray-800 text-gray-300' : 'bg-gray-200 text-gray-700',
     };
 
+    return tone[status] || (isDarkMode ? 'bg-gray-800 text-gray-300' : 'bg-gray-100 text-gray-700');
+};
+
+/** The read-only status pill, shown to anyone who may not change a status. */
+const StatusBadge: React.FC<{ status: string; isDarkMode: boolean }> = ({ status, isDarkMode }) => (
+    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${statusTone(status, isDarkMode)}`}>
+        {status}
+    </span>
+);
+
+/**
+ * The status pill, editable in place — picking a value saves it immediately.
+ *
+ * Every click is stopped from reaching the row, which opens the details panel:
+ * without that, choosing a status would also slide the panel open every time.
+ *
+ * Only rendered for an administrator or a superadmin; everyone else gets the
+ * read-only StatusBadge above. The server enforces the same restriction and
+ * answers 403 regardless of what the page renders, so hiding the control is a
+ * convenience, never the protection.
+ */
+const StatusSelect: React.FC<{
+    status: string;
+    isDarkMode: boolean;
+    saving: boolean;
+    onChange: (next: string) => void;
+}> = ({ status, isDarkMode, saving, onChange }) => {
+    // A status the invoice already holds that is no longer offered (a legacy
+    // Sent or Cancelled) is added to the list, so the control shows what the
+    // invoice actually says instead of silently displaying the first option.
+    const options = STATUS_OPTIONS.includes(status) ? STATUS_OPTIONS : [...STATUS_OPTIONS, status];
+
     return (
-        <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${tone[status] || (isDarkMode ? 'bg-gray-800 text-gray-300' : 'bg-gray-100 text-gray-700')}`}>
-            {status}
-        </span>
+        <div className="inline-flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+            <select
+                value={status}
+                disabled={saving}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => onChange(e.target.value)}
+                title="Change this invoice's status"
+                className={`appearance-none cursor-pointer rounded-full px-2.5 py-1 pr-6 text-xs font-semibold border-0 outline-none focus:ring-2 focus:ring-offset-0 ${
+                    isDarkMode ? 'focus:ring-gray-600' : 'focus:ring-gray-300'
+                } disabled:opacity-60 disabled:cursor-wait ${statusTone(status, isDarkMode)}`}
+                style={{
+                    // The arrow is drawn here rather than with a plugin, since
+                    // appearance-none removes the native one.
+                    backgroundImage:
+                        `url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='currentColor' stroke-width='3'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E")`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right 0.4rem center',
+                    backgroundSize: '0.7rem',
+                }}
+            >
+                {options.map(option => (
+                    // Options are drawn by the OS, which ignores the pill's
+                    // colours, so they are given readable ones of their own.
+                    <option
+                        key={option}
+                        value={option}
+                        style={{
+                            backgroundColor: isDarkMode ? '#111827' : '#ffffff',
+                            color: isDarkMode ? '#e5e7eb' : '#111827',
+                        }}
+                    >
+                        {option}
+                    </option>
+                ))}
+            </select>
+            {saving && <Loader2 className="h-3.5 w-3.5 animate-spin opacity-70" />}
+        </div>
     );
 };
 
@@ -86,6 +163,33 @@ const AgentInvoice: React.FC = () => {
     const [selected, setSelected] = useState<AgentInvoiceRecord | null>(null);
     const [isLoadingDetail, setIsLoadingDetail] = useState(false);
     const [pdfPending, setPdfPending] = useState<number | null>(null);
+    // The invoice whose status is being saved right now, so only that row's
+    // control is disabled rather than the whole list.
+    const [statusPending, setStatusPending] = useState<number | null>(null);
+
+    /**
+     * Whether this user may change an invoice's status.
+     *
+     * Administrators and superadmins only. Read once — authData does not change
+     * without a reload — and resolved through roleIdOf, which tries role_id and
+     * falls back to the role name, since either can be missing or stale in
+     * storage. That is the same resolution the rest of the app uses, so this
+     * page cannot disagree with the sidebar about who someone is.
+     *
+     * The server enforces the restriction independently; this only decides
+     * whether the control is worth showing.
+     */
+    const canEditStatus = useMemo(() => {
+        try {
+            const authData = JSON.parse(localStorage.getItem('authData') || '{}');
+            const roleId = roleIdOf(authData);
+            return roleId === ROLE.ADMINISTRATOR || roleId === ROLE.SUPER_ADMIN;
+        } catch {
+            // Unreadable authData means we cannot show it is allowed, so we do
+            // not offer it. The read-only pill still renders.
+            return false;
+        }
+    }, []);
 
     // Whether this user may generate invoices or change a status. The server is
     // the authority — this only decides whether the control is worth showing.
@@ -293,6 +397,54 @@ const AgentInvoice: React.FC = () => {
 
 
 
+    /**
+     * Save a new status for one invoice.
+     *
+     * Applied to the list straight away and put back if the server refuses, so
+     * the pill responds at once without ever showing a value the database does
+     * not hold. The server's own copy of the record replaces it on success, so
+     * anything else it changed (updated_by) is picked up rather than guessed.
+     */
+    const handleStatusChange = async (record: AgentInvoiceRecord, next: string) => {
+        if (!canEditStatus || next === record.status || statusPending !== null) return;
+
+        const previous = record.status;
+        const apply = (status: string) => {
+            setRecords(rows => rows.map(r => (r.id === record.id ? { ...r, status } : r)));
+            setSelected(sel => (sel && sel.id === record.id ? { ...sel, status } : sel));
+        };
+
+        apply(next);
+        setStatusPending(record.id);
+        setError(null);
+
+        try {
+            const response = await agentInvoiceService.updateStatus(record.id, next);
+
+            if (!response?.success) {
+                throw new Error(response?.message || 'The status could not be saved.');
+            }
+
+            if (response.data) {
+                const saved = response.data;
+                setRecords(rows => rows.map(r => (r.id === record.id ? { ...r, ...saved } : r)));
+                setSelected(sel => (sel && sel.id === record.id ? { ...sel, ...saved } : sel));
+            }
+        } catch (err: any) {
+            // Put the old value back: the list must never show a status the
+            // database does not hold. 403 here means "not an administrator",
+            // which is the server's rule to enforce, not this page's.
+            apply(previous);
+            setError(
+                err?.response?.data?.message
+                || err?.message
+                || 'The status could not be saved.'
+            );
+        } finally {
+            setStatusPending(null);
+        }
+    };
+
     const cell = (record: AgentInvoiceRecord, key: string): React.ReactNode => {
         switch (key) {
             case 'invoice_number':
@@ -319,7 +471,16 @@ const AgentInvoice: React.FC = () => {
             case 'subtotal':
                 return <span className="font-semibold">{formatCurrency(record.subtotal)}</span>;
             case 'status':
-                return <StatusBadge status={record.status} isDarkMode={isDarkMode} />;
+                return canEditStatus
+                    ? (
+                        <StatusSelect
+                            status={record.status}
+                            isDarkMode={isDarkMode}
+                            saving={statusPending === record.id}
+                            onChange={(next) => handleStatusChange(record, next)}
+                        />
+                    )
+                    : <StatusBadge status={record.status} isDarkMode={isDarkMode} />;
             case 'actions':
                 return (
                     <div className="flex items-center justify-center gap-1.5">

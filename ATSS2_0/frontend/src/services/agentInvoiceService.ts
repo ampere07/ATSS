@@ -126,7 +126,13 @@ export const agentInvoiceService = {
         return response.data as Blob;
     },
 
-    /** Mark an invoice Sent, Paid or Cancelled. Returns the updated record. */
+    /**
+     * Set one invoice's status — Generated, Paid or Unpaid.
+     *
+     * Administrators only; the server answers 403 otherwise. Sent and Cancelled
+     * are still accepted so invoices already carrying them can be saved, they
+     * are just no longer offered as choices. Returns the updated record.
+     */
     async updateStatus(id: number, status: string) {
         const response = await apiClient.patch(`/agent-invoices/${id}/status`, { status });
         return response.data as { success: boolean; message?: string; data?: AgentInvoiceRecord };

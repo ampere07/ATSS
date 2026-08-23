@@ -10,6 +10,7 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\Rule;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use Throwable;
 
@@ -397,8 +398,13 @@ class AgentInvoiceController extends Controller
                 ], 403);
             }
 
+            // Built from the model's own list rather than spelled out again, so
+            // adding a status in one place cannot leave the other refusing it.
+            // Sent and Cancelled stay accepted even though the list no longer
+            // offers them, so an invoice already carrying one can still be
+            // saved without being forced onto a different status first.
             $validated = $request->validate([
-                'status' => 'required|string|in:Generated,Sent,Paid,Cancelled',
+                'status' => ['required', 'string', Rule::in(AgentInvoice::STATUSES)],
             ]);
 
             $invoice = $this->scopedQuery($user)->find($id);

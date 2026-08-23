@@ -35,7 +35,7 @@ use Throwable;
 class ExportTeamNameReferrals extends Command
 {
     protected $signature = 'agents:export-team-referrals
-                            {--from= : Only rows from this date onwards (YYYY-MM-DD). Defaults to the agent programme start date.}
+                            {--from= : Only rows from this date onwards (YYYY-MM-DD). Defaults to the agent programme start date, or the whole history when it has none.}
                             {--out= : Directory for the CSV files. Defaults to storage/app/exports.}';
 
     protected $description = 'Export customers and job orders whose Referred By holds a team name rather than an agent.';
@@ -54,7 +54,12 @@ class ExportTeamNameReferrals extends Command
         } else {
             // The programme start date is the point before which no referral was
             // ever payable, so it is the natural floor for this hunt.
-            $from = AgentProgramme::startDate() ?? Carbon::parse('2026-08-10')->startOfDay();
+            //
+            // NULL when the programme has no start date, and that is deliberate:
+            // with no cut-off every referral counts, so an export that quietly
+            // floored itself at some remembered date would under-report the very
+            // records it exists to find. Pass --from to impose one by hand.
+            $from = AgentProgramme::startDate();
         }
 
         $outDir = rtrim($this->option('out') ?: storage_path('app/exports'), '/\\');
@@ -69,12 +74,13 @@ class ExportTeamNameReferrals extends Command
             return self::SUCCESS;
         }
 
-        $this->info(sprintf('Looking for referrals naming one of %d team labels, from %s onwards.',
-            count($labels), $from->format('Y-m-d')));
+        $this->info(sprintf('Looking for referrals naming one of %d team labels, %s.',
+            count($labels),
+            $from ? 'from ' . $from->format('Y-m-d') . ' onwards' : 'across their whole history (no date floor)'));
         $this->line('  ' . implode(', ', array_map(fn ($l) => '"' . $l . '"', array_slice($labels, 0, 12)))
             . (count($labels) > 12 ? ', …' : ''));
 
-        $stamp = $from->format('Y-m-d');
+        $stamp = $from ? $from->format('Y-m-d') : 'all';
 
         try {
             $customers = $this->writeCsv(
@@ -120,7 +126,8 @@ class ExportTeamNameReferrals extends Command
         $this->info('Written to ' . $outDir);
 
         if ($customers['rows'] === 0 && $jobOrders['rows'] === 0) {
-            $this->line('Nothing matched — no referral names a team on or after ' . $from->format('Y-m-d') . '.');
+            $this->line('Nothing matched — no referral names a team'
+                . ($from ? ' on or after ' . $from->format('Y-m-d') : ' at any point in the records') . '.');
         }
 
         return self::SUCCESS;
@@ -163,11 +170,17 @@ class ExportTeamNameReferrals extends Command
         )));
     }
 
-    private function customers(array $labels, Carbon $from): iterable
+    /** @param  Carbon|null  $from  null exports the whole history. */
+    private function customers(array $labels, ?Carbon $from): iterable
     {
-        return DB::table('customers')
-            ->whereIn(DB::raw('LOWER(TRIM(referred_by))'), $this->needles($labels))
-            ->where('created_at', '>=', $from->format('Y-m-d H:i:s'))
+        $query = DB::table('customers')
+            ->whereIn(DB::raw('LOWER(TRIM(referred_by))'), $this->needles($labels));
+
+        if ($from !== null) {
+            $query->where('created_at', '>=', $from->format('Y-m-d H:i:s'));
+        }
+
+        return $query
             ->orderBy('created_at')
             ->get([
                 'id', 'account_no', 'first_name', 'middle_initial', 'last_name',
@@ -179,7 +192,8 @@ class ExportTeamNameReferrals extends Command
             ]);
     }
 
-    private function jobOrders(array $labels, Carbon $from, array $settlement): iterable
+    /** @param  Carbon|null  $from  null exports the whole history. */
+    private function jobOrders(array $labels, ?Carbon $from, array $settlement): iterable
     {
         // The same "when did this become billable" expression the invoices use,
         // so the two cannot disagree about which week a job order falls in.
@@ -195,10 +209,15 @@ class ExportTeamNameReferrals extends Command
             array_map(fn ($c) => 'jo.' . $c, $settlement)
         );
 
-        return DB::table('job_orders as jo')
+        $query = DB::table('job_orders as jo')
             ->join('applications as a', 'jo.application_id', '=', 'a.id')
-            ->whereIn(DB::raw('LOWER(TRIM(a.referred_by))'), $this->needles($labels))
-            ->whereRaw("{$onboardedAt} >= ?", [$from->format('Y-m-d H:i:s')])
+            ->whereIn(DB::raw('LOWER(TRIM(a.referred_by))'), $this->needles($labels));
+
+        if ($from !== null) {
+            $query->whereRaw("{$onboardedAt} >= ?", [$from->format('Y-m-d H:i:s')]);
+        }
+
+        return $query
             ->orderByRaw($onboardedAt)
             ->get($select)
             ->map(function ($r) use ($settlement) {

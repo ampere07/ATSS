@@ -26,7 +26,33 @@ class AgentInvoice extends Model
     public const STATUS_GENERATED = 'Generated';
     public const STATUS_SENT      = 'Sent';
     public const STATUS_PAID      = 'Paid';
+    public const STATUS_UNPAID    = 'Unpaid';
     public const STATUS_CANCELLED = 'Cancelled';
+
+    /**
+     * The statuses the invoice list offers when changing one by hand.
+     *
+     * Generated is where every invoice starts, and Paid/Unpaid are the two
+     * states somebody settles it into.
+     *
+     * Sent and Cancelled are deliberately NOT here while remaining valid on
+     * STATUSES below: invoices already carrying them keep them and continue to
+     * display correctly, they simply are not offered as new choices.
+     */
+    public const SELECTABLE_STATUSES = [
+        self::STATUS_GENERATED,
+        self::STATUS_PAID,
+        self::STATUS_UNPAID,
+    ];
+
+    /** Every status the column may legitimately hold, including legacy ones. */
+    public const STATUSES = [
+        self::STATUS_GENERATED,
+        self::STATUS_SENT,
+        self::STATUS_PAID,
+        self::STATUS_UNPAID,
+        self::STATUS_CANCELLED,
+    ];
 
     protected $fillable = [
         'invoice_number',

@@ -44,9 +44,15 @@ class RoleController extends Controller
         // Each entry must be a key the system actually recognises. A role
         // carrying an unknown key would silently grant nothing, which reads as
         // "the permission system is broken" rather than as the typo it is.
+        //
+        // base_role_id must be one of the eight seeded roles. Anything else —
+        // another custom role, a deleted id — would either inherit nothing or
+        // start a chain of roles inheriting each other, and neither is what the
+        // picker offers.
         $validator = Validator::make($request->all(), [
             'role_name' => 'required|string|max:255|unique:roles',
             'description' => 'nullable|string',
+            'base_role_id' => 'nullable|integer|in:' . implode(',', Role::LOCKED_ROLE_IDS),
             'permissions' => 'nullable|array',
             'permissions.*' => 'string|in:' . implode(',', Permissions::all()),
         ]);
@@ -111,6 +117,11 @@ class RoleController extends Controller
         $validator = Validator::make($request->all(), [
             'role_name' => 'sometimes|string|max:255|unique:roles,role_name,' . $id,
             'description' => 'sometimes|nullable|string',
+            // Null clears the base, turning a hybrid back into a standalone
+            // custom role. Its own `permissions` are untouched, so it keeps
+            // exactly the keys that were ticked against it rather than the
+            // inherited ones it is losing.
+            'base_role_id' => 'sometimes|nullable|integer|in:' . implode(',', Role::LOCKED_ROLE_IDS),
             'permissions' => 'sometimes|nullable|array',
             'permissions.*' => 'string|in:' . implode(',', Permissions::all()),
         ]);

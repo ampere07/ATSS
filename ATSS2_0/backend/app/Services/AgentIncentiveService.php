@@ -28,6 +28,24 @@ use Throwable;
  * and batch numbers keep incrementing per agent across runs (batch 1, 2, 3, …).
  * Any remainder (< quota) carries over unprocessed to the next run.
  *
+ * PROGRESS IS NEVER RESET BY A RUN.
+ * ---------------------------------------------------------------------------
+ * A run does not "start a fresh count". It asks one question — which of this
+ * agent's completed Job Orders are NOT yet in `agent_incentive_history` — and
+ * that set only ever grows until a quota completes. So an agent on a quota of 5
+ * who has Customer 1 and Customer 2 today still has both tomorrow, counted
+ * toward the SAME quota, however many times the cron runs in between. Nothing
+ * is discarded for want of a full quota; the run simply reports progress
+ * (2/5) and awards nothing.
+ *
+ * When the quota does complete, the opposite applies and it applies
+ * permanently: every Job Order that made up the completed quota is written to
+ * `agent_incentive_history` inside the same transaction that pays it, tagged
+ * with that cycle's `batch_number`. From that moment those customers are
+ * consumed — the `whereNotExists` below can never see them again, so they
+ * cannot be counted toward a second quota or paid a second time. Only
+ * customers arriving afterwards count toward the next one.
+ *
  * Only Job Orders onboarded on or after `config('agent.start_date')` are in
  * scope; anything earlier belongs to the period before the scheme and earns
  * nothing. Achievement progress uses the same date, so the two always agree
@@ -79,6 +97,10 @@ class AgentIncentiveService
             'job_orders_recorded' => 0,
             'skipped'             => 0,   // agents skipped (no user / not configured)
             'skipped_job_orders'  => 0,   // completed job orders skipped (already processed)
+            // Job orders held as unfinished quota progress at the end of the
+            // run. They are NOT lost — the next run counts them toward the same
+            // quota — and this is the figure that proves it.
+            'job_orders_carried'  => 0,
             'errors'              => 0,
         ];
 
@@ -130,6 +152,7 @@ class AgentIncentiveService
         $this->writeLog("  • Job Orders Recorded: {$summary['job_orders_recorded']}");
         $this->writeLog("  • Agents Skipped:      {$summary['skipped']}");
         $this->writeLog("  • Job Orders Skipped:  {$summary['skipped_job_orders']}");
+        $this->writeLog("  • Job Orders Carried:  {$summary['job_orders_carried']} (unfinished quota progress kept for the next run)");
         $this->writeLog("  • Errors:              {$summary['errors']}");
         $this->writeLog("  • Duration:            {$duration} second(s)");
         $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
@@ -252,7 +275,18 @@ class AgentIncentiveService
 
         if ($cycles < 1) {
             // Progress only — not enough to award yet.
+            //
+            // Nothing is written and nothing is discarded. These job orders stay
+            // absent from agent_incentive_history, so the NEXT run finds exactly
+            // the same ones plus whatever arrived since, and counts them all
+            // toward this same quota. Naming them makes that checkable: the same
+            // IDs should reappear in the next run's log.
+            $summary['job_orders_carried'] += $available;
+
             $this->writeLog("  [PROGRESS] {$available}/{$quota} toward next incentive — quota not reached, no award");
+            if ($available > 0) {
+                $this->writeLog("  [CARRY] Kept for the next run (not reset): job order ID(s) " . implode(', ', $jobOrderIds));
+            }
             $this->writeLog("[{$counter}/{$total}] ✓ DONE (no award)");
             return;
         }
@@ -337,10 +371,19 @@ class AgentIncentiveService
                     'agent_id'        => (int) $balance->agent_id,
                     'job_order_id'    => $jobOrderId,
                     'quota_reached'   => $quota,
+                    // (agent_id, batch_number) is what says "these customers
+                    // are the ones that completed THIS quota" — the record the
+                    // invoice run and any later audit read to tie a payout back
+                    // to the customers that earned it.
                     'batch_number'    => $batchNumber,
                     'incentive_value' => $completesCycle ? ($cycleAwards[$cycleIndex] ?? 0.0) : 0.0,
                     'organization_id' => $orgId,
+                    // When the quota was reached. The weekly invoice run bills
+                    // by this, so it is what decides which invoice period a
+                    // completed quota belongs to.
                     'processed_at'    => $now,
+                    // agent_invoice_id / invoiced_at are left NULL: earned, not
+                    // yet billed. The weekly run claims them exactly once.
                     'created_at'      => $now,
                     'updated_at'      => $now,
                 ];
@@ -369,7 +412,12 @@ class AgentIncentiveService
         $this->writeLog("  [DB] ✓ COMMIT SUCCESSFUL");
         $this->writeLog("  [AWARD] Incentives: " . number_format($currentIncentives, 2) . " → " . number_format($newIncentives, 2) . " (+" . number_format($totalAward, 2) . ")");
         if ($available > $processCount) {
-            $this->writeLog("  [CARRY] " . ($available - $processCount) . " completed job order(s) carried over to next run");
+            // The remainder that did not make up a full quota. Left unrecorded
+            // on purpose, so it becomes the opening progress of the next quota
+            // rather than being thrown away.
+            $carried = array_slice($jobOrderIds, $processCount);
+            $summary['job_orders_carried'] += count($carried);
+            $this->writeLog("  [CARRY] " . count($carried) . " completed job order(s) carried over to next run (not reset): job order ID(s) " . implode(', ', $carried));
         }
         $this->writeLog("  [COMPLETE] {$agentName} (#{$agentId}) — awarded incentive x{$cycles}, recorded {$processCount} job order(s)");
         $this->writeLog("[{$counter}/{$total}] ✓ SUCCESS");

@@ -123,6 +123,13 @@ export interface Role {
   id: number;
   role_name: string;
   description?: string;
+  /**
+   * The seeded role (1-8) this custom role inherits from, or null for a
+   * standalone one. A "hybrid" role holds its base role's keys — resolved live
+   * on the server, never copied into `permissions` — plus the ones below.
+   */
+  base_role_id?: number | null;
+  /** Only the keys ticked against this role; a hybrid's inherited keys are not here. */
   permissions?: string;
   created_at: string;
   updated_at: string;

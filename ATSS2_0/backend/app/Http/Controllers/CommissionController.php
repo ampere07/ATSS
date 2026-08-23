@@ -686,7 +686,11 @@ class CommissionController extends Controller
             $updatedAfter = $request->input('updated_after');
 
             $base = DB::table('agent_incentive_history as aih')
-                ->leftJoin('users as u', 'aih.agent_id', '=', 'u.id');
+                ->leftJoin('users as u', 'aih.agent_id', '=', 'u.id')
+                // Left join, because most rows are legitimately unbilled: the
+                // quota has been earned and is waiting for the invoice run that
+                // covers the week it was awarded in.
+                ->leftJoin('agent_invoices as ai', 'aih.agent_invoice_id', '=', 'ai.id');
 
             if ($agentId) {
                 $base->where('aih.agent_id', $agentId);
@@ -708,6 +712,14 @@ class CommissionController extends Controller
                     'aih.incentive_value',
                     'aih.organization_id',
                     'aih.processed_at',
+                    // Whether this completed quota has been paid out on a weekly
+                    // invoice yet, and on which one. NULL means earned and still
+                    // waiting for the invoice run whose billing week contains
+                    // `processed_at` — which is what makes a double payout
+                    // visible from this list rather than only from the invoice.
+                    'aih.agent_invoice_id',
+                    'aih.invoiced_at',
+                    'ai.invoice_number',
                     'aih.created_at',
                     'aih.updated_at',
                     DB::raw("TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) as agent_name")
@@ -729,6 +741,10 @@ class CommissionController extends Controller
                     'incentive_value' => $r->incentive_value,
                     'organization_id' => $r->organization_id,
                     'processed_at'    => $r->processed_at,
+                    'agent_invoice_id' => $r->agent_invoice_id,
+                    'invoice_number'   => $r->invoice_number,
+                    'invoiced_at'      => $r->invoiced_at,
+                    'is_invoiced'      => $r->agent_invoice_id !== null,
                     'created_at'      => $r->created_at,
                     'updated_at'      => $r->updated_at,
                 ];

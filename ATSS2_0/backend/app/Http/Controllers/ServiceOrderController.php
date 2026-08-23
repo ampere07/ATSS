@@ -645,13 +645,23 @@ class ServiceOrderController extends Controller
                     $updateData['new_router_modem_sn'] = $newSN;
                     $updateData['new_lcpnap'] = $newLcpNap;
 
-                    // Sync to technical_details table
+                    // Sync to technical_details table.
+                    //
+                    // router_modem_sn is deliberately NOT written here. The serial
+                    // only becomes the account's active router once the visit is
+                    // Done — see the deferred write further down, which lands it at
+                    // the same moment SmartOLT is told about the swap so the two
+                    // never disagree about which router is live.
+                    //
+                    // Holding it back also keeps old_router_modem_sn above honest:
+                    // it is read straight off technical_details, so writing the new
+                    // serial now would make a re-save record the new router as the
+                    // one that came out.
                     $technicalUpdateData = [
                         'lcp' => $newLcp,
                         'nap' => $newNap,
                         'port' => $newPort,
                         'vlan' => $newVlan,
-                        'router_modem_sn' => $newSN,
                         'lcpnap' => $newLcpNap,
                         'updated_at' => now(),
                         'updated_by' => $updatedByUser
@@ -972,23 +982,10 @@ class ServiceOrderController extends Controller
                 Log::info('Updated technical_details table');
             }
 
-            // Hand the ONU over in SmartOLT: unbind the router that came out, name the
-            // one that went in. Runs after the technical_details write above so
-            // SmartOLT is only ever told about a swap that actually persisted, and it
-            // reads the account's own PPPoE username, address and contact.
-            //
-            // Best-effort by design — a SmartOLT outage must never fail a visit the
-            // technician already saved, so the service swallows and logs every failure
-            // to the smartoltrelated channel. Idempotent: re-saving the same order
-            // skips the unbind (the SNs now match) and re-posts identical details.
-            if ($smartOltSync !== null) {
-                app(\App\Services\SmartOltService::class)->syncOnuForRouterReplacement(
-                    $order->account_no,
-                    $smartOltSync['old_sn'],
-                    $smartOltSync['new_sn'],
-                    '[SERVICE ORDER REPLACE ROUTER]'
-                );
-            }
+            // The SmartOLT handover used to fire here, on any save that carried a new
+            // SN. It now waits until the ticket says the replacement visit is
+            // finished — see the "Replace Router" block further down, next to the
+            // pullout and migration triggers it belongs with.
 
             if ($request->has('item_name_1') && !empty($request->item_name_1)) {
                 Log::info('Processing item_name_1: ' . $request->item_name_1);
@@ -1038,6 +1035,10 @@ class ServiceOrderController extends Controller
             $isAlreadyResolvedRestrict = (($originalConcern === 'Restrict' || $originalConcern === 'Disconnect') && $originalSupportStatus === 'resolved');
             $isAlreadyPulloutDone = ($originalRepairCategory === 'pullout' && $originalVisitStatus === 'done');
             $isAlreadyMigrationDone = (in_array($originalRepairCategory, ['migrate', 'relocate', 'relocate router', 'transfer lcp/nap/port']) && $originalVisitStatus === 'done');
+            // Was the ONU handover already earned before this write? If so this save
+            // is a re-save of a finished replacement and must not run it again.
+            $isAlreadyReplaceRouterDone = ($originalRepairCategory === \App\Services\SmartOltService::REPLACE_ROUTER_CATEGORY
+                && $originalVisitStatus === \App\Services\SmartOltService::VISIT_STATUS_DONE);
 
             $reconnectStatus = null;
             $normalizedConcern = $currentConcern ? strtolower(trim($currentConcern)) : '';
@@ -1230,6 +1231,36 @@ class ServiceOrderController extends Controller
                     $pulloutStatus = $this->attemptPullout($billingAccount, $updatedByUser, $organizationId);
                 }
             }
+
+            // The new serial becomes the account's active router only now, once the
+            // ticket says the visit is Done. Held back from the technical_details
+            // write earlier in this method so a repair still in progress does not
+            // move the customer onto a router that has not been installed yet.
+            //
+            // Read from the stored row, not the request: the serial may have been
+            // entered on an earlier save and the visit completed by a later one that
+            // carries no SN at all.
+            \App\Support\ReplacementRouterSn::applyIfVisitDone($pulloutRow, $updatedByUser, '[SERVICE ORDER REPLACE ROUTER]');
+
+            // Trigger the SmartOLT router handover when repair category is
+            // 'Replace Router' AND visit status is 'Done'.
+            //
+            // Decided on $pulloutRow — the ticket as stored AFTER this request's
+            // write — for the same reason the pullout above is: neither the request
+            // body nor the pre-update copy can be trusted to say the visit is
+            // finished. A replacement still in progress therefore never reaches
+            // SmartOLT, however the payload is spelled.
+            //
+            // Best-effort by design: a SmartOLT outage must never fail a visit the
+            // technician already saved, so the service logs every outcome to the
+            // smartoltrelated channel and returns rather than throwing.
+            $replaceRouterStatus = app(\App\Services\SmartOltService::class)
+                ->syncOnuForCompletedRouterReplacement(
+                    $pulloutRow,
+                    $isAlreadyReplaceRouterDone,
+                    $smartOltSync,
+                    '[SERVICE ORDER REPLACE ROUTER]'
+                );
 
             // Trigger Migration if repair category is 'Migrate', 'Relocate', 'Relocate Router', or 'Transfer LCP/NAP/PORT' and visit status is 'Done'
             $migrationStatus = null;

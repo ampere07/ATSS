@@ -1097,8 +1097,17 @@ class JobOrderController extends Controller
      *     approval's transaction, and a half-applied credit must roll back with
      *     it rather than leave an agent's balance wrong.
      *
+     * A fourth outcome is possible and is the one that catches people out: a
+     * referral IS recorded, but no agent matches it, so settle() writes nothing
+     * and the approval succeeds looking entirely normal. The job order's
+     * commission_status, commission_value, incentive_value, agent_paid_at and
+     * agent_paid_to all stay NULL — indistinguishable from the feature not
+     * being deployed. approve() logs that case as a WARNING with the referral
+     * text, because it is the only way to tell the two apart.
+     *
      * @return array{paid: bool, reason: string, agent_id: ?int,
-     *               commission: float, incentive_value: float}
+     *               commission: float, incentive_value: float,
+     *               referred_by?: string}
      */
     private function settleReferringAgent(JobOrder $jobOrder, ?string $actionBy): array
     {
@@ -1122,6 +1131,13 @@ class JobOrderController extends Controller
             return $skipped('no referred_by on the application');
         }
 
+        // Carried into the outcome so a skip can be read without going back to
+        // the database to ask what the referral actually said. The commonest
+        // cause of a skip is a referral naming a TEAM rather than an agent —
+        // see agents:export-team-referrals — and the value is what shows that
+        // at a glance.
+        $referralText = trim((string) $referredBy);
+
         try {
             $service = app(\App\Services\JobOrderAgentPaymentService::class);
         } catch (\Throwable $e) {
@@ -1134,7 +1150,13 @@ class JobOrderController extends Controller
             return $skipped('settlement service unavailable');
         }
 
-        return $service->settle($jobOrder, $actionBy);
+        $outcome = $service->settle($jobOrder, $actionBy);
+
+        // The referral text travels with the outcome either way, so the caller
+        // can say WHY nothing settled rather than only that nothing did.
+        $outcome['referred_by'] = $referralText;
+
+        return $outcome;
     }
 
     public function approve($id): JsonResponse
@@ -1451,12 +1473,35 @@ class JobOrderController extends Controller
                     'commission'      => $agentPayment['commission'],
                     'incentive_value' => $agentPayment['incentive_value'],
                 ]);
-            } elseif ($agentPayment['reason'] !== '') {
-                // Not an error: a job order with no identifiable referring
-                // agent is still a valid approval.
+            } elseif ($agentPayment['reason'] === 'no referred_by on the application') {
+                // Genuinely ordinary: walk-ins and direct sign-ups have no
+                // referrer, so there is nothing to settle and nothing to see.
                 \Log::info('Job Order Approval - agent not settled', [
                     'job_order_id' => $id,
                     'reason'       => $agentPayment['reason'],
+                ]);
+            } elseif ($agentPayment['reason'] !== '' && $agentPayment['reason'] !== 'already_paid') {
+                // A referral WAS recorded and still nothing settled. The
+                // approval is valid, but the agent has silently not been paid
+                // and the job order's commission_status, commission_value,
+                // incentive_value, agent_paid_at and agent_paid_to all stay
+                // NULL — which looks identical to the feature not running.
+                //
+                // A warning, not info, because this needs somebody to look:
+                //   • "no matching agent" almost always means referred_by names
+                //     a TEAM, not an agent (agents:export-team-referrals lists
+                //     them), or the name on the account does not match what was
+                //     typed into the referral.
+                //   • "agent has no balance record" means the agent exists but
+                //     holds no agent_balance row, which is what defines an
+                //     agent everywhere in this module — add one and the next
+                //     approval settles.
+                \Log::warning('Job Order Approval - referral recorded but agent NOT settled', [
+                    'job_order_id' => $id,
+                    'reason'       => $agentPayment['reason'],
+                    'referred_by'  => $agentPayment['referred_by'] ?? null,
+                    'agent_id'     => $agentPayment['agent_id'],
+                    'effect'       => 'commission_status/commission_value/incentive_value/agent_paid_at/agent_paid_to left NULL on this job order',
                 ]);
             }
 

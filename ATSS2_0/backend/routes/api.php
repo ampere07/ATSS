@@ -1266,9 +1266,10 @@ Route::post('/login', function (Request $request) {
         //
         // Resolved through App\Support\Permissions rather than read straight off
         // the role row, so a seeded role (1-8) gets the keys its role implies
-        // and a custom role (9+) gets its own stored list — the clients receive
-        // one shape and do not have to know which kind of role they hold. A
-        // SuperAdmin gets ["*"].
+        // and a custom role (9+) gets its own stored list — plus, if it is a
+        // hybrid, everything its base role holds. The clients receive one shape
+        // and do not have to know which kind of role they hold. A SuperAdmin
+        // gets ["*"].
         //
         // This is the same list /api/me/permissions returns; sending it at
         // sign-in saves the first paint a round trip.
@@ -1285,7 +1286,7 @@ Route::post('/login', function (Request $request) {
                 'permissions' => $rolePermissions,
                 // Where this role should land. The client uses it instead of
                 // guessing from the first key in the list.
-                'home' => \App\Support\Permissions::ROLE_HOME[(int) $user->role_id] ?? null,
+                'home' => \App\Support\Permissions::homeFor($user),
             ]
         ];
 
@@ -1435,7 +1436,7 @@ Route::middleware('auth:sanctum')->get('/me/permissions', function (Request $req
             'role_id'     => (int) $user->role_id,
             'role'        => strtolower(optional($user->role)->role_name ?? ''),
             'permissions' => \App\Support\Permissions::forUser($user),
-            'home'        => \App\Support\Permissions::ROLE_HOME[(int) $user->role_id] ?? null,
+            'home'        => \App\Support\Permissions::homeFor($user),
         ],
     ]);
 });

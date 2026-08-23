@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\IncentiveAlreadyBilled;
 use App\Models\AgentInvoice;
 use App\Models\AgentInvoiceCustomer;
 use App\Models\User;
@@ -34,8 +35,34 @@ use Throwable;
  * a timeout, or somebody running the command by hand on a Monday morning all
  * end the same way: one invoice, one row per customer.
  *
+ * WHAT AN INVOICE IS MADE OF
+ * ---------------------------------------------------------------------------
+ * Two separate figures, worked out two different ways:
+ *
+ *   COMMISSION is per referral, summed across the customers on the invoice at
+ *   the rate on each referring agent's own record. This invoice's own customers
+ *   are what it is built from, so it is calculated here.
+ *
+ *   TOTAL AMOUNT is the incentive, and it is NOT calculated here. It is read
+ *   from `agent_incentive_history` — the ledger the incentive cron writes when
+ *   an agent completes a quota — taking only the quotas the cron awarded inside
+ *   this invoice's billing week. An invoice for 10–16 August bills exactly what
+ *   the cron awarded between the 10th at 00:00:00 and the 16th at 23:59:59, no
+ *   matter how many times the cron ran in that week, and nothing from outside
+ *   those bounds.
+ *
+ * The cron owns the question of whether a quota was completed, because only it
+ * can see progress accumulating across weeks; a single invoice period cannot.
+ * Each completed quota is then billed exactly once: claiming it stamps the
+ * invoice's id onto its ledger rows, and the claim only lands on rows still
+ * unstamped — so a quota already billed cannot be billed again, and two runs
+ * overlapping cannot both take the same one. See incentivesForPeriod() and
+ * claimIncentives().
+ *
  * Everything for one owner is written inside a transaction, so a failure part
- * way through leaves no invoice rather than an invoice missing its customers.
+ * way through leaves no invoice rather than an invoice missing its customers —
+ * and the incentive claim is inside it too, so an invoice can never be issued
+ * carrying an incentive it did not successfully claim.
  * One owner failing never stops the rest of the run.
  */
 class AgentInvoiceService
@@ -417,9 +444,17 @@ class AgentInvoiceService
 
         $billable = $this->billableCustomers($owner, $periodStart, $periodEnd, $summary);
 
-        if ($billable === []) {
+        // What the incentive cron awarded this owner inside this billing week.
+        // Read, never recalculated — the cron is the source of truth.
+        $incentive = $this->incentivesForPeriod($owner, $periodStart, $periodEnd, $tag);
+
+        // An owner can legitimately have one without the other: a quota can
+        // complete in a week whose own installs are all in the next one, and a
+        // week of installs can complete no quota at all. Only when BOTH are
+        // empty is there nothing to invoice.
+        if ($billable === [] && $incentive['amount'] <= 0) {
             $summary['owners_no_work']++;
-            $this->writeLog("{$tag} ⊘ SKIPPED: nothing billable this week");
+            $this->writeLog("{$tag} ⊘ SKIPPED: nothing billable this week (no referrals, no incentives awarded in the period)");
             return;
         }
 
@@ -435,29 +470,34 @@ class AgentInvoiceService
             ));
         }
 
-        $unitPrice = (float) ($owner['members'][0]['unit_price'] ?? config('agent_invoices.unit_price', 100));
-        $count     = count($billable);
+        $count = count($billable);
 
-        // The incentive is earned by REACHING the quota, once per completed
-        // quota — not by each referral. 25 customers against a quota of 10 bill
-        // two incentives.
-        //
-        // A quota of 0 means the agent is not on the incentive scheme, so no
-        // incentive is billed; their commission (below) is untouched by this.
-        //
-        // WARNING — the remainder is lost, unlike in AgentIncentiveService.
-        // Every billable customer is written to agent_invoice_customers below
-        // and the unique key on (owner_key, application_id) bars them from any
-        // later invoice, so the 5 left over here never count toward a future
-        // quota. An owner installing fewer than `quota` customers in a week
-        // therefore bills no incentive at all, ever, while the cron pays them
-        // because it carries its remainder forward. Counting per invoice period
-        // is what the old per-referral rule made harmless; under a quota rule it
-        // needs the count to span periods.
+        // The incentive is NOT worked out here. It is read from what the
+        // incentive cron already awarded inside this billing week — see
+        // incentivesForPeriod() for why that is the only defensible source.
         $quota           = (int) ($owner['members'][0]['quota'] ?? 0);
-        $quotasReached   = $quota > 0 ? intdiv($count, $quota) : 0;
-        $totalAmount     = round($quotasReached * $unitPrice, 2);
+        $quotasReached   = $incentive['quotas'];
+        $totalAmount     = $incentive['amount'];
         $installationFee = (float) config('agent_invoices.installation_fee', 0);
+
+        // What one completed quota was worth on this invoice.
+        //
+        // Taken from the awards themselves rather than from the agent's current
+        // configuration, so the stated rate and the stated total always agree.
+        // They would otherwise drift the moment an administrator changed the
+        // rate: the cron pays a quota at the rate in force when it completed,
+        // and printing today's rate beside a total built from last week's would
+        // make an arithmetically impossible document.
+        //
+        // The configured rate stands in only where it cannot be derived —
+        // no incentive this week, or a team whose members earned at different
+        // rates, where no single figure is the truth.
+        $configuredRate = (float) ($owner['members'][0]['unit_price'] ?? config('agent_invoices.unit_price', 100));
+        $ratesPaid      = array_values(array_unique(array_map(
+            fn ($b) => (float) $b['amount'],
+            $incentive['batches']
+        )));
+        $unitPrice = count($ratesPaid) === 1 ? $ratesPaid[0] : $configuredRate;
 
         // Commission is earned per referral, at the rate of the agent who
         // brought that customer in — so it is the sum across the invoice, not a
@@ -478,7 +518,8 @@ class AgentInvoiceService
         try {
             DB::transaction(function () use (
                 $owner, $ownerKey, $periodStart, $periodEnd, $billable, $unitPrice,
-                $count, $totalAmount, $installationFee, $commission, $subtotal, &$invoice
+                $count, $totalAmount, $installationFee, $commission, $subtotal,
+                $incentive, $tag, &$invoice
             ) {
                 $invoice = AgentInvoice::create([
                     'invoice_number'   => $this->nextInvoiceNumber(),
@@ -531,7 +572,17 @@ class AgentInvoiceService
                 foreach (array_chunk($rows, 500) as $chunk) {
                     DB::table('agent_invoice_customers')->insert($chunk);
                 }
+
+                $this->claimIncentives($incentive, $invoice, $now, $tag);
             });
+        } catch (IncentiveAlreadyBilled $e) {
+            // Another invoice claimed one of these completed quotas between our
+            // read and our write. The whole invoice has rolled back, incentives
+            // included, so nothing has been paid twice. A re-run will see the
+            // remaining unbilled quotas and bill those.
+            $summary['invoices_skipped']++;
+            $this->writeLog("{$tag} ⊘ SKIPPED: " . $e->getMessage());
+            return;
         } catch (QueryException $e) {
             // Another run got there first, or a customer slipped in between the
             // read and the write. Either way this owner is already covered.
@@ -545,34 +596,281 @@ class AgentInvoiceService
         $summary['amount_invoiced']  += $subtotal;
 
         $this->writeVerbose(sprintf(
-            '%s   %d customer(s), quota %s → %d completed quota(s) × ₱%s = ₱%s, commission ₱%s, installation fee ₱%s',
+            '%s   %d customer(s) billed; incentive taken from the cron: %d completed quota(s) awarded %s to %s = ₱%s; commission ₱%s, installation fee ₱%s',
             $tag,
             $count,
-            $quota > 0 ? (string) $quota : 'not set',
             $quotasReached,
-            number_format($unitPrice, 2),
+            $periodStart->format('Y-m-d H:i:s'),
+            $periodEnd->format('Y-m-d H:i:s'),
             number_format($totalAmount, 2),
             number_format($commission, 2),
             number_format($installationFee, 2)
         ));
 
-        if ($quota > 0 && ($count % $quota) !== 0) {
+        foreach ($incentive['batches'] as $batch) {
             $this->writeVerbose(sprintf(
-                '%s   %d customer(s) short of the next quota — carried to a later invoice',
+                '%s     incentive: agent #%d batch %d — ₱%s awarded %s (quota of %d, job order(s) %s)',
                 $tag,
-                $count % $quota
+                $batch['agent_id'],
+                $batch['batch_number'],
+                number_format($batch['amount'], 2),
+                $batch['processed_at'],
+                $batch['quota_reached'],
+                implode(', ', $batch['job_order_ids'])
+            ));
+        }
+
+        if ($quota > 0 && $quotasReached === 0) {
+            $this->writeVerbose(sprintf(
+                '%s   no completed quota fell in this week — the agent\'s progress toward their quota of %d is held by the incentive cron, not lost',
+                $tag,
+                $quota
             ));
         }
 
         $this->writeLog(
-            "{$tag} ✓ SUCCESS - {$invoice->invoice_number} issued — {$count} customer(s), subtotal ₱"
-            . number_format($subtotal, 2)
+            "{$tag} ✓ SUCCESS - {$invoice->invoice_number} issued — {$count} customer(s), incentive ₱"
+            . number_format($totalAmount, 2) . ", subtotal ₱" . number_format($subtotal, 2)
         );
 
         // The PDF is written outside the transaction: a file that fails to
         // write must not undo a correctly recorded invoice. It can be produced
         // again on demand from the stored rows.
         $this->writePdf($invoice, $summary, $tag);
+    }
+
+    /**
+     * The incentive this owner earned inside this billing week.
+     *
+     * READ, NEVER RECALCULATED. The incentive cron
+     * (AgentIncentiveService) is the only thing that decides whether a quota
+     * was completed and what it was worth, and it already wrote that decision
+     * to `agent_incentive_history`. This method's whole job is to find the
+     * right rows and total them.
+     *
+     * Recalculating here — counting this week's billable customers and dividing
+     * by the quota — is what this replaces, and it was wrong in both
+     * directions. It lost every remainder, because a customer billed this week
+     * can never be billed again, so an owner who installed 8 against a quota of
+     * 10 bought nothing toward the next quota and would never earn an incentive
+     * at all. And it paid quotas the cron had already paid, since neither knew
+     * what the other had done. One source of truth removes both.
+     *
+     * WHICH ROWS. Three conditions, all required:
+     *
+     *   • `agent_id` is one of this owner's agents. A team invoice totals every
+     *     member's incentives; a solo invoice is just the one agent.
+     *   • `processed_at` falls inside the billing week, to the second. This is
+     *     when the cron awarded the quota, so an invoice for 10–16 August takes
+     *     exactly what the cron awarded between the 10th at 00:00:00 and the
+     *     16th at 23:59:59, however many times it ran in between, and nothing
+     *     from outside those bounds.
+     *   • `agent_invoice_id` is NULL — not yet billed on any invoice.
+     *
+     * Only rows carrying `incentive_value > 0` are money: the cron records the
+     * award against the one job order that COMPLETED each quota and 0 against
+     * the rest of that batch. Totalling the column would therefore be correct
+     * on its own, but the batch's other rows are collected too, because they
+     * name the customers that earned the payout — and they are claimed with it,
+     * so the whole completed quota is marked billed together.
+     *
+     * @return array{amount: float, quotas: int, row_ids: int[], batches: array}
+     */
+    private function incentivesForPeriod(array $owner, Carbon $periodStart, Carbon $periodEnd, string $tag = ''): array
+    {
+        $empty = ['amount' => 0.0, 'quotas' => 0, 'row_ids' => [], 'batches' => []];
+
+        $agentIds = array_values(array_unique(array_map(
+            fn ($m) => (int) $m['user_id'],
+            $owner['members']
+        )));
+
+        if ($agentIds === []) {
+            return $empty;
+        }
+
+        $from = $periodStart->format('Y-m-d H:i:s');
+        $to   = $periodEnd->format('Y-m-d H:i:s');
+
+        // The paying row of each completed quota awarded in this week.
+        $paying = DB::table('agent_incentive_history')
+            ->whereIn('agent_id', $agentIds)
+            ->whereNull('agent_invoice_id')
+            ->where('incentive_value', '>', 0)
+            ->whereNotNull('processed_at')
+            ->where('processed_at', '>=', $from)
+            ->where('processed_at', '<=', $to)
+            ->orderBy('agent_id')
+            ->orderBy('batch_number')
+            ->get(['id', 'agent_id', 'batch_number', 'quota_reached', 'incentive_value', 'processed_at', 'job_order_id']);
+
+        // An owner sitting on unbilled quotas from BEFORE this window is worth
+        // saying out loud whether or not this week has any of its own, because
+        // the strict window is what leaves them there.
+        $this->reportUnbilledOutsidePeriod($agentIds, $from, $to, $tag);
+
+        // Nothing awarded in the window is a normal week, not a fault.
+        if ($paying->isEmpty()) {
+            return $empty;
+        }
+
+        $rowIds  = [];
+        $batches = [];
+        $amount  = 0.0;
+
+        foreach ($paying as $row) {
+            $key = $row->agent_id . ':' . $row->batch_number;
+
+            $rowIds[] = (int) $row->id;
+            $amount  += (float) $row->incentive_value;
+
+            $batches[$key] = [
+                'agent_id'      => (int) $row->agent_id,
+                'batch_number'  => (int) $row->batch_number,
+                'quota_reached' => (int) $row->quota_reached,
+                'amount'        => (float) $row->incentive_value,
+                'processed_at'  => (string) $row->processed_at,
+                'job_order_ids' => [(int) $row->job_order_id],
+            ];
+        }
+
+        // The rest of each batch: the other customers that made up the quota.
+        //
+        // Batch 0 is skipped deliberately. It is what rows recorded before batch
+        // numbers existed carry, so matching on it would sweep in every legacy
+        // row the agent has rather than one quota's worth.
+        $batchPairs = array_values(array_filter(
+            $batches,
+            fn ($b) => $b['batch_number'] > 0
+        ));
+
+        if ($batchPairs !== []) {
+            $companions = DB::table('agent_incentive_history')
+                ->whereIn('agent_id', $agentIds)
+                ->whereNull('agent_invoice_id')
+                ->whereNotIn('id', $rowIds)
+                ->where(function ($q) use ($batchPairs) {
+                    foreach ($batchPairs as $batch) {
+                        $q->orWhere(function ($w) use ($batch) {
+                            $w->where('agent_id', $batch['agent_id'])
+                              ->where('batch_number', $batch['batch_number']);
+                        });
+                    }
+                })
+                ->orderBy('job_order_id')
+                ->get(['id', 'agent_id', 'batch_number', 'job_order_id']);
+
+            foreach ($companions as $row) {
+                $key = $row->agent_id . ':' . $row->batch_number;
+
+                if (!isset($batches[$key])) {
+                    continue;
+                }
+
+                $rowIds[] = (int) $row->id;
+                $batches[$key]['job_order_ids'][] = (int) $row->job_order_id;
+            }
+        }
+
+        return [
+            'amount'  => round($amount, 2),
+            'quotas'  => count($batches),
+            'row_ids' => array_values(array_unique($rowIds)),
+            'batches' => array_values($batches),
+        ];
+    }
+
+    /**
+     * Mark this invoice as the one that paid these completed quotas.
+     *
+     * The `whereNull('agent_invoice_id')` on the update is the guard, not a
+     * tidy-up: it means the write only lands on rows nobody has claimed yet. If
+     * fewer rows come back than were asked for, another invoice took one in
+     * between — so this throws, the surrounding transaction rolls back, and the
+     * invoice that would have double-paid is never issued at all.
+     *
+     * Without that check the read and the write are two separate moments, and
+     * two runs overlapping (the Monday cron and somebody pressing Generate)
+     * could each read the same unbilled quota and each bill it.
+     *
+     * @param  array{amount: float, quotas: int, row_ids: int[], batches: array}  $incentive
+     *
+     * @throws IncentiveAlreadyBilled  when another invoice claimed a row first
+     */
+    private function claimIncentives(array $incentive, AgentInvoice $invoice, Carbon $now, string $tag = ''): void
+    {
+        $rowIds = $incentive['row_ids'];
+
+        if ($rowIds === []) {
+            return;
+        }
+
+        $claimed = DB::table('agent_incentive_history')
+            ->whereIn('id', $rowIds)
+            ->whereNull('agent_invoice_id')
+            ->update([
+                'agent_invoice_id' => $invoice->id,
+                'invoiced_at'      => $now,
+                'updated_at'       => $now,
+            ]);
+
+        if ($claimed !== count($rowIds)) {
+            throw new IncentiveAlreadyBilled(sprintf(
+                'incentive already billed elsewhere — claimed %d of %d incentive record(s); '
+                . 'the invoice has been rolled back rather than pay a quota twice',
+                $claimed,
+                count($rowIds)
+            ));
+        }
+
+        $this->writeVerbose(sprintf(
+            '%s   claimed %d incentive record(s) covering %d completed quota(s) for %s',
+            $tag,
+            $claimed,
+            $incentive['quotas'],
+            $invoice->invoice_number
+        ));
+    }
+
+    /**
+     * Warn when an owner holds completed quotas the strict window cannot bill.
+     *
+     * The window is deliberately strict — only what the cron awarded inside the
+     * billing week is billed — and the consequence is worth stating plainly: a
+     * quota the cron completes on, say, the 17th does not belong to the 10th–16th
+     * invoice. It belongs to the NEXT one, whose window contains the 17th, and it
+     * stays unbilled (`agent_invoice_id IS NULL`) until that run picks it up.
+     *
+     * That is only true while the invoice runs keep covering consecutive weeks,
+     * which periodFor() guarantees for consecutive runs. A skipped week leaves a
+     * gap no later run reaches, so anything old enough to have fallen through one
+     * is named here rather than going quiet.
+     */
+    private function reportUnbilledOutsidePeriod(array $agentIds, string $from, string $to, string $tag): void
+    {
+        $stale = DB::table('agent_incentive_history')
+            ->whereIn('agent_id', $agentIds)
+            ->whereNull('agent_invoice_id')
+            ->where('incentive_value', '>', 0)
+            ->where('processed_at', '<', $from)
+            ->selectRaw('COUNT(*) as cycles, COALESCE(SUM(incentive_value), 0) as amount, MIN(processed_at) as oldest')
+            ->first();
+
+        if (!$stale || (int) $stale->cycles === 0) {
+            return;
+        }
+
+        $this->writeLog(sprintf(
+            '%s   ⚠ %d completed quota(s) worth ₱%s remain unbilled from BEFORE this window (oldest awarded %s). '
+            . 'They are not billed here on purpose — only incentives awarded %s to %s are. '
+            . 'If no earlier invoice covered the week they fall in, generate that week (--as-of) to pick them up.',
+            $tag,
+            (int) $stale->cycles,
+            number_format((float) $stale->amount, 2),
+            (string) $stale->oldest,
+            $from,
+            $to
+        ));
     }
 
     /**

@@ -89,9 +89,58 @@ class Role extends Model
         return ctype_digit($key) ? (int) $key : null;
     }
 
+    /**
+     * How each seeded role is written in Role Management's "Base role" picker.
+     *
+     * Kept here rather than read back from `roles.role_name` so the picker reads
+     * the same on a deployment whose seeded rows were renamed, and so the eight
+     * are always offered in one fixed order.
+     */
+    public const LOCKED_ROLE_NAMES = [
+        self::SUPER_ADMIN     => 'SuperAdmin',
+        self::ADMINISTRATOR   => 'Administrator',
+        self::HEAD_TECH       => 'Head Technician',
+        self::TECHNICIAN      => 'Technician',
+        self::OSP             => 'OSP',
+        self::INVENTORY_STAFF => 'Inventory Staff',
+        self::AGENT           => 'Agent',
+        self::CUSTOMER        => 'Customer',
+    ];
+
+    /**
+     * The seeded role this custom role builds on, or null.
+     *
+     * A "hybrid" role holds everything its base role holds — resolved live from
+     * App\Support\Permissions, never copied into `permissions` — plus the extra
+     * keys ticked in the Role modal. Null is a standalone custom role, which is
+     * what every role was before hybrids existed.
+     *
+     * A locked role is never itself a hybrid: its access is the table in
+     * Permissions, so a base recorded against one is ignored rather than
+     * quietly widening a seeded role.
+     */
+    public function baseRoleId(): ?int
+    {
+        if (self::isLocked($this->id)) {
+            return null;
+        }
+
+        $base = (int) ($this->base_role_id ?? 0);
+
+        return self::isLocked($base) ? $base : null;
+    }
+
+    /** Is this a custom role built on top of a seeded one? */
+    public function isHybrid(): bool
+    {
+        return $this->baseRoleId() !== null;
+    }
+
     protected $fillable = [
         'role_name',
         'description',
+        // The seeded role a hybrid custom role inherits from. See baseRoleId().
+        'base_role_id',
         'permissions',
         'created_by_user_id',
         'updated_by_user_id',
@@ -100,6 +149,7 @@ class Role extends Model
 
     protected $casts = [
         'permissions' => 'array',
+        'base_role_id' => 'integer',
     ];
 
     public function users()
