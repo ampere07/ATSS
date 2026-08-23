@@ -8,6 +8,7 @@ import { userSettingsService } from './services/userSettingsService';
 import PaymentResultModal from './components/PaymentResultModal';
 import SplashScreen from './components/SplashScreen';
 import { resetAllStores } from './utils/resetAllStores';
+import { clearDashboardCache } from './utils/customerDashboardCache';
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -154,6 +155,12 @@ function App() {
 
   const handleLogout = () => {
     resetAllStores();
+    // The dashboard keeps the last-known figures in storage so a returning customer is
+    // not left staring at a skeleton. Signing out is the point at which the device may
+    // change hands, so that snapshot should not outlive it. (Signing *in* deliberately
+    // leaves it: it is keyed by account, so a different customer cannot read it, and
+    // keeping it is what makes signing back in instant.)
+    clearDashboardCache();
     // Remove user data from localStorage
     localStorage.removeItem('authData');
     setUserData(null);

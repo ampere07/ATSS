@@ -102,6 +102,53 @@ export const getCustomerDetail = async (accountNo: string): Promise<CustomerDeta
 };
 
 /**
+ * Everything the customer dashboard's balance card and Pay Now button need, and nothing
+ * else. Three indexed single-row reads on the server against getCustomerDetail's four
+ * eager-loaded relations and two payment SUMs, so the amount due no longer queues behind
+ * data that belongs to other parts of the app.
+ */
+export interface CustomerPaySummary {
+  accountNo: string;
+  accountBalance: number;
+  balanceUpdateDate: string | null;
+  billingDay: number | null;
+  dueDate: string | null;
+  /**
+   * Whether a payment is already in progress, which is all the button label needs. The
+   * payment URL is deliberately not part of this response — Pay Now re-checks and gets
+   * it on click, so a live payment link is not handed out just to render a label.
+   */
+  hasPendingPayment: boolean;
+}
+
+interface CustomerPaySummaryApiResponse {
+  success: boolean;
+  data?: CustomerPaySummary;
+  message?: string;
+}
+
+/**
+ * Null on any failure, matching getCustomerDetail: the caller falls back to the balance
+ * carried on the full detail payload, so losing the fast path costs speed rather than
+ * the ability to pay.
+ */
+export const getCustomerPaySummary = async (accountNo: string): Promise<CustomerPaySummary | null> => {
+  try {
+    const response = await apiClient.get<CustomerPaySummaryApiResponse>(
+      `/customer-detail/${accountNo}/pay-summary`
+    );
+
+    if (response.data?.success && response.data?.data) {
+      return response.data.data;
+    }
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+};
+
+/**
  * The single mapping from a customer-detail payload to the record CustomerDetails renders.
  *
  * This lived as sixteen near-copies - one in every screen that can open the panel through

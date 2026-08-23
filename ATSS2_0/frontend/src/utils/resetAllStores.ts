@@ -71,13 +71,27 @@ export const resetAllStores = () => {
 
   useCustomerDashboardStore.setState({
     customerDetail: null,
+    paySummary: null,
     soaRecords: [],
     invoiceRecords: [],
     paymentRecords: [],
     serviceChargeRecords: [],
     isLoading: false,
+    // Every per-slice flag has to be cleared too. setState merges, so a reset during a
+    // load would otherwise leave one stuck on and the next screen waiting on a request
+    // that is never coming.
+    isDetailLoading: false,
+    isPaySummaryLoading: false,
+    isPaymentsLoading: false,
+    isInvoicesLoading: false,
+    isSoaLoading: false,
+    isServiceChargesLoading: false,
+    isFromCache: false,
     error: null,
     fetchedAccountNo: null,
+    // Cleared alongside fetchedAccountNo, or refreshCustomerData still has a target and
+    // can refetch the account that just signed out.
+    requestedAccountNo: null,
   });
 
   useDataLogsStore.setState({

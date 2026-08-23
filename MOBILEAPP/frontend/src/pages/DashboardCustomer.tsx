@@ -70,7 +70,19 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const { width, height } = useWindowDimensions();
     const isMobile = width < 768;
     const isShort = height < 700;
-    const { customerDetail, payments, invoiceRecords, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
+    // paySummary and its own flag rather than contextLoading: the amount due comes from a
+    // dedicated one-row request, so it must not wait on the five list calls this card does
+    // not render.
+    const {
+        customerDetail,
+        paySummary,
+        isPaySummaryLoading,
+        isFromCache,
+        payments,
+        invoiceRecords,
+        isLoading: contextLoading,
+        silentRefresh,
+    } = useCustomerDataContext();
     const [user, setUser] = useState<any>(null);
 
     const [isPaymentProcessing, setIsPaymentProcessing] = useState<boolean>(false);
@@ -193,19 +205,38 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const planName = customerDetail?.desiredPlan || 'No Plan';
     const address = customerDetail?.address || 'No Address';
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
-    const rawBalance = customerDetail?.billingAccount?.accountBalance;
+    // The pay-summary first, the full detail only as a fallback for when that request
+    // fails. Losing the fast path should cost speed, not the ability to pay.
+    const rawBalance = paySummary
+        ? paySummary.accountBalance
+        : customerDetail?.billingAccount?.accountBalance;
     const balance = Number(rawBalance) || 0;
 
     // A settled account legitimately reads 0, so only a missing/unparsable value counts
     // as "not loaded yet". `|| 0` collapsed the two, which is what rendered a confident
     // zero while the request was still in flight.
-    //
-    // A load in progress counts as not-known too: the context publishes customerDetail as
-    // soon as the first call returns and keeps fetching, so the card can be on screen
-    // while figures are still arriving.
-    const balanceReady = !contextLoading
-        && rawBalance !== null && rawBalance !== undefined
+    const balanceKnown = rawBalance !== null && rawBalance !== undefined
         && String(rawBalance).trim() !== '' && !isNaN(Number(rawBalance));
+
+    // Showing a figure and charging against it are different bars. A balance restored from
+    // the last visit is worth reading — far better than a skeleton on a phone connection —
+    // but it may have moved since, so Pay Now stays locked until the server confirms it.
+    //
+    // Gated on the pay-summary alone, deliberately not on contextLoading as well: making
+    // the button wait for the whole batch is exactly what it used to do, and a slow SOA or
+    // service-order call (neither of which this card renders) kept the amount due
+    // shimmering and the button reading '...'.
+    const balanceConfirmed = balanceKnown && !isPaySummaryLoading && !isFromCache;
+
+    // Still on the restored snapshot after the request finished, which means it did not
+    // land. Distinguished from "still arriving" so the card can offer a retry instead of
+    // sitting on a cached figure claiming to be checking for updates forever.
+    const revalidateInFlight = isFromCache && isPaySummaryLoading;
+    const revalidateFailed = isFromCache && !isPaySummaryLoading;
+
+    // The summary's flag is what labels the button on load; the fuller pendingPayment
+    // object only exists once Pay Now has been tapped and fetched the payment URL.
+    const hasPendingPayment = !!pendingPayment?.payment_url || !!paySummary?.hasPendingPayment;
 
     // An outstanding (positive) balance must be settled in full, so Pay Now is pinned to the
     // balance and locked. At zero or on a credit balance the customer chooses the amount.
@@ -225,15 +256,23 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     };
 
     let dueDateString = 'Upon Receipt';
-    // Prefer the real due date stored on the latest invoice (invoiceRecords are
-    // ordered by invoice_date desc by the backend). Only fall back to deriving it
-    // from the billing day when the account has no invoice yet.
-    const latestInvoiceDueDate = formatDbDate(invoiceRecords?.[0]?.due_date);
+    // Prefer the real due date stored on the latest invoice. The pay-summary carries it,
+    // read on the server off the newest invoice with the same `invoice_date desc` ordering
+    // the list endpoint uses — the same date, one row instead of the account's entire
+    // invoice history. The list stays as the fallback for when that request fails.
+    //
+    // Only fall back to deriving it from the billing day when the account has no invoice.
+    const latestInvoiceDueDate = formatDbDate(
+        paySummary ? paySummary.dueDate : invoiceRecords?.[0]?.due_date
+    );
+    const billingDayForDueDate = paySummary
+        ? paySummary.billingDay
+        : customerDetail?.billingAccount?.billingDay;
     if (latestInvoiceDueDate) {
         dueDateString = latestInvoiceDueDate;
-    } else if (customerDetail?.billingAccount?.billingDay) {
+    } else if (billingDayForDueDate) {
         const today = new Date();
-        const billingDay = customerDetail.billingAccount.billingDay;
+        const billingDay = billingDayForDueDate;
 
         let dueYear = today.getFullYear();
         let dueMonth = today.getMonth();
@@ -261,14 +300,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                 }
             }
 
-            if (accountNo && accountNo !== 'N/A') {
-                try {
-                    const pending = await paymentService.checkPendingPayment(accountNo);
-                    setPendingPayment(pending);
-                } catch (error) {
-                    console.error('Error checking pending payment:', error);
-                }
-            }
+            // No pending-payment request here any more. The pay-summary carries
+            // `hasPendingPayment`, which is all the button label needs, and handlePayNow
+            // already re-checks for the payment URL when it is tapped — so this was a whole
+            // extra round trip on the launch path to decide one word of button text.
         };
         loadData();
         silentRefresh();
@@ -362,9 +397,14 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         }
     }, [balance, isBalancePositive]);
 
-    // Nothing at all yet: lay the page out as skeletons rather than a bare spinner, so the
-    // balance card never appears with a placeholder figure in it.
-    if (contextLoading && !customerDetail) return (
+    // Nothing at all yet: no response, and no snapshot from a previous launch. Laid out as
+    // skeletons rather than a bare spinner so the balance card never appears with a
+    // placeholder figure in it.
+    //
+    // paySummary counts as something to show, and that matters: it is the faster of the
+    // two requests, so gating this on customerDetail alone would keep the skeleton up over
+    // a balance that had already arrived — throwing away the point of splitting them.
+    if (!customerDetail && !paySummary && (contextLoading || isPaySummaryLoading)) return (
         <View style={{ flex: 1, backgroundColor: '#f9fafb', padding: 16, paddingTop: 60 }}>
             <View style={{ borderRadius: 20, backgroundColor: '#111827', padding: 20, gap: 12 }}>
                 <Skeleton light width={120} height={12} />
@@ -414,7 +454,15 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         setErrorMessage('');
 
         // Block the payment up front if the account has no valid email on file.
-        if (!isValidEmail(emailAddress)) {
+        //
+        // Only when the customer record is actually here to judge from. The balance now
+        // arrives on its own request, so Pay Now can be tapped before the detail response
+        // lands — and emailAddress falls back to the session's email, which comes from the
+        // users table while the address Xendit is given comes from the customers table.
+        // The two can differ, so refusing on the fallback would accuse an account that has
+        // a perfectly good email of not having one. Unknown is not the same as invalid:
+        // let it through and let the backend, which validates this anyway, be the judge.
+        if (customerDetail && !isValidEmail(emailAddress)) {
             setShowEmailErrorModal(true);
             return;
         }
@@ -625,7 +673,18 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 <View style={styles.billingRow}>
                                     <View style={styles.billingLeft}>
                                         <Text allowFontScaling={false} style={styles.balanceLabel}>Total Amount</Text>
-                                        {balanceReady ? (
+                                        {balanceKnown && revalidateFailed ? (
+                                            <Pressable onPress={() => { silentRefresh(); }} accessibilityRole="button">
+                                                <Text allowFontScaling={false} style={styles.staleHintText}>
+                                                    Last known balance — tap to retry
+                                                </Text>
+                                            </Pressable>
+                                        ) : balanceKnown && revalidateInFlight ? (
+                                            <Text allowFontScaling={false} style={styles.staleHintText}>
+                                                Last known balance — updating…
+                                            </Text>
+                                        ) : null}
+                                        {balanceKnown ? (
                                             <Text
                                                 numberOfLines={1}
                                                 adjustsFontSizeToFit
@@ -642,7 +701,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
                                     <View style={styles.billingRightCol}>
                                         <View style={styles.dueDateContainer}>
-                                            {balanceReady ? (
+                                            {balanceKnown ? (
                                                 <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>{dueDateString}</Text></Text>
                                             ) : (
                                                 <Skeleton light width={110} height={12} radius={6} />
@@ -651,12 +710,12 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
                                         <Pressable
                                             onPress={handlePayNow}
-                                            disabled={isPaymentProcessing || !balanceReady}
-                                            style={[styles.payBtn, { opacity: (isPaymentProcessing || !balanceReady) ? 0.5 : 1 }]}
+                                            disabled={isPaymentProcessing || !balanceConfirmed}
+                                            style={[styles.payBtn, { opacity: (isPaymentProcessing || !balanceConfirmed) ? 0.5 : 1 }]}
                                         >
                                             <View style={styles.payBtnInner}>
                                                 <Text style={styles.payBtnText}>
-                                                    {(!balanceReady || isPaymentProcessing) ? '...' : (pendingPayment ? 'Proceed' : 'Pay Now')}
+                                                    {(!balanceConfirmed || isPaymentProcessing) ? '...' : (hasPendingPayment ? 'Proceed' : 'Pay Now')}
                                                 </Text>
                                             </View>
                                         </Pressable>
@@ -845,7 +904,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                 </View>
                                 <View style={styles.verifyRow}>
                                     <Text style={styles.verifyLabel}>Current Balance</Text>
-                                    {balanceReady ? (
+                                    {balanceConfirmed ? (
                                         <Text style={[styles.verifyValue, { fontWeight: 'bold', color: balance > 0 ? (colorPalette?.primary || '#ef4444') : '#16a34a' }]}>
                                             {formatCurrency(balance)}
                                         </Text>
@@ -894,10 +953,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
 
                             <Pressable
                                 onPress={handleProceedToCheckout}
-                                disabled={!balanceReady || isPaymentProcessing || paymentAmount < 1 || (balance > 0 && paymentAmount < balance)}
+                                disabled={!balanceConfirmed || isPaymentProcessing || paymentAmount < 1 || (balance > 0 && paymentAmount < balance)}
                                 style={[styles.primaryBtn, {
                                     backgroundColor: colorPalette?.primary || '#ef4444',
-                                    opacity: (!balanceReady || isPaymentProcessing || paymentAmount < 1) ? 0.5 : 1,
+                                    opacity: (!balanceConfirmed || isPaymentProcessing || paymentAmount < 1) ? 0.5 : 1,
                                 }]}
                             >
                                 <Text style={styles.primaryBtnText}>
@@ -1109,6 +1168,7 @@ const styles = StyleSheet.create({
     billingLeft: { flex: 1, minWidth: 120 },
     billingRightCol: { alignItems: 'flex-end', gap: 12, flexShrink: 0 },
     dueDateContainer: { alignItems: 'flex-end' },
+    staleHintText: { color: 'rgba(255,255,255,0.7)', fontSize: 11, marginTop: 2 },
     balanceLabel: { color: '#e5e7eb', fontSize: 12, marginBottom: 4 },
     balanceAmountText: { fontWeight: 'bold', color: '#ffffff' },
     infoText: { color: '#e5e7eb', fontSize: 12 },

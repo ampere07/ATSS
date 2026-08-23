@@ -2337,6 +2337,12 @@ Route::prefix('service_orders')->group(function () {
 // Customer Detail Management - Dedicated endpoint for customer details view
 Route::get('/customer-detail/{accountNo}', [\App\Http\Controllers\CustomerDetailController::class , 'show']);
 
+// Just the amount due, its due date and whether a payment is already in progress - the
+// three things the customer dashboard's balance card and Pay Now button wait on. Split
+// out from the endpoint above because that one loads four relations and computes two
+// payment SUMs the card does not use, and the balance was queued behind all of it.
+Route::get('/customer-detail/{accountNo}/pay-summary', [\App\Http\Controllers\CustomerPaySummaryController::class , 'show']);
+
 // Customer Detail Update Routes - Update customer, billing, and technical details
 Route::put('/customer-detail/{accountNo}', [\App\Http\Controllers\CustomerDetailUpdateController::class , 'update']);
 Route::put('/customer-detail/{accountNo}/customer', [\App\Http\Controllers\CustomerDetailUpdateController::class , 'updateCustomerDetails']);

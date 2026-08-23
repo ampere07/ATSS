@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
+import { getCustomerDetail, getCustomerPaySummary, CustomerDetailData, CustomerPaySummary } from '../services/customerDetailService';
 import apiClient from '../config/api';
+import { readDashboardCache, writeDashboardCache } from '../utils/customerDashboardCache';
 
 interface PaymentRecord {
     id: string;
@@ -46,6 +47,23 @@ interface ServiceOrderRecord {
 
 interface CustomerDataContextType {
     customerDetail: CustomerDetailData | null;
+    /**
+     * The fast path for the balance card. Requested alongside customerDetail rather than
+     * derived from it, because the amount due is the one figure Pay Now cannot work
+     * without and it lives one indexed row away — while the full detail response is four
+     * eager-loaded relations, two payment SUMs and the entire customer record.
+     *
+     * Never restored from cache, so a non-null value always means a fresh server
+     * response. That is what lets the dashboard tell a confirmed balance from a
+     * carried-over one without another flag.
+     */
+    paySummary: CustomerPaySummary | null;
+    isPaySummaryLoading: boolean;
+    /**
+     * What is on screen came from the stored snapshot and has not been confirmed against
+     * the server yet. Safe to display; not safe to act on.
+     */
+    isFromCache: boolean;
     payments: PaymentRecord[];
     soaRecords: SOARecord[];
     invoiceRecords: InvoiceRecord[];
@@ -69,6 +87,9 @@ export const useCustomerDataContext = () => {
 
 export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [customerDetail, setCustomerDetail] = useState<CustomerDetailData | null>(null);
+    const [paySummary, setPaySummary] = useState<CustomerPaySummary | null>(null);
+    const [isPaySummaryLoading, setIsPaySummaryLoading] = useState<boolean>(true);
+    const [isFromCache, setIsFromCache] = useState<boolean>(false);
     const [payments, setPayments] = useState<PaymentRecord[]>([]);
     const [soaRecords, setSoaRecords] = useState<SOARecord[]>([]);
     const [invoiceRecords, setInvoiceRecords] = useState<InvoiceRecord[]>([]);
@@ -82,6 +103,11 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     // which was causing DashboardCustomer to remount and lose its modal state.
     const customerDetailRef = React.useRef<CustomerDetailData | null>(null);
 
+    // Set only by a server response, never by a restored snapshot. customerDetailRef is
+    // the "do we have something to show?" guard; this is the "has the server actually
+    // answered?" one, and the retry loop needs the second.
+    const confirmedRef = React.useRef<boolean>(false);
+
     /**
      * Load the signed-in customer's data.
      *
@@ -91,17 +117,23 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
      * swallows every error into null, so this return value is the only signal a
      * caller gets.
      */
-    const fetchData = useCallback(async (force = false, silent = false): Promise<boolean> => {
-        if (!force && customerDetailRef.current) return true;
+    const runFetch = useCallback(async (force = false, silent = false): Promise<boolean> => {
+        if (!force && confirmedRef.current) return true;
 
         if (!silent) setIsLoading(true);
 
         try {
             const storedUser = await AsyncStorage.getItem('authData');
-            if (!storedUser) return false;
+            if (!storedUser) {
+                setIsPaySummaryLoading(false);
+                return false;
+            }
 
             const parsedUser = JSON.parse(storedUser);
-            if (!parsedUser.username) return false;
+            if (!parsedUser.username) {
+                setIsPaySummaryLoading(false);
+                return false;
+            }
 
             // Only fetch customer details if the user role is 'customer'
             const role = (parsedUser.role || '').toLowerCase();
@@ -109,15 +141,57 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
             const isCustomer = role === 'customer' || roleId === 3;
             if (!isCustomer) {
                 setIsLoading(false);
+                setIsPaySummaryLoading(false);
                 return true;
             }
 
+            // Put the last visit's figures on screen before any request goes out. On a cold
+            // start — which on a phone is the common case, not the rare one — this is the
+            // difference between opening on content and opening on skeletons. Only when
+            // nothing is in memory yet: a stored snapshot must never overwrite a response
+            // already fetched this session.
+            if (!customerDetailRef.current) {
+                const cached = await readDashboardCache(parsedUser.username);
+                if (cached && !customerDetailRef.current) {
+                    customerDetailRef.current = cached.customerDetail;
+                    setCustomerDetail(cached.customerDetail);
+                    setPayments(cached.payments);
+                    setSoaRecords(cached.soaRecords);
+                    setInvoiceRecords(cached.invoiceRecords);
+                    setIsFromCache(true);
+                }
+            }
+
+            // Started BEFORE the detail request is awaited, so the two are concurrent. This
+            // is the point: the balance arrives on the short request instead of behind the
+            // long one, and Pay Now unlocks as soon as it does.
+            setIsPaySummaryLoading(true);
+            const paySummaryDone = getCustomerPaySummary(parsedUser.username)
+                .then((summary) => {
+                    if (summary) {
+                        setPaySummary(summary);
+                        // Whichever of the two responses lands first has confirmed the
+                        // figure this flag exists to guard, so the card should stop
+                        // labelling it as carried over from the last visit.
+                        setIsFromCache(false);
+                    }
+                })
+                .catch(() => { /* falls back to the balance on the detail payload */ })
+                .finally(() => setIsPaySummaryLoading(false));
+
             // 1. Fetch Customer Detail
             const detail = await getCustomerDetail(parsedUser.username);
-            if (!detail) throw new Error('Could not fetch customer details');
+            if (!detail) {
+                // The fast request may still land and carry a usable balance, so let it
+                // finish before reporting the failure rather than settling over it.
+                await paySummaryDone;
+                throw new Error('Could not fetch customer details');
+            }
 
             customerDetailRef.current = detail;
+            confirmedRef.current = true;
             setCustomerDetail(detail);
+            setIsFromCache(false);
             const accNo = detail.billingAccount?.accountNo;
 
             if (accNo) {
@@ -185,6 +259,16 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                     visitInfo: { status: order.visit_status || 'Pending' }
                 })) : [];
                 setServiceOrders(mappedOrders);
+
+                // Written from the locals that were just published, so the next cold start
+                // opens on this instead of on skeletons. Not awaited: it is a local write
+                // and nothing on screen is waiting for it.
+                writeDashboardCache(parsedUser.username, {
+                    customerDetail: detail,
+                    payments: allPayments,
+                    soaRecords: soaRes?.data?.data || [],
+                    invoiceRecords: invoiceRes?.data?.data || [],
+                });
             }
 
             setLastUpdated(new Date());
@@ -200,6 +284,31 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         // Stable dependency array — customerDetailRef.current is used instead of the state
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    const inFlightRef = React.useRef<Promise<boolean> | null>(null);
+
+    /**
+     * runFetch, but at most one at a time. Callers that arrive while a load is running
+     * join it instead of starting a second one.
+     *
+     * Launch used to fire three overlapping full loads. The provider starts one on mount,
+     * and DashboardCustomer's effect is keyed on the account no — which changes twice as it
+     * resolves, from 'N/A' to the stored username to the account on the detail response —
+     * so it called silentRefresh again each time. Nothing deduplicated them, so the
+     * customer's phone opened by requesting the same seven payloads three times over, on
+     * the connection this whole change is about.
+     *
+     * A silent load in progress will absorb a non-silent caller, so a refresh that wanted
+     * to show a spinner may not. On the launch path they are all the same work, and doing
+     * it once quietly beats doing it three times.
+     */
+    const fetchData = useCallback((force = false, silent = false): Promise<boolean> => {
+        if (inFlightRef.current) return inFlightRef.current;
+
+        const run = runFetch(force, silent).finally(() => { inFlightRef.current = null; });
+        inFlightRef.current = run;
+        return run;
+    }, [runFetch]);
 
     // A failed first load used to be permanent. This runs once on mount, and
     // getCustomerDetail turns any 401, timeout or dropped connection into a plain
@@ -219,7 +328,10 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         const backoffMs = [2000, 5000, 15000, 30000];
 
         const attemptLoad = async () => {
-            if (cancelled || customerDetailRef.current) return;
+            // confirmedRef, not customerDetailRef: a restored snapshot fills the latter in,
+            // and treating that as a completed load would stop the retries that are the
+            // only thing recovering a launch whose network call failed.
+            if (cancelled || confirmedRef.current) return;
 
             const done = await fetchData(true, attempt > 0);
             if (cancelled || done) return;
@@ -231,7 +343,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         attemptLoad();
 
         const subscription = AppState.addEventListener('change', state => {
-            if (state === 'active' && !customerDetailRef.current) {
+            if (state === 'active' && !confirmedRef.current) {
                 if (timer) clearTimeout(timer);
                 attempt = 0;
                 attemptLoad();
@@ -252,6 +364,9 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         <CustomerDataContext.Provider
             value={{
                 customerDetail,
+                paySummary,
+                isPaySummaryLoading,
+                isFromCache,
                 payments,
                 soaRecords,
                 invoiceRecords,

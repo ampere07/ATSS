@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { User, Activity, Clock, Users, CreditCard, HelpCircle, FileText, CheckCircle, XCircle } from 'lucide-react';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { transactionService } from '../services/transactionService';
 import { paymentPortalLogsService } from '../services/paymentPortalLogsService';
 import { paymentService, PendingPayment } from '../services/paymentService'; // Import paymentService
 import { useCustomerDashboardStore } from '../store/customerDashboardStore';
-import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { settingsColorPaletteService, getCachedActivePalette, ColorPalette } from '../services/settingsColorPaletteService';
 import pusher from '../services/pusherService';
 
 // Interfaces for data types
@@ -25,6 +25,13 @@ interface Referral {
     status: 'Done' | 'Failed' | 'Scheduled' | 'Pending';
 }
 
+/**
+ * How long live-update events are batched before one refresh is issued. The Pusher
+ * channels this page listens on are system-wide, so bursts are normal and a refresh per
+ * event would mean seven requests each time.
+ */
+const REFRESH_COALESCE_MS = 1500;
+
 interface DashboardCustomerProps {
     onNavigate?: (section: string, tab?: string) => void;
     autoOpenPayModal?: boolean;
@@ -34,8 +41,24 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     const [user, setUser] = useState<any>(null);
     const [error, setError] = useState('');
 
-    const { customerDetail, paymentRecords, invoiceRecords, isLoading, fetchCustomerData } = useCustomerDashboardStore();
-    const payments = paymentRecords.slice(0, 4);
+    // isDetailLoading rather than isLoading: everything this page shows above the
+    // payments list comes from the one customer-detail response, so it must not wait on
+    // the SOA and service-charge lists that only Bills renders.
+    const {
+        customerDetail,
+        paySummary,
+        isPaySummaryLoading,
+        paymentRecords,
+        invoiceRecords,
+        isDetailLoading,
+        isPaymentsLoading,
+        isInvoicesLoading,
+        isFromCache,
+        error: loadError,
+        fetchCustomerData,
+        refreshCustomerData,
+    } = useCustomerDashboardStore();
+    const payments = useMemo(() => paymentRecords.slice(0, 4), [paymentRecords]);
     const [referrals, setReferrals] = useState<Referral[]>([]);
 
     // Payment State
@@ -47,76 +70,90 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     const [showPendingPaymentModal, setShowPendingPaymentModal] = useState<boolean>(false);
     const [pendingPayment, setPendingPayment] = useState<PendingPayment | null>(null);
     const [errorMessage, setErrorMessage] = useState<string>('');
-    const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
+    // Seeded from the stored palette so the page paints in the brand colours on the
+    // first frame instead of rendering in the fallback slate and repainting once the
+    // request lands.
+    const [colorPalette, setColorPalette] = useState<ColorPalette | null>(() => getCachedActivePalette());
     const [showPaymentSuccessModal, setShowPaymentSuccessModal] = useState<boolean>(false);
 
+    // The signed-in user is read straight out of storage rather than awaited, so the
+    // greeting and account no are on screen before any request resolves.
     useEffect(() => {
-        const fetchData = async () => {
-            try {
-                const storedUser = localStorage.getItem('authData');
-                if (storedUser) {
-                    const parsedUser = JSON.parse(storedUser);
-                    setUser(parsedUser);
+        try {
+            const storedUser = localStorage.getItem('authData');
+            if (!storedUser) return;
 
-                    if (parsedUser.username) {
-                        await fetchCustomerData(parsedUser.username, true);
+            const parsedUser = JSON.parse(storedUser);
+            setUser(parsedUser);
 
-                        // Need the current updated customer details for account number to get pending payment
-                        const updatedDetail = useCustomerDashboardStore.getState().customerDetail;
-                        if (updatedDetail && updatedDetail.billingAccount) {
-                            try {
-                                const accNo = updatedDetail.billingAccount.accountNo;
-                                const pending = await paymentService.checkPendingPayment(accNo);
-                                setPendingPayment(pending);
-                            } catch (pendingErr) {
-                                console.error("Error checking pending payment on load", pendingErr);
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                console.error("Error fetching dashboard data:", err);
-                setError('Failed to load dashboard data');
+            if (parsedUser.username) {
+                // Deliberately not awaited: nothing below depends on it, and the store
+                // now publishes each slice as it lands rather than in one batch at the end.
+                fetchCustomerData(parsedUser.username, true).catch((err) => {
+                    console.error('Error fetching dashboard data:', err);
+                    setError('Failed to load dashboard data');
+                });
             }
-        };
-
-        const fetchColorPalette = async () => {
-            try {
-                const activePalette = await settingsColorPaletteService.getActive();
-                setColorPalette(activePalette);
-            } catch (err) {
-                console.error('Failed to fetch color palette:', err);
-            }
-        };
-
-        fetchData();
-        fetchColorPalette();
+        } catch (err) {
+            console.error('Error reading stored auth data:', err);
+            setError('Failed to load dashboard data');
+        }
     }, [fetchCustomerData]);
+
+    useEffect(() => {
+        settingsColorPaletteService.getActive()
+            .then((activePalette) => {
+                if (activePalette) setColorPalette(activePalette);
+            })
+            .catch((err) => {
+                console.error('Failed to fetch color palette:', err);
+            });
+    }, []);
+
+    // There is deliberately no pending-payment request on load any more. It used to sit
+    // behind `await fetchCustomerData`, so it did not even start until all six secondary
+    // lists had come back — a whole extra round trip, in series, before the button knew
+    // what to call itself. The pay-summary now carries `hasPendingPayment`, which is all
+    // the label needs, and handlePayNow re-checks for the payment URL when it is clicked.
 
     // Handle auto-opening the pay modal (e.g., from Bills page)
     useEffect(() => {
-        if (autoOpenPayModal && !isLoading && customerDetail) {
+        // Only once the balance is server-confirmed — opening the pay modal against a
+        // figure restored from cache would pin the amount to a stale balance. Keyed on the
+        // pay-summary like the button itself, so arriving from Bills does not wait on the
+        // detail request either.
+        //
+        // The (customerDetail || paySummary) test also keeps this in step with the
+        // early-return below: handlePayNow is declared past it, so it must not be called
+        // in a render that bailed out to the skeleton.
+        if (autoOpenPayModal && (customerDetail || paySummary) && !isPaySummaryLoading && !isFromCache) {
             handlePayNow();
         }
-    }, [autoOpenPayModal, isLoading, customerDetail]);
+    }, [autoOpenPayModal, isPaySummaryLoading, isFromCache, customerDetail, paySummary]);
 
     // Real-time updates via Pusher/Soketi
     useEffect(() => {
-        const handleUpdate = async (data: any) => {
-            try {
-                const storedUser = localStorage.getItem('authData');
-                if (storedUser) {
-                    const parsedUser = JSON.parse(storedUser);
-                    if (parsedUser.username) {
-                        await fetchCustomerData(parsedUser.username, true);
-                    }
-                }
-            } catch (err) {
-                console.error('[DashboardCustomer Soketi] Failed to refresh data:', err);
-            }
+        // refreshCustomerData, not fetchCustomerData: the latter returns immediately once
+        // fetchedAccountNo is set, so every live update after the first load was silently
+        // dropped. refreshCustomerData clears that marker first, which is what it is for.
+        //
+        // Coalesced, because these four are system-wide channels rather than per-account
+        // ones: this page is told about every transaction, invoice and SOA in the system,
+        // not just this customer's. Refreshing on each one would fire seven requests per
+        // event from a device that is on the connection this page is being tuned for.
+        let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const handleUpdate = () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(() => {
+                refreshTimer = null;
+                refreshCustomerData().catch((err) => {
+                    console.error('[DashboardCustomer Soketi] Failed to refresh data:', err);
+                });
+            }, REFRESH_COALESCE_MS);
         };
 
-        const handlePaymentUpdate = async (data: any) => {
+        const handlePaymentUpdate = (data: any) => {
             // Show success modal when a webhook confirms payment for this account
             if (data?.action === 'webhook_update' && data?.status === 'QUEUED' && data?.reference_no) {
                 const currentAccountNo = customerDetail?.billingAccount?.accountNo;
@@ -125,7 +162,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                     setPendingPayment(null);
                 }
             }
-            await handleUpdate(data);
+            handleUpdate();
         };
 
         const txChannel = pusher.subscribe('transactions');
@@ -139,6 +176,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         payChannel.bind('payment-updated', handlePaymentUpdate);
 
         return () => {
+            if (refreshTimer) clearTimeout(refreshTimer);
             txChannel.unbind('transaction-updated', handleUpdate);
             invChannel.unbind('invoice-updated', handleUpdate);
             soaChannel.unbind('soa-updated', handleUpdate);
@@ -148,23 +186,50 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
             pusher.unsubscribe('soa');
             pusher.unsubscribe('payments');
         };
-    }, [fetchCustomerData, customerDetail?.billingAccount?.accountNo]);
+    }, [refreshCustomerData, customerDetail?.billingAccount?.accountNo]);
 
     // Derived here, above the loading early-return below, so the Pay Now sync hook that
     // depends on them keeps a fixed position in the hook order (react-hooks/rules-of-hooks).
-    const rawBalance = customerDetail?.billingAccount?.accountBalance;
+    // The pay-summary first, the full detail only as a fallback for when that request
+    // fails. Losing the fast path should cost speed, not the ability to pay.
+    const rawBalance = paySummary
+        ? paySummary.accountBalance
+        : customerDetail?.billingAccount?.accountBalance;
     const balance = Number(rawBalance) || 0;
 
     // Is the balance actually known? A settled account legitimately reads 0, so only a
     // missing/unparsable value counts as "not loaded yet" — otherwise a delayed response
     // renders a confident ₱0 that is simply wrong.
-    //
-    // A load in progress counts as not-known too: the store publishes customerDetail as
-    // soon as the first call returns and keeps fetching, so the card can be on screen
-    // while figures are still arriving.
-    const balanceReady = !isLoading
-        && rawBalance !== null && rawBalance !== undefined
+    const balanceKnown = rawBalance !== null && rawBalance !== undefined
         && String(rawBalance).trim() !== '' && !isNaN(Number(rawBalance));
+
+    // Showing a figure and charging against it are different bars. A balance restored
+    // from the last visit is worth reading — it is what the customer owed as of then,
+    // and far better than a shimmer on a slow connection — but it may have moved since,
+    // so Pay Now stays locked until the server has confirmed it.
+    //
+    // Gated on the pay-summary alone, deliberately not on the detail request as well —
+    // making the button wait for that too would throw away the reason the two were split.
+    // It used to wait on `!isLoading`, the whole seven-request batch, so a slow
+    // service-charge or SOA call (data this page never renders) kept the amount due
+    // shimmering and the button reading LOADING.
+    const balanceConfirmed = balanceKnown && !isPaySummaryLoading && !isFromCache;
+
+    // Still on the restored snapshot after the request has finished, which means it did
+    // not land. Worth distinguishing from "still arriving": without it the card sits on a
+    // cached figure saying it is checking for updates, and Pay Now never comes back — a
+    // dead end that looks like a working page.
+    const revalidateInFlight = isFromCache && isPaySummaryLoading;
+    const revalidateFailed = isFromCache && !isPaySummaryLoading;
+
+    // The other failure: no snapshot to fall back on either, so there is nothing to show
+    // at all. This used to leave the card shimmering and the button reading LOADING for
+    // good, with no way to try again short of reloading the page.
+    const loadFailedOutright = !!loadError && !balanceKnown;
+
+    // The summary's flag is what labels the button on load; the fuller pendingPayment
+    // object only exists once Pay Now has been clicked and fetched the payment URL.
+    const hasPendingPayment = !!pendingPayment?.payment_url || !!paySummary?.hasPendingPayment;
 
     // An outstanding (positive) balance must be settled in full, so Pay Now is pinned to the
     // balance and locked. At zero or on a credit balance the customer chooses the amount.
@@ -178,13 +243,51 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         }
     }, [balance, isBalancePositive]);
 
-    // Nothing at all yet: lay out the page as skeletons so the balance card never
-    // flashes a placeholder number, and the shape of what is coming is visible.
-    if (isLoading && !customerDetail) return (
-        <div className="bg-gray-50 min-h-screen p-4 md:p-8" aria-busy="true" aria-label="Loading dashboard">
-            <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
+    // Nothing to show at all — neither response has landed and there is no snapshot from
+    // a previous visit. Mirrors the real grid below (greeting, profile card left, balance
+    // and lists right) so that when the data lands it fills the boxes already on screen
+    // instead of reflowing the page under the customer.
+    //
+    // paySummary counts as something to show, and that matters: it is the faster of the
+    // two requests, so gating this on customerDetail alone would keep the skeleton up
+    // over a balance that had already arrived — throwing away the entire point of
+    // splitting them.
+    const showFullSkeleton = !customerDetail && !paySummary && (isDetailLoading || isPaySummaryLoading);
+    if (showFullSkeleton) return (
+        <div className="min-h-screen bg-gray-50 p-6 md:p-12 font-sans" aria-busy="true" aria-label="Loading dashboard">
+            <div className="mb-8">
+                <div className="h-8 w-56 rounded bg-gray-200 animate-pulse" />
+                <div className="mt-2 h-4 w-64 rounded bg-gray-100 animate-pulse" />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* Profile card */}
+                <div className="lg:col-span-1 space-y-6">
+                    <div className="bg-white rounded-3xl shadow-sm p-8 text-center border border-gray-100">
+                        <div className="w-24 h-24 rounded-full bg-gray-200 mx-auto animate-pulse" />
+                        <div className="mx-auto mt-6 h-5 w-40 rounded bg-gray-200 animate-pulse" />
+                        <div className="mx-auto mt-2 h-4 w-28 rounded bg-gray-100 animate-pulse" />
+                        <div className="mt-8 space-y-4">
+                            {[0, 1, 2].map((i) => (
+                                <div key={i} className="flex justify-between border-b border-gray-50 pb-3">
+                                    <div className="h-4 w-16 rounded bg-gray-100 animate-pulse" />
+                                    <div className="h-4 w-24 rounded bg-gray-200 animate-pulse" />
+                                </div>
+                            ))}
+                        </div>
+                        <div className="mt-8 space-y-3">
+                            <div className="h-12 w-full rounded-full bg-gray-100 animate-pulse" />
+                            <div className="h-12 w-full rounded-full bg-gray-100 animate-pulse" />
+                        </div>
+                    </div>
+                </div>
+
+                {/* Balance card and lists */}
                 <div className="lg:col-span-2 space-y-8">
-                    <div className="rounded-3xl p-8 md:p-12 bg-slate-900">
+                    <div
+                        className="rounded-3xl p-8 md:p-12 text-center"
+                        style={{ background: `linear-gradient(135deg, ${colorPalette?.primary || '#0f172a'} 0%, #000000 100%)` }}
+                    >
                         <div className="mx-auto h-3 w-40 rounded bg-white/20 animate-pulse" />
                         <div className="mx-auto mt-4 h-12 md:h-16 w-56 md:w-72 rounded-2xl bg-white/25 animate-pulse" />
                         <div className="mx-auto mt-4 h-3 w-64 rounded bg-white/20 animate-pulse" />
@@ -193,25 +296,18 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                             <div className="h-12 w-36 rounded-full bg-white/10 animate-pulse" />
                         </div>
                     </div>
-                    <div className="rounded-3xl bg-white p-6 space-y-4 border border-gray-100">
-                        <div className="h-4 w-40 rounded bg-gray-200 animate-pulse" />
-                        {[0, 1, 2].map((i) => (
-                            <div key={i} className="flex items-center justify-between">
-                                <div className="space-y-2">
-                                    <div className="h-3 w-48 rounded bg-gray-200 animate-pulse" />
-                                    <div className="h-3 w-32 rounded bg-gray-100 animate-pulse" />
-                                </div>
-                                <div className="h-6 w-20 rounded bg-gray-200 animate-pulse" />
+
+                    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                        <div className="p-6 border-b border-gray-100">
+                            <div className="h-5 w-40 rounded bg-gray-200 animate-pulse" />
+                        </div>
+                        {[0, 1, 2, 3].map((i) => (
+                            <div key={i} className="flex justify-between items-center p-4 border-b border-gray-50 last:border-0">
+                                <div className="h-4 w-28 rounded bg-gray-100 animate-pulse" />
+                                <div className="h-4 w-36 rounded bg-gray-100 animate-pulse hidden md:block" />
+                                <div className="h-4 w-20 rounded bg-gray-200 animate-pulse" />
                             </div>
                         ))}
-                    </div>
-                </div>
-                <div className="space-y-8">
-                    <div className="rounded-3xl bg-white p-6 space-y-3 border border-gray-100">
-                        <div className="h-4 w-32 rounded bg-gray-200 animate-pulse" />
-                        <div className="h-3 w-full rounded bg-gray-100 animate-pulse" />
-                        <div className="h-3 w-5/6 rounded bg-gray-100 animate-pulse" />
-                        <div className="h-3 w-2/3 rounded bg-gray-100 animate-pulse" />
                     </div>
                 </div>
             </div>
@@ -229,27 +325,39 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
 
     // Use detailed data if available, otherwise fall back to auth data or placeholders
     const displayName = customerDetail?.fullName || user?.full_name || 'Customer';
-    const accountNo = customerDetail?.billingAccount?.accountNo || user?.username || 'N/A';
-    // "No Plan" is a claim about the account, so it is only said once the record is
-    // here. Every customer in the database has a plan, so a blank one meant the fetch
-    // had not landed — while the fields around it still looked right because they fall
-    // back to the stored session rather than to this record.
-    const planKnown = !!customerDetail;
+    const accountNo = paySummary?.accountNo || customerDetail?.billingAccount?.accountNo || user?.username || 'N/A';
+    // "No Plan", "No Address" and "Pending" are all claims about the account, so none of
+    // them is said until the record is here. Every customer in the database has a plan and
+    // an address, so a blank one meant the fetch had not landed — while the fields around
+    // them still looked right because they fall back to the stored session rather than to
+    // this record.
+    //
+    // This matters more than it used to: the balance now arrives on its own request, so
+    // the page legitimately renders before the detail response, and these three would
+    // otherwise spend that window stating things that are not true.
+    const detailKnown = !!customerDetail;
     const planName = customerDetail?.desiredPlan || 'No Plan';
     const address = customerDetail?.address || 'No Address';
     const installationDate = customerDetail?.billingAccount?.dateInstalled || 'Pending';
     // balance / isBalancePositive are derived above the early-return further up this component.
 
-    // Due Date: read from the latest invoice's due_date (not recalculated from billingDay)
+    // Due Date: the latest invoice's due_date (not recalculated from billingDay).
+    //
+    // Taken from the pay-summary when it is there — the server reads it off the newest
+    // invoice with the same ordering the list uses, so it is the same date, one row
+    // instead of the account's entire invoice history. The list stays as the fallback.
+    //
+    // "Upon Receipt" is a real answer for an account with no invoice, which is exactly why
+    // it must not be asserted while the source is still on its way.
+    const rawDueDate = paySummary
+        ? paySummary.dueDate
+        : (invoiceRecords.length > 0 ? invoiceRecords[0].due_date : null);
+    const dueDateKnown = !!paySummary || !isInvoicesLoading || invoiceRecords.length > 0;
     let dueDateString = 'Upon Receipt';
-    if (invoiceRecords && invoiceRecords.length > 0) {
-        const latestInvoice = invoiceRecords[0]; // already sorted by date descending from the store
-        const rawDueDate = latestInvoice.due_date;
-        if (rawDueDate) {
-            const parsed = new Date(rawDueDate);
-            if (!isNaN(parsed.getTime())) {
-                dueDateString = parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-            }
+    if (rawDueDate) {
+        const parsed = new Date(rawDueDate);
+        if (!isNaN(parsed.getTime())) {
+            dueDateString = parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
         }
     }
 
@@ -398,7 +506,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                         <div className="mt-8 space-y-4 text-left">
                             <div className="flex justify-between border-b border-gray-50 pb-3">
                                 <span className="text-gray-400 text-sm">Plan</span>
-                                {planKnown ? (
+                                {detailKnown ? (
                                     <span className="text-gray-900 font-bold text-sm uppercase">{planName}</span>
                                 ) : (
                                     <span className="h-4 w-24 rounded bg-gray-200 animate-pulse" aria-label="Loading" />
@@ -406,11 +514,19 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                             </div>
                             <div className="flex justify-between border-b border-gray-50 pb-3">
                                 <span className="text-gray-400 text-sm">Installed</span>
-                                <span className="text-gray-900 font-bold text-sm">{installationDate}</span>
+                                {detailKnown ? (
+                                    <span className="text-gray-900 font-bold text-sm">{installationDate}</span>
+                                ) : (
+                                    <span className="h-4 w-20 rounded bg-gray-200 animate-pulse" aria-label="Loading" />
+                                )}
                             </div>
                             <div className="flex justify-between pb-3">
                                 <span className="text-gray-400 text-sm">Location</span>
-                                <span className="text-gray-900 font-bold text-sm text-right">{address}</span>
+                                {detailKnown ? (
+                                    <span className="text-gray-900 font-bold text-sm text-right">{address}</span>
+                                ) : (
+                                    <span className="h-4 w-28 rounded bg-gray-200 animate-pulse" aria-label="Loading" />
+                                )}
                             </div>
                         </div>
 
@@ -440,8 +556,33 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                     {/* Balance Card */}
                     <div className="rounded-3xl p-8 md:p-12 text-center text-white relative overflow-hidden" style={{ background: `linear-gradient(135deg, ${colorPalette?.primary || '#0f172a'} 0%, #000000 100%)` }}>
                         <h3 className="text-white text-sm font-medium tracking-wide uppercase mb-2 opacity-80">Total Amount Due</h3>
-                        {balanceReady ? (
+                        {balanceKnown && revalidateFailed ? (
+                            <div className="mb-2 flex flex-wrap items-center justify-center gap-2 text-xs text-white/80" role="status">
+                                <span>Couldn't reach the server — showing your last known balance.</span>
+                                <button
+                                    onClick={() => { refreshCustomerData(); }}
+                                    className="underline font-medium hover:text-white"
+                                >
+                                    Retry
+                                </button>
+                            </div>
+                        ) : balanceKnown && !balanceConfirmed ? (
+                            <div className="mb-2 text-xs text-white/70" role="status">
+                                {revalidateInFlight ? 'Last known balance — checking for updates…' : 'Updating…'}
+                            </div>
+                        ) : null}
+                        {balanceKnown ? (
                             <div className="text-5xl md:text-6xl font-bold mb-4">₱{balance.toLocaleString('en-PH', { minimumFractionDigits: 2 })}</div>
+                        ) : loadFailedOutright ? (
+                            <div className="mb-4" role="alert">
+                                <div className="text-2xl md:text-3xl font-bold">Balance unavailable</div>
+                                <button
+                                    onClick={() => { refreshCustomerData(); }}
+                                    className="mt-2 text-xs underline text-white/80 hover:text-white"
+                                >
+                                    Try again
+                                </button>
+                            </div>
                         ) : (
                             <div className="mb-4 flex justify-center" aria-busy="true" aria-label="Loading total amount due">
                                 <div className="h-12 md:h-16 w-56 md:w-72 rounded-2xl bg-white/25 animate-pulse" />
@@ -451,7 +592,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                             <span>Reference: <span className="text-white font-medium">{accountNo}</span></span>
                             {/* Due date could come from SOA service ideally */}
                             <span>|</span>
-                            <span>Due: {balanceReady
+                            <span>Due: {dueDateKnown
                                 ? <span className="text-white">{dueDateString}</span>
                                 : <span className="inline-block h-3 w-20 align-middle rounded bg-white/25 animate-pulse" />}</span>
                         </div>
@@ -459,11 +600,17 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                         <div className="flex justify-center space-x-4">
                             <button
                                 onClick={handlePayNow}
-                                disabled={isPaymentProcessing || !balanceReady}
+                                disabled={isPaymentProcessing || !balanceConfirmed}
                                 className="bg-white text-slate-900 px-8 py-3 rounded-full font-bold hover:bg-gray-100 transition min-w-[140px] disabled:opacity-50 disabled:cursor-not-allowed flex flex-col items-center justify-center leading-tight"
                                 style={{ color: colorPalette?.primary || '#0f172a' }}
                             >
-                                <span>{!balanceReady ? 'LOADING' : isPaymentProcessing ? 'Processing' : (pendingPayment && pendingPayment.payment_url) ? 'PROCEED PAYMENT' : 'PAY NOW'}</span>
+                                <span>{!balanceKnown
+                                    ? (loadFailedOutright ? 'UNAVAILABLE' : 'LOADING')
+                                    : !balanceConfirmed
+                                        ? 'UPDATING'
+                                        : isPaymentProcessing
+                                            ? 'Processing'
+                                            : hasPendingPayment ? 'PROCEED PAYMENT' : 'PAY NOW'}</span>
                             </button>
                             <button
                                 onClick={() => onNavigate?.('customer-bills', 'payments')}
@@ -481,7 +628,19 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                             <h3 className="font-bold" style={{ color: colorPalette?.primary || '#0f172a' }}>Recent Payments</h3>
                         </div>
                         <div>
-                            {payments.length === 0 ? (
+                            {payments.length === 0 && isPaymentsLoading ? (
+                                // Still fetching. "No payment history found." is a statement
+                                // about the account and would be a guess at this point — an
+                                // account with payments showed it every load until the list
+                                // arrived.
+                                [0, 1, 2].map((i) => (
+                                    <div key={i} className="flex justify-between items-center p-4 border-b border-gray-50 last:border-0" aria-busy="true">
+                                        <div className="h-4 w-28 rounded bg-gray-100 animate-pulse" />
+                                        <div className="h-4 w-36 rounded bg-gray-100 animate-pulse hidden md:block" />
+                                        <div className="h-4 w-20 rounded bg-gray-200 animate-pulse" />
+                                    </div>
+                                ))
+                            ) : payments.length === 0 ? (
                                 <div className="p-4 text-center text-gray-500">No payment history found.</div>
                             ) : (
                                 payments.map((payment) => (
@@ -615,7 +774,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                                     </button>
                                     <button
                                         onClick={handleProceedToCheckout}
-                                        disabled={!balanceReady || isPaymentProcessing || (paymentAmount > 0 && paymentAmount < balance) || paymentAmount < 1}
+                                        disabled={!balanceConfirmed || isPaymentProcessing || (paymentAmount > 0 && paymentAmount < balance) || paymentAmount < 1}
                                         className="flex-1 px-4 py-3 rounded font-bold text-white transition-colors disabled:opacity-50"
                                         style={{ background: `linear-gradient(135deg, ${colorPalette?.primary || '#0f172a'} 0%, #000000 100%)` }}
                                     >
