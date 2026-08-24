@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AgentInvoice;
+use App\Models\AgentInvoiceCustomer;
 use App\Models\JobOrder;
 use App\Models\AgentCommissionHistory;
 use App\Models\AgentAchievementClaim;
@@ -892,6 +894,80 @@ class CommissionController extends Controller
         }
     }
 
+    /**
+     * Mark this agent's outstanding referral invoices Paid.
+     *
+     * An invoice is addressed to an OWNER — a team, or an agent who belongs to
+     * none — so the agent is resolved to their owner key first. A team member's
+     * payout therefore settles the team's invoices, which is the same document
+     * their own referrals were billed on.
+     *
+     * Only invoices that are not already Paid are touched, so a repeated
+     * approval cannot restate one, and `updated_by` names the route that did it
+     * rather than leaving it looking like a manual change.
+     *
+     * The job orders behind those invoices are marked paid with them. Which
+     * ones is not guessed at: `agent_invoice_customers` already records the
+     * exact job order billed on each invoice line, so the invoice itself says
+     * what it settled. The ids are collected BEFORE the status update, while
+     * the set of unpaid invoices is still identifiable.
+     *
+     * @return array{invoices: int, job_orders: int}
+     */
+    private function settleAgentInvoicesFor(AgentCommissionHistory $history): array
+    {
+        $none = ['invoices' => 0, 'job_orders' => 0];
+
+        $agent = User::find($history->agent_id);
+
+        if (!$agent) {
+            return $none;
+        }
+
+        $teamId = $agent->agent_id ?? null;
+
+        $ownerKey = ($teamId !== null && $teamId !== '')
+            ? AgentInvoice::ownerKeyForTeam($teamId)
+            : AgentInvoice::ownerKeyForAgent($agent->id);
+
+        $invoiceIds = AgentInvoice::where('owner_key', $ownerKey)
+            ->where('status', '!=', AgentInvoice::STATUS_PAID)
+            ->pluck('id')
+            ->all();
+
+        if ($invoiceIds === []) {
+            return $none;
+        }
+
+        // The job orders those invoices billed, read from the invoice lines.
+        $jobOrderIds = AgentInvoiceCustomer::whereIn('agent_invoice_id', $invoiceIds)
+            ->whereNotNull('job_order_id')
+            ->pluck('job_order_id')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        $invoicesPaid = AgentInvoice::whereIn('id', $invoiceIds)->update([
+            'status'     => AgentInvoice::STATUS_PAID,
+            'updated_by' => 'agent-payout #' . $history->id,
+        ]);
+
+        $jobOrdersPaid = 0;
+        if ($jobOrderIds !== []) {
+            // Already-paid rows are left alone so the count reports what this
+            // approval actually changed rather than what it looked at.
+            $jobOrdersPaid = JobOrder::whereIn('id', $jobOrderIds)
+                ->where(function ($q) {
+                    $q->whereNull('commission_status')
+                      ->orWhere('commission_status', '!=', 'Paid');
+                })
+                ->update(['commission_status' => 'Paid']);
+        }
+
+        return ['invoices' => $invoicesPaid, 'job_orders' => $jobOrdersPaid];
+    }
+
     /** The job orders a commission payout settles, as stored when it was raised. */
     private function jobOrderIdsFor(AgentCommissionHistory $history): array
     {
@@ -949,6 +1025,19 @@ class CommissionController extends Controller
                 JobOrder::whereIn('id', $jobOrderIds)->update(['commission_status' => 'Paid']);
             }
 
+            // An "All Balance" payout empties every bucket the agent has, so
+            // nothing they have been invoiced for is still outstanding: their
+            // referral invoices are settled with it.
+            //
+            // Done here rather than when the payout is raised, for the same
+            // reason the balance is: a pending payout has moved no money, and a
+            // rejected one must leave no trace. Marking invoices Paid at that
+            // point would settle them against a payment that may never happen.
+            $settled = ['invoices' => 0, 'job_orders' => 0];
+            if ($history->type === 'all') {
+                $settled = $this->settleAgentInvoicesFor($history);
+            }
+
             $approver = $this->approverIdentity($user);
 
             $history->forceFill([
@@ -976,6 +1065,9 @@ class CommissionController extends Controller
                 'message' => 'Payout approved successfully',
                 'data'    => $history,
                 'updated_job_orders' => count($jobOrderIds),
+                // Both only ever non-zero on an "All Balance" payout.
+                'settled_invoices'            => $settled['invoices'],
+                'settled_invoice_job_orders'  => $settled['job_orders'],
             ]);
         } catch (\Exception $e) {
             DB::rollBack();

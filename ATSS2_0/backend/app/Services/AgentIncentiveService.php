@@ -12,9 +12,9 @@ use Throwable;
  * ---------------------------------------------------------------------------
  * Cron logic that awards quota-based incentives to agents.
  *
- * For each agent it counts the agent's COMPLETED ("Done") Job Orders that have
- * not yet been counted, and for every full multiple of the agent's quota it
- * pays the configured `incentives_value` ONCE:
+ * For each agent it counts the agent's countable Job Orders that have not yet
+ * been counted, and for every full multiple of the agent's quota it pays the
+ * configured `incentives_value` ONCE:
  *
  *     incentive earned = number of completed quotas x incentives_value
  *
@@ -28,10 +28,23 @@ use Throwable;
  * and batch numbers keep incrementing per agent across runs (batch 1, 2, 3, …).
  * Any remainder (< quota) carries over unprocessed to the next run.
  *
+ * WHAT COUNTS AS A REFERRAL
+ * ---------------------------------------------------------------------------
+ * A Job Order counts when EITHER its onsite status is "Done" OR its
+ * `pre_installed` column carries the pre-install marker. The second lets a
+ * referral earn quota progress once the site has been pre-installed, without
+ * waiting for the technician to close the install — the agent's part is done
+ * either way.
+ *
+ * Counting early does not risk counting twice: a Job Order consumed by a
+ * completed quota is recorded in `agent_incentive_history`, and the
+ * `whereNotExists` below can never see it again — so its later flip to "Done"
+ * picks up nothing.
+ *
  * PROGRESS IS NEVER RESET BY A RUN.
  * ---------------------------------------------------------------------------
  * A run does not "start a fresh count". It asks one question — which of this
- * agent's completed Job Orders are NOT yet in `agent_incentive_history` — and
+ * agent's countable Job Orders are NOT yet in `agent_incentive_history` — and
  * that set only ever grows until a quota completes. So an agent on a quota of 5
  * who has Customer 1 and Customer 2 today still has both tomorrow, counted
  * toward the SAME quota, however many times the cron runs in between. Nothing
@@ -201,11 +214,34 @@ class AgentIncentiveService
         }
         $this->writeLog("  [MATCH] Matching job orders via referred_by: " . implode(' | ', $nameVariants));
 
-        // Base query for this agent's COMPLETED ("Done") job orders, matched by the
+        // Base query for this agent's countable job orders, matched by the
         // related application's referred_by full name (project convention).
+        //
+        // A job order counts when EITHER is true:
+        //
+        //   • its onsite status is "Done" — the install finished, or
+        //   • it is marked pre-installed, whatever its onsite status says.
+        //
+        // The second is what lets a referral earn quota progress before the
+        // install itself is finished: the agent's work of bringing the customer
+        // in is done once the site has been pre-installed, and holding the
+        // referral back until the technician closes the job order would delay a
+        // payout the agent has already earned.
+        //
+        // Counting it early does NOT mean counting it twice. A job order taken
+        // into a completed quota is written to agent_incentive_history in the
+        // same transaction that pays it, and the whereNotExists below can never
+        // see it again — so when the install later flips to "Done" it is not
+        // picked up a second time. The UNIQUE key on job_order_id is the
+        // backstop if two runs ever race for it.
         $completedBase = DB::table('job_orders')
             ->join('applications', 'job_orders.application_id', '=', 'applications.id')
-            ->whereRaw('LOWER(job_orders.onsite_status) = ?', ['done'])
+            ->where(function ($q) {
+                $q->whereRaw('LOWER(job_orders.onsite_status) = ?', ['done'])
+                  // NULL never equals the marker, so an unset column simply
+                  // fails this side of the OR and the status decides alone.
+                  ->orWhereRaw('LOWER(TRIM(job_orders.pre_installed)) = ?', ['preinstalled']);
+            })
             ->where(function ($q) use ($nameVariants) {
                 foreach ($nameVariants as $variant) {
                     $q->orWhereRaw('LOWER(applications.referred_by) LIKE ?', ['%' . $variant . '%']);
@@ -229,10 +265,10 @@ class AgentIncentiveService
             $this->writeLog("  [SCOPE] Counting referrals onboarded on or after {$startDate->format('Y-m-d')}");
         }
 
-        // Total completed (for logging how many are skipped because already processed).
+        // Total countable (for logging how many are skipped because already processed).
         $totalCompleted = (clone $completedBase)->count();
 
-        // Only the COMPLETED job orders NOT yet recorded in history are countable.
+        // Only the countable job orders NOT yet recorded in history are available.
         //
         // Each carries the incentive value it was approved at. That snapshot is
         // what the award is built from, so an administrator raising the rate
@@ -265,7 +301,7 @@ class AgentIncentiveService
         $available        = count($jobOrderIds);
         $alreadyProcessed = max(0, $totalCompleted - $available);
 
-        $this->writeLog("  [QUERY] Completed: {$totalCompleted} | Already processed (skipped): {$alreadyProcessed} | New & countable: {$available}");
+        $this->writeLog("  [QUERY] Countable (done or pre-installed): {$totalCompleted} | Already processed (skipped): {$alreadyProcessed} | New & countable: {$available}");
         if ($alreadyProcessed > 0) {
             $summary['skipped_job_orders'] = ($summary['skipped_job_orders'] ?? 0) + $alreadyProcessed;
         }

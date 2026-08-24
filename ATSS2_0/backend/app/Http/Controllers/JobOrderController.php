@@ -706,7 +706,42 @@ class JobOrderController extends Controller
             if (isset($data['pppoe_username']) && !empty($data['pppoe_username'])) {
                 $data['username'] = $data['pppoe_username'];
             }
-            
+
+            // Who recorded the pre-installation visit.
+            //
+            // Read from the signed-in user and assigned over whatever the request
+            // carried, so the email on the record is the account that actually
+            // made the change and cannot be set to someone else by editing the
+            // payload. Stamped only when the pre-install fields are part of this
+            // request, so an unrelated update leaves the existing value alone.
+            //
+            // There is no fallback. A pre-install whose author cannot be
+            // established is refused outright rather than written with a blank
+            // or stand-in name — the column exists to answer "who did this?",
+            // and a row that cannot answer it is worse than no row.
+            if ($request->has('pre_installed')) {
+                $recordedBy = $currentUser
+                    ? trim((string) ($currentUser->email ?? $currentUser->email_address ?? ''))
+                    : '';
+
+                if ($recordedBy === '') {
+                    DB::rollBack();
+
+                    \Log::warning('JobOrder Update blocked: pre-install author has no email address', [
+                        'id'      => $id,
+                        'user_id' => $currentUser->id ?? null,
+                    ]);
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Could not record the pre-installation: your account has no email address on file. '
+                            . 'Ask an administrator to add one, then try again.',
+                    ], 422);
+                }
+
+                $data['preinstalled_updated_by'] = $recordedBy;
+            }
+
             \Log::info('JobOrder Updating with data', [
                 'id' => $id,
                 'data' => $data,

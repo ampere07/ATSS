@@ -11,10 +11,11 @@ use Throwable;
 /**
  * Weekly agent referral invoices.
  *
- * Runs every Monday at 00:00 (Asia/Manila) and bills the seven days immediately
- * before the run — one invoice per team, one per agent who belongs to no team.
- * A run on Monday 17 August bills 10 August 00:00:00 to 16 August 23:59:59; the
- * day of the run is never included.
+ * Runs every Monday at 00:00 (Asia/Manila) and bills the last calendar week that
+ * has fully ended — one invoice per team, one per agent who belongs to no team.
+ * The window is always Monday 00:00:00 to Sunday 23:59:59: a run on Monday 17
+ * August bills 10 August to 16 August, and so does a catch-up run on Wednesday
+ * the 19th. The week the run sits in is never billed.
  *
  * Safe to run as often as you like. An owner already invoiced for the period is
  * skipped, and a customer already billed to that owner is refused by the
@@ -24,11 +25,9 @@ use Throwable;
  *
  * Options:
  *     --as-of=YYYY-MM-DD  bill as though the run happened on this date, i.e. the
- *                         seven days before it
- *     --week=YYYY-MM-DD   deprecated alias for --as-of. NOTE the meaning changed
- *                         with the move to a rolling window: it once meant "the
- *                         calendar week containing this date", and now means the
- *                         week BEFORE it. A notice is printed when it is used.
+ *                         Monday-to-Sunday week before the week it sits in
+ *     --week=YYYY-MM-DD   deprecated alias for --as-of. A notice is printed when
+ *                         it is used.
  *     --agent=ID          only the owner this agent belongs to (a team or
  *                         themselves), for testing one case
  *     --dry-run           report what would be billed without writing anything
@@ -43,7 +42,7 @@ use Throwable;
 class GenerateAgentInvoices extends Command
 {
     protected $signature = 'cron:generate-agent-invoices
-                            {--as-of= : Bill the seven days before this date (YYYY-MM-DD)}
+                            {--as-of= : Bill the Monday-Sunday week before this date (YYYY-MM-DD)}
                             {--week= : Deprecated alias for --as-of}
                             {--agent= : Only the owner this agent id belongs to}
                             {--dry-run : Report what would be billed without writing it}
@@ -61,7 +60,7 @@ class GenerateAgentInvoices extends Command
 
         if ($this->option('week') && !$this->option('as-of')) {
             $this->warn('[AGENT INVOICES] --week is deprecated; use --as-of. It now means'
-                . ' the seven days BEFORE the date given, not the week containing it.');
+                . ' the completed Monday-to-Sunday week BEFORE the one the date sits in.');
         }
 
         if ($given) {

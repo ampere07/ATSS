@@ -35,6 +35,8 @@ export interface AgentInvoiceRecord {
     subtotal: number;
     status: string;
     has_pdf: boolean;
+    /** Where the PDF is hosted, when one has been uploaded. */
+    pdf_drive_url?: string | null;
     created_at: string | null;
     customers?: AgentInvoiceCustomer[];
 }
@@ -47,6 +49,16 @@ export interface AgentInvoicePeriod {
     subtotal: number;
 }
 
+/**
+ * Where an invoice's PDF came from.
+ *
+ * A Drive-hosted invoice answers with a link and is opened directly; a locally
+ * rendered one (Drive unreachable) answers with bytes.
+ */
+export type PdfSource =
+    | { kind: 'url'; url: string }
+    | { kind: 'blob'; blob: Blob };
+
 export interface AgentInvoiceListParams {
     search?: string;
     status?: string;
@@ -54,7 +66,19 @@ export interface AgentInvoiceListParams {
     date_from?: string;
     date_to?: string;
     page?: number;
+    /**
+     * Page size. Counts billing periods when `group_by_period` is set, and
+     * invoices otherwise.
+     */
     per_page?: number;
+    /**
+     * Page by billing period instead of by invoice.
+     *
+     * The list renders as collapsible weeks, and paging by invoice splits a
+     * week across two pages — its header then appears on both. With this set,
+     * a page is N weeks and carries every invoice belonging to them.
+     */
+    group_by_period?: boolean;
 }
 
 /**
@@ -78,7 +102,16 @@ export const agentInvoiceService = {
         return response.data as {
             success: boolean;
             data: AgentInvoiceRecord[];
-            meta: { current_page: number; last_page: number; per_page: number; total: number };
+            meta: {
+                current_page: number;
+                last_page: number;
+                per_page: number;
+                /** Periods when `unit` is 'period', invoices when it is 'invoice'. */
+                total: number;
+                unit?: 'period' | 'invoice';
+                /** Invoices on this page — only sent in period mode. */
+                invoice_count?: number;
+            };
         };
     },
 
@@ -93,11 +126,29 @@ export const agentInvoiceService = {
      * Fetched through the API client so the request carries the session — the
      * stored file is not reachable without one.
      */
-    async pdfBlob(id: number, download = false): Promise<Blob> {
+    async pdfBlob(id: number, download = false): Promise<PdfSource> {
         const response = await apiClient.get(`/agent-invoices/${id}/pdf${download ? '?download=1' : ''}`, {
             responseType: 'blob',
         });
-        return response.data as Blob;
+
+        const data = response.data as Blob;
+
+        // The PDF normally lives on Google Drive, and the endpoint answers with
+        // a link rather than bytes. That arrives here as a JSON blob because the
+        // request asked for one, so it is read back out and reported as a link.
+        // Bytes still come back when Drive was unreachable and the server fell
+        // back to the local file.
+        if (data && data.type && data.type.includes('application/json')) {
+            const parsed = JSON.parse(await data.text());
+
+            if (parsed?.url) {
+                return { kind: 'url', url: parsed.url as string };
+            }
+
+            throw new Error(parsed?.message || 'The invoice PDF could not be opened.');
+        }
+
+        return { kind: 'blob', blob: data };
     },
 
     /**

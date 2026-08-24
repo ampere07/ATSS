@@ -68,6 +68,16 @@ class JobOrder extends Model
         'incentive_value',
         'agent_paid_at',
         'agent_paid_to',
+        // Pre-installation visit: the marker, the note taken at the time, and
+        // when it was recorded. Kept apart from onsite_status/onsite_remarks
+        // because a pre-install happens BEFORE the install proper, and writing
+        // it into those would overwrite the record of the install itself.
+        'pre_installed',
+        'pre_remarks',
+        'pre_installed_datetime',
+        // Who recorded it, by email. Stamped by the controller from the signed-in
+        // user, never taken from the request — see JobOrderController::update().
+        'preinstalled_updated_by',
         // technician_enabled is deliberately NOT fillable: it is the flag that
         // releases a job order to a technician out of turn, so it must never be
         // settable through the generic update endpoint a technician also calls.
@@ -93,6 +103,7 @@ class JobOrder extends Model
         'agent_paid_at' => 'datetime',
         'agent_paid_to' => 'integer',
         'technician_enabled' => 'boolean',
+        'pre_installed_datetime' => 'datetime',
     ];
 
     /**

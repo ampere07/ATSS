@@ -107,6 +107,15 @@ export interface JobOrder {
   Status_Remarks?: string | null;
   Onsite_Remarks?: string | null;
 
+  // Pre-installation visit. `pre_installed` holds the marker "preinstalled"
+  // once recorded and is null before that, so it doubles as the "has this been
+  // done?" test the button reads.
+  pre_installed?: string | null;
+  pre_remarks?: string | null;
+  pre_installed_datetime?: string | null;
+  /** Email of whoever recorded it. Stamped server-side, never sent by the client. */
+  preinstalled_updated_by?: string | null;
+
   // Images and Documents
   Setup_Image?: string | null;
   Speedtest_Image?: string | null;

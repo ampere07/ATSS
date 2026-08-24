@@ -239,7 +239,8 @@ class Kernel extends ConsoleKernel
         // ===================================================================
 
         // One referral invoice per agent team, and one per solo agent, for the
-        // week that has just ended. Runs at 00:00 every Monday in the app
+        // calendar week that has just ended (Monday 00:00 to Sunday 23:59). Runs
+        // at 00:00 every Monday in the app
         // timezone (config/app.php -> Asia/Manila).
         //
         // Uses: AgentInvoiceService, AgentInvoicePdfService

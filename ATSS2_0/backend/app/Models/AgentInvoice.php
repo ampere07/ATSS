@@ -72,6 +72,12 @@ class AgentInvoice extends Model
         'commission',
         'subtotal',
         'pdf_path',
+        // The rendered PDF lives on Google Drive, not on this server. `pdf_path`
+        // is still the layout-versioned name it was rendered under; these are
+        // where it can actually be read from.
+        'pdf_drive_url',
+        'pdf_drive_id',
+        'pdf_uploaded_at',
         'status',
         'organization_id',
         'created_by',

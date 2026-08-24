@@ -235,6 +235,42 @@
         .footer-fallback { border-top: 4px solid #d0202f; padding-top: 6px; }
         .footer-fallback .bar { height: 10px; background: #1a2e46; }
 
+        /* Pre-installation reference, at the foot of the invoice.
+           Deliberately quieter than the customer table: it is context for the
+           document, not a line being charged, and it must not read as a second
+           set of billable rows. */
+        table.pre-install {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 14px;
+        }
+        table.pre-install th {
+            background: #1a2e46;
+            color: #ffffff;
+            font-size: 8px;
+            letter-spacing: 1px;
+            text-align: left;
+            padding: 5px 8px;
+        }
+        table.pre-install td {
+            border: 1px solid #d5dbe3;
+            font-size: 8px;
+            color: #33415c;
+            padding: 5px 8px;
+            vertical-align: top;
+        }
+        table.pre-install td.who {
+            width: 32%;
+            font-weight: bold;
+        }
+        /* The stamp and the author, kept subordinate to the name above them. */
+        table.pre-install span.when {
+            display: block;
+            font-weight: normal;
+            color: #7b8794;
+            font-size: 7px;
+        }
+
         .page-note {
             text-align: center;
             color: #9ca3af;

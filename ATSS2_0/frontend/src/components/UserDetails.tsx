@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Settings, Edit2, Trash2, Loader2, UserCheck, UserMinus, DollarSign } from 'lucide-react';
+import { X, Settings, Edit2, Trash2, Loader2, UserCheck, UserMinus } from 'lucide-react';
 import { User as UserType } from '../types/api';
 import { ColorPalette } from '../services/settingsColorPaletteService';
 import { userService } from '../services/userService';
 import { useUserStore } from '../store/userStore';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface ModalConfig {
   isOpen: boolean;
@@ -64,9 +65,11 @@ const UserDetails: React.FC<UserDetailsProps> = ({
 
   const isAgent = displayUser.role_id === 4 || displayUser.role?.id === 4 || displayUser.role?.role_name?.toLowerCase() === 'agent';
 
-  const [isEditingCommission, setIsEditingCommission] = useState(false);
-  const [commissionInput, setCommissionInput] = useState('');
-  const [commissionSaving, setCommissionSaving] = useState(false);
+  // Editing a user and changing an agent's commission rate are SuperAdmin-only.
+  // An administrator reaches the same panel and reads the same fields, but the
+  // two buttons that write to them are not offered.
+  const { isSuperAdmin } = usePermissions();
+
 
   const getFullName = (u: UserType): string => {
     const parts = [u.first_name, u.middle_initial, u.last_name].filter(Boolean);
@@ -538,88 +541,6 @@ const UserDetails: React.FC<UserDetailsProps> = ({
         </div>
       )}
 
-      {isEditingCommission && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-[60]">
-          <div className={`border rounded-lg p-6 max-w-sm w-full mx-4 shadow-2xl ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-200 text-gray-900'
-            }`}>
-            <h3 className="text-lg font-semibold mb-4">Update Commission Rate</h3>
-            <p className={`text-xs mb-4 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-              Set the default commission rate for agent {getFullName(displayUser)}.
-            </p>
-            <div className="mb-6 relative">
-              <span className="absolute left-3 top-2.5 text-gray-400">₱</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                value={commissionInput}
-                onChange={(e) => setCommissionInput(e.target.value)}
-                placeholder="0.00"
-                className={`w-full pl-7 pr-4 py-2 border rounded focus:outline-none transition-colors ${
-                  isDarkMode ? 'bg-gray-750 border-gray-650 text-white focus:border-blue-500' : 'bg-white border-gray-300 text-gray-900 focus:border-blue-500'
-                }`}
-                disabled={commissionSaving}
-                autoFocus
-              />
-            </div>
-            <div className="flex items-center justify-end gap-3">
-              <button
-                onClick={() => setIsEditingCommission(false)}
-                className={`px-4 py-2 rounded transition-colors text-sm font-medium ${
-                  isDarkMode ? 'bg-gray-750 hover:bg-gray-700 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
-                }`}
-                disabled={commissionSaving}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={async () => {
-                  setCommissionSaving(true);
-                  try {
-                    const commissionVal = parseFloat(commissionInput);
-                    const res = await userService.updateUser(displayUser.id, {
-                      commission: isNaN(commissionVal) ? 0 : commissionVal
-                    });
-                    if (res.success && res.data) {
-                      updateStoreUser(res.data);
-                      setIsEditingCommission(false);
-                      setModal({
-                        isOpen: true,
-                        type: 'success',
-                        title: 'Success',
-                        message: 'Commission rate updated successfully.'
-                      });
-                    } else {
-                      setModal({
-                        isOpen: true,
-                        type: 'error',
-                        title: 'Error',
-                        message: res.message || 'Failed to update commission rate.'
-                      });
-                    }
-                  } catch (err: any) {
-                    setModal({
-                      isOpen: true,
-                      type: 'error',
-                      title: 'Error',
-                      message: err.message || 'Error updating commission rate.'
-                    });
-                  } finally {
-                    setCommissionSaving(false);
-                  }
-                }}
-                className="px-4 py-2 text-white rounded transition-colors shadow-lg active:scale-95 text-sm font-medium flex items-center gap-2"
-                style={{ backgroundColor: colorPalette?.primary || '#7c3aed' }}
-                disabled={commissionSaving}
-              >
-                {commissionSaving && <Loader2 className="h-4 w-4 animate-spin" />}
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       <div
         className={`${
           activeIsMobile
@@ -663,24 +584,7 @@ const UserDetails: React.FC<UserDetailsProps> = ({
                   </>
                 )}
               </button>
-              {isAgent && (
-                <button
-                  onClick={() => {
-                    setCommissionInput(
-                      displayUser.agent_balance?.commission !== undefined && displayUser.agent_balance?.commission !== null
-                        ? String(displayUser.agent_balance.commission)
-                        : ''
-                    );
-                    setIsEditingCommission(true);
-                  }}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-opacity hover:opacity-90 active:scale-95 shadow-sm"
-                  style={{ backgroundColor: colorPalette?.accent || '#f59e0b' }}
-                >
-                  <DollarSign className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Commission Rate</span>
-                </button>
-              )}
-              {onEdit && (
+              {onEdit && isSuperAdmin && (
                 <button
                   onClick={() => onEdit(displayUser)}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-opacity hover:opacity-90 active:scale-95 shadow-sm"

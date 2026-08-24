@@ -80,7 +80,7 @@ import TechUsers from './TechUsers';
 import Organization from './organization';
 import TeamAgent from './teamAgent';
 import Roles from './roles';
-import Commission from './Commission';
+import BonusHistory from './BonusHistory';
 import AgentPayout from './AgentPayout';
 import AgentInvoice from './AgentInvoice';
 import AccessDenied from '../components/AccessDenied';
@@ -398,8 +398,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <ServiceOrder />;
             case 'reports':
                 return <Reports />;
-            case 'commission':
-                return <Commission />;
+            case 'bonus-history':
+                return <BonusHistory />;
             case 'agent-payout':
                 return <AgentPayout />;
             case 'agent-invoices':

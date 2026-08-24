@@ -110,13 +110,26 @@
                         <td>INSTALLATION FEE</td>
                         <td class="value">{{ $peso }} {{ number_format((float) $invoice->installation_fee, 2) }}</td>
                     </tr>
+                    {{-- TOTAL AMOUNT is what the referrals on this invoice come
+                         to: the customer table's TOTAL column added up, which is
+                         clients x the referring agent's rate. The stored
+                         `commission` column is that sum, so it is what is
+                         printed here — the reader can check the figure against
+                         the rows above it.
+
+                         INCENTIVE is the completed-quota payout, held in the
+                         stored `total_amount` column. The two column names read
+                         the other way round to these labels, which is a naming
+                         accident on the table rather than a swap: `commission`
+                         has always been the per-referral sum and `total_amount`
+                         has always been the incentive. --}}
                     <tr>
                         <td>TOTAL AMOUNT</td>
-                        <td class="value">{{ $peso }} {{ number_format((float) $invoice->total_amount, 2) }}</td>
+                        <td class="value">{{ $peso }} {{ number_format((float) $invoice->commission, 2) }}</td>
                     </tr>
                     <tr>
-                        <td>COMMISSION</td>
-                        <td class="value">{{ $peso }} {{ number_format((float) $invoice->commission, 2) }}</td>
+                        <td>INCENTIVE</td>
+                        <td class="value">{{ $peso }} {{ number_format((float) $invoice->total_amount, 2) }}</td>
                     </tr>
                     <tr class="grand">
                         <td>SUBTOTAL</td>
@@ -137,6 +150,33 @@
             </td>
         </tr>
     </table>
+
+    {{-- Pre-installation reference.
+         Printed only when there is something to print, so an invoice whose
+         referrals were all installed outright is unchanged. It sits after the
+         sign-off because it explains the document rather than forming part of
+         what is being charged. --}}
+    @if (!empty($preInstallNotes))
+        <table class="pre-install">
+            <tr>
+                <th colspan="2">PRE-INSTALLATION REMARKS</th>
+            </tr>
+            @foreach ($preInstallNotes as $note)
+                <tr>
+                    <td class="who">
+                        {{ $note['customer'] }}
+                        @if ($note['recorded_at'])
+                            <span class="when">{{ $note['recorded_at'] }}</span>
+                        @endif
+                        @if ($note['recorded_by'])
+                            <span class="when">{{ $note['recorded_by'] }}</span>
+                        @endif
+                    </td>
+                    <td class="note">{{ $note['remarks'] }}</td>
+                </tr>
+            @endforeach
+        </table>
+    @endif
 
     <div class="page-note">
         {{ $invoice->invoice_number }} &nbsp;•&nbsp; Billing period {{ $periodLabel }}

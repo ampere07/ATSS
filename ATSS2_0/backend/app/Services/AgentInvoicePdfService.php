@@ -6,21 +6,27 @@ use App\Models\AgentInvoice;
 use Carbon\Carbon;
 use Dompdf\Dompdf;
 use Dompdf\Options;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\View;
 use Throwable;
 
 /**
- * Renders an agent invoice to a PDF on disk.
+ * Renders an agent invoice to a PDF on Google Drive.
  *
  * Uses Dompdf directly, matching how PdfGenerationService renders the billing
- * documents, and writes under storage/app/public so the stored path can be
- * served straight back to the invoice page.
+ * documents. Dompdf returns the document as a string and it is uploaded from
+ * there: nothing is written to this server, and `pdf_drive_url` on the invoice
+ * is the only place the document exists.
  *
- * The PDF is written once, when the invoice is generated, and the path is kept
- * on the invoice row. Opening the invoice page serves that file; it is only
- * rendered again if the file has gone missing or a caller asks for it.
+ * That is deliberate rather than incidental. storage/app/public is not reliably
+ * writable by the web user — directories created by a CLI run belong to whoever
+ * ran it — and an invoice that could not be opened because of a directory's
+ * ownership is a failure with no good explanation for the person reading it.
+ *
+ * The PDF is uploaded once, when the invoice is generated, and the link is kept
+ * on the invoice row. Opening the invoice hands back that link; it is rendered
+ * again only when there is no link or the layout version has moved on.
  */
 class AgentInvoicePdfService
 {
@@ -52,8 +58,12 @@ class AgentInvoicePdfService
      *   1  the original layout
      *   2  fonts applied (the family names were being HTML-escaped), and the
      *      customer table paginated so the totals block stops being orphaned
+     *   3  totals block corrected: TOTAL AMOUNT now prints the referral total
+     *      the customer table adds up to, and the quota payout is labelled
+     *      INCENTIVE rather than COMMISSION. Pre-installation remarks printed
+     *      at the foot of the invoice where any of its job orders carry them.
      */
-    private const LAYOUT_VERSION = 2;
+    private const LAYOUT_VERSION = 3;
 
     /** A4 portrait, in points — what setPaper('A4') gives Dompdf. */
     private const PAGE_WIDTH_PT = 595.28;
@@ -104,48 +114,88 @@ class AgentInvoicePdfService
     ];
 
     /**
-     * Render the invoice and return its path relative to storage/app/public.
+     * Render the invoice and return its shareable Google Drive URL.
      *
-     * @param  bool  $force  render again even if a file is already on disk
+     * @param  bool  $force  render and upload again even if a link is stored
      */
     public function render(AgentInvoice $invoice, bool $force = false): string
     {
         $relativePath = $this->pathFor($invoice);
-        $absolutePath = storage_path('app/public/' . $relativePath);
 
-        // Already on disk, and rendered by the current layout — opening the page
-        // must not re-render it. The path comparison is what makes a layout bump
-        // take effect: a file stored under an older version no longer matches
-        // and is rendered again.
-        if (!$force && $invoice->pdf_path === $relativePath && is_file($absolutePath)) {
-            return $invoice->pdf_path;
+        // Already on Drive, under the current layout — opening the page must not
+        // render it again. The path comparison is what makes a layout bump take
+        // effect: a link stored against an older version no longer matches and
+        // is rendered again.
+        if (!$force && $invoice->pdf_path === $relativePath && $invoice->pdf_drive_url) {
+            return $invoice->pdf_drive_url;
         }
 
         $html  = View::make('pdf.agent_invoice', $this->viewData($invoice))->render();
         $bytes = $this->htmlToPdf($html);
 
-        $directory = dirname($absolutePath);
-        if (!is_dir($directory)) {
-            Storage::makeDirectory('public/' . dirname($relativePath));
+        return $this->uploadToDrive($invoice, $bytes, $relativePath);
+    }
 
-            if (!is_dir($directory)) {
-                @mkdir($directory, 0775, true);
+    /**
+     * Put the rendered PDF on Google Drive. Nothing is written to this server.
+     *
+     * Dompdf hands back the document as a string, so there is no reason for it
+     * to reach the filesystem at all — and good reason for it not to. The
+     * storage directory is not reliably writable by the web user (a CLI run as
+     * root owns some of it), and a local copy would be a second place the same
+     * document could be read from and drift.
+     *
+     * Folders mirror the old on-disk layout (agent-invoices/YYYY/MM) so a person
+     * browsing Drive finds a shape they recognise.
+     *
+     * A failure here IS fatal, unlike before: with no local copy there is no
+     * document to fall back to, so the caller must hear about it rather than be
+     * handed a path to a file that does not exist.
+     *
+     * @return string  the shareable Drive URL
+     */
+    private function uploadToDrive(AgentInvoice $invoice, string $bytes, string $relativePath): string
+    {
+        $drive = app(GoogleDriveService::class);
+
+        // agent-invoices / YYYY / MM, created once and reused after that.
+        $folderId = $drive->getParentFolderId();
+        foreach (explode('/', dirname($relativePath)) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
             }
+
+            $existing = $drive->findFolder($segment, $folderId);
+            $folderId = $existing ?: $drive->createFolder($segment, $folderId);
         }
 
-        $written = @file_put_contents($absolutePath, $bytes);
+        $url = $drive->uploadContent($bytes, $folderId, basename($relativePath), 'application/pdf');
 
-        if ($written === false) {
-            throw new \RuntimeException("Could not write the invoice PDF to {$absolutePath}");
+        // The id is kept so the file can be replaced or removed later without
+        // parsing it back out of a display URL.
+        $driveId = null;
+        if (preg_match('#/d/([^/]+)/#', (string) $url, $m)) {
+            $driveId = $m[1];
         }
 
-        Log::info('[AGENT INVOICES] PDF written', [
+        // pdf_path is still recorded: it is the layout-versioned name this was
+        // rendered under, and it is what tells a later run whether the stored
+        // rendering is stale. Nothing is kept at that path.
+        $invoice->forceFill([
+            'pdf_path'        => $relativePath,
+            'pdf_drive_url'   => $url,
+            'pdf_drive_id'    => $driveId,
+            'pdf_uploaded_at' => Carbon::now(),
+        ])->save();
+
+        Log::info('[AGENT INVOICES] PDF uploaded to Drive', [
             'invoice_number' => $invoice->invoice_number,
             'path'           => $relativePath,
-            'bytes'          => $written,
+            'bytes'          => strlen($bytes),
+            'drive_url'      => $url,
         ]);
 
-        return $relativePath;
+        return $url;
     }
 
     /**
@@ -281,6 +331,64 @@ class AgentInvoicePdfService
         ] + $this->pageGeometry();
     }
 
+    /**
+     * The pre-installation notes behind this invoice's customers.
+     *
+     * A referral can reach an invoice on the strength of a pre-installation
+     * visit rather than a finished install, so the note taken at that visit is
+     * the reference explaining why the line is there. It is printed at the end
+     * of the invoice, not against the row, because it is context for the whole
+     * document rather than part of what is being charged.
+     *
+     * Only job orders actually carrying the marker are read, so an invoice whose
+     * referrals were all installed outright gets nothing and the section is
+     * omitted entirely. One query, not one per customer.
+     *
+     * @param  \Illuminate\Support\Collection  $customers
+     * @return array<int, array{customer: string, remarks: string, recorded_at: string|null, recorded_by: string|null}>
+     */
+    private function preInstallNotes($customers): array
+    {
+        $jobOrderIds = $customers
+            ->pluck('job_order_id')
+            ->filter()
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($jobOrderIds === []) {
+            return [];
+        }
+
+        // Customer names come from the invoice's own rows, which are the names
+        // as billed — reading them back off the application could disagree with
+        // the line above if the customer was renamed since.
+        $nameFor = [];
+        foreach ($customers as $c) {
+            if ($c->job_order_id) {
+                $nameFor[(int) $c->job_order_id] = (string) $c->customer_name;
+            }
+        }
+
+        $rows = DB::table('job_orders')
+            ->whereIn('id', $jobOrderIds)
+            ->whereRaw('LOWER(TRIM(pre_installed)) = ?', ['preinstalled'])
+            ->whereNotNull('pre_remarks')
+            ->whereRaw("TRIM(pre_remarks) <> ''")
+            ->orderBy('id')
+            ->get(['id', 'pre_remarks', 'pre_installed_datetime', 'preinstalled_updated_by']);
+
+        return $rows->map(fn ($r) => [
+            'customer'    => $nameFor[(int) $r->id] ?? ('Job Order #' . $r->id),
+            'remarks'     => trim((string) $r->pre_remarks),
+            'recorded_at' => $r->pre_installed_datetime
+                ? Carbon::parse($r->pre_installed_datetime)->format('M j, Y g:i A')
+                : null,
+            'recorded_by' => $r->preinstalled_updated_by ?: null,
+        ])->all();
+    }
+
     /** The parts particular to one invoice. */
     private function invoiceViewData(AgentInvoice $invoice): array
     {
@@ -303,6 +411,11 @@ class AgentInvoicePdfService
         return [
             'invoice'   => $invoice,
             'customers' => $rows,
+
+            // Pre-installation notes for the job orders on this invoice, printed
+            // at the end as a reference. Empty for an invoice whose referrals
+            // were all installed outright, and the section is then omitted.
+            'preInstallNotes' => $this->preInstallNotes($customers),
 
             /*
              * The rows split into pages, rather than left to Dompdf.

@@ -27,6 +27,15 @@ const hexToRgba = (hex: string, opacity: number) => {
 
 
 
+// Concerns are free text, so the same concern arrives in whatever casing and
+// spacing the encoder used ("For Pullout" vs "for pullout"). Grouping on the raw
+// string splits one concern into several sidebar rows, so every comparison goes
+// through this key instead.
+const concernKeyOf = (concern?: string | null) => {
+  const trimmed = (concern || '').replace(/\s+/g, ' ').trim();
+  return trimmed ? trimmed.toLowerCase() : '(no concern)';
+};
+
 type DisplayMode = 'card' | 'table';
 
 const allColumns = [
@@ -776,11 +785,18 @@ const ServiceOrderPage: React.FC = () => {
       { id: 'open', name: 'Open' }
     ];
 
+    // status -> visit status -> barangay -> concern. Each level is a count of
+    // the level beneath it, so a branch can be read without opening it.
     const tree: Record<string, {
       count: number,
       visits: Record<string, {
         count: number,
-        barangays: Record<string, number>
+        barangays: Record<string, {
+          count: number,
+          // Keyed by concernKeyOf(); `labels` tallies the raw spellings so the
+          // row can be shown with the one that actually occurs most.
+          concerns: Record<string, { count: number, labels: Record<string, number> }>
+        }>
       }>
     }> = {};
 
@@ -821,7 +837,23 @@ const ServiceOrderPage: React.FC = () => {
           matchedBrgy = foundBrgy.barangay;
         }
 
-        visitNode.barangays[matchedBrgy] = (visitNode.barangays[matchedBrgy] || 0) + 1;
+        if (!visitNode.barangays[matchedBrgy]) {
+          visitNode.barangays[matchedBrgy] = { count: 0, concerns: {} };
+        }
+        const brgyNode = visitNode.barangays[matchedBrgy];
+        brgyNode.count++;
+
+        // Blank concerns are grouped rather than dropped: a barangay's rows must
+        // add up to its own count, or the branch reads as if records went
+        // missing when it is opened.
+        const concernLabel = (so.concern || '').replace(/\s+/g, ' ').trim() || '(No concern)';
+        const concernKey = concernKeyOf(so.concern);
+        if (!brgyNode.concerns[concernKey]) {
+          brgyNode.concerns[concernKey] = { count: 0, labels: {} };
+        }
+        const concernNode = brgyNode.concerns[concernKey];
+        concernNode.count++;
+        concernNode.labels[concernLabel] = (concernNode.labels[concernLabel] || 0) + 1;
       }
     });
 
@@ -843,10 +875,22 @@ const ServiceOrderPage: React.FC = () => {
             name: vName,
             originalKey: vKey,
             count: vData.count,
-            barangays: Object.entries(vData.barangays).sort().map(([bName, bCount]) => ({
+            barangays: Object.entries(vData.barangays).sort().map(([bName, bData]) => ({
               id: `status:${c.id}:visit:${vKey}:brgy:${bName}`,
               name: bName,
-              count: bCount
+              count: bData.count,
+              concerns: Object.entries(bData.concerns).sort(([a], [b]) => a.localeCompare(b)).map(([cKey, cData]) => {
+                // Show the spelling most of the rows actually use; ties keep the
+                // one seen first.
+                const displayName = Object.entries(cData.labels)
+                  .reduce((best, entry) => (entry[1] > best[1] ? entry : best))[0];
+
+                return {
+                  id: `status:${c.id}:visit:${vKey}:brgy:${bName}:concern:${cKey}`,
+                  name: displayName,
+                  count: cData.count
+                };
+              })
             }))
           };
         })
@@ -910,6 +954,16 @@ const ServiceOrderPage: React.FC = () => {
             if (foundBrgy) matchedBrgy = foundBrgy.barangay;
 
             if (matchedBrgy !== brgyName) return false;
+
+            // The concern is the deepest level. Its name can itself contain a
+            // colon, so the remainder is rejoined rather than read as parts[7] —
+            // splitting on every colon would silently drop half the name and
+            // match nothing.
+            if (parts.length > 6 && parts[6] === 'concern') {
+              const concernKeyFilter = parts.slice(7).join(':');
+
+              if (concernKeyOf(serviceOrder.concern) !== concernKeyFilter) return false;
+            }
           }
         }
         return true;
@@ -1510,37 +1564,90 @@ const ServiceOrderPage: React.FC = () => {
                           </div>
                         </button>
 
-                        {/* Barangay Level */}
+                        {/* Barangay Level — expandable, with its concerns beneath */}
                         {isVisitExpanded && visit.barangays.map((brgy) => {
+                          const isBrgyExpanded = expandedLocations.has(brgy.id);
+
                           return (
-                            <button
-                              key={brgy.id}
-                              onClick={() => {
-                                setSelectedLocation(brgy.id);
-                                if (isMobile) {
-                                  setMobileViewMode('list');
-                                }
-                              }}
-                              className={`w-full flex items-center justify-between pl-16 pr-4 py-1.5 text-[10px] transition-colors ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
-                              style={selectedLocation === brgy.id ? {
-                                backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(249, 115, 22, 0.2)',
-                                color: colorPalette?.primary || '#7c3aed',
-                                fontWeight: 'bold'
-                              } : {
-                                color: isDarkMode ? '#6b7280' : '#4b5563'
-                              }}
-                            >
-                              <span className="truncate flex-1 text-left">{brgy.name}</span>
-                              <span className={`px-1.5 py-0.5 rounded text-[9px] transition-colors ${selectedLocation === brgy.id
-                                ? 'text-white'
-                                : isDarkMode ? 'bg-gray-800 text-gray-600' : 'bg-gray-100 text-gray-400'
-                                }`}
+                            <div key={brgy.id}>
+                              <button
+                                onClick={() => {
+                                  setSelectedLocation(brgy.id);
+                                  if (isMobile) {
+                                    setMobileViewMode('list');
+                                  }
+                                }}
+                                className={`w-full flex items-center justify-between pl-16 pr-4 py-1.5 text-[10px] transition-colors ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
                                 style={selectedLocation === brgy.id ? {
-                                  backgroundColor: colorPalette?.primary || '#7c3aed'
-                                } : {}}>
-                                {brgy.count}
-                              </span>
-                            </button>
+                                  backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(249, 115, 22, 0.2)',
+                                  color: colorPalette?.primary || '#7c3aed',
+                                  fontWeight: 'bold'
+                                } : {
+                                  color: isDarkMode ? '#6b7280' : '#4b5563'
+                                }}
+                              >
+                                <span className="truncate flex-1 text-left">{brgy.name}</span>
+                                <div className="flex items-center space-x-2">
+                                  <span className={`px-1.5 py-0.5 rounded text-[9px] transition-colors ${selectedLocation === brgy.id
+                                    ? 'text-white'
+                                    : isDarkMode ? 'bg-gray-800 text-gray-600' : 'bg-gray-100 text-gray-400'
+                                    }`}
+                                    style={selectedLocation === brgy.id ? {
+                                      backgroundColor: colorPalette?.primary || '#7c3aed'
+                                    } : {}}>
+                                    {brgy.count}
+                                  </span>
+                                  {/* Only offered where there is something to
+                                      open, so a leaf does not carry a chevron
+                                      that does nothing. */}
+                                  {brgy.concerns.length > 0 && (
+                                    <button
+                                      onClick={(e) => toggleLocationExpansion(e, brgy.id)}
+                                      className={`p-0.5 rounded transition-colors ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-200'}`}
+                                    >
+                                      {isBrgyExpanded ? (
+                                        <ChevronDown className={`h-3 w-3 ${selectedLocation === brgy.id ? 'text-current' : 'text-gray-500'}`} />
+                                      ) : (
+                                        <ChevronRight className={`h-3 w-3 ${selectedLocation === brgy.id ? 'text-current' : 'text-gray-500'}`} />
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                              </button>
+
+                              {/* Concern Level */}
+                              {isBrgyExpanded && brgy.concerns.map((concern) => (
+                                <button
+                                  key={concern.id}
+                                  onClick={() => {
+                                    setSelectedLocation(concern.id);
+                                    if (isMobile) {
+                                      setMobileViewMode('list');
+                                    }
+                                  }}
+                                  className={`w-full flex items-center justify-between pl-24 pr-4 py-1.5 text-[10px] transition-colors ${isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}
+                                  style={selectedLocation === concern.id ? {
+                                    backgroundColor: colorPalette?.primary ? `${colorPalette.primary}33` : 'rgba(249, 115, 22, 0.2)',
+                                    color: colorPalette?.primary || '#7c3aed',
+                                    fontWeight: 'bold'
+                                  } : {
+                                    color: isDarkMode ? '#6b7280' : '#4b5563'
+                                  }}
+                                  title={concern.name}
+                                >
+                                  <span className="truncate flex-1 text-left">{concern.name}</span>
+                                  <span className={`px-1.5 py-0.5 rounded text-[9px] transition-colors ${selectedLocation === concern.id
+                                    ? 'text-white'
+                                    : isDarkMode ? 'bg-gray-800 text-gray-600' : 'bg-gray-100 text-gray-400'
+                                    }`}
+                                    style={selectedLocation === concern.id ? {
+                                      backgroundColor: colorPalette?.primary || '#7c3aed'
+                                    } : {}}>
+                                    {concern.count}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
                           );
                         })}
                       </div>

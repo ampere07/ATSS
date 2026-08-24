@@ -686,29 +686,37 @@ const AgentPayout: React.FC = () => {
 
             {/* Main Content */}
             <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-                {/* 3 Summary Cards */}
+                {/* Summary cards. One colour for every figure: they are four
+                    readings of the same thing — money the agent holds — and a
+                    green/blue split implied a meaning none of them carry. */}
                 {selectedAgentId !== 'all' && (
-                    <div className={`p-4 border-b flex-shrink-0 grid grid-cols-1 md:grid-cols-3 gap-4 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
+                    <div className={`p-4 border-b flex-shrink-0 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
                         {(() => {
                             const selectedAgent = agentList.find(a => a.id === selectedAgentId);
-                            const balance = selectedAgent?.agent_balance?.balance || 0;
-                            const incentives = selectedAgent?.agent_balance?.incentives || 0;
+                            const bal = selectedAgent?.agent_balance;
+                            const balance = bal?.balance || 0;
+                            const incentives = bal?.incentives || 0;
                             // @ts-ignore
-                            const bonus = selectedAgent?.agent_balance?.bonus || selectedAgent?.agent_balance?.Bonus || 0;
+                            const bonus = bal?.bonus || bal?.Bonus || 0;
+                            // @ts-ignore
+                            const achievement = bal?.achievement || 0;
+
+                            const valueColor = colorPalette?.primary || '#ef4444';
+                            const card = (label: string, value: any) => (
+                                <div className={`p-3 rounded-lg border ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
+                                    <div className="text-xs text-gray-500 mb-1">{label}</div>
+                                    <div className="text-xl font-bold" style={{ color: valueColor }}>
+                                        ₱{Number(value).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                    </div>
+                                </div>
+                            );
+
                             return (
                                 <>
-                                    <div className={`p-3 rounded-lg border ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                                        <div className="text-xs text-gray-500 mb-1">Balance</div>
-                                        <div className="text-xl font-bold" style={{ color: colorPalette?.primary || '#7c3aed' }}>₱{Number(balance).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                                    </div>
-                                    <div className={`p-3 rounded-lg border ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                                        <div className="text-xs text-gray-500 mb-1">Incentives</div>
-                                        <div className="text-xl font-bold text-green-500">₱{Number(incentives).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                                    </div>
-                                    <div className={`p-3 rounded-lg border ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                                        <div className="text-xs text-gray-500 mb-1">Bonus</div>
-                                        <div className="text-xl font-bold text-blue-500">₱{Number(bonus).toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                                    </div>
+                                    {card('Balance', balance)}
+                                    {card('Incentives', incentives)}
+                                    {card('Bonus', bonus)}
+                                    {card('Achievement', achievement)}
                                 </>
                             );
                         })()}

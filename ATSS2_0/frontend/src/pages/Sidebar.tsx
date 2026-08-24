@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, FileWarning, List, Router, DollarSign, Receipt, ReceiptText, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck } from 'lucide-react';
+import { LayoutDashboard, Users, FileText, LogOut, ChevronRight, User, FileCheck, Wrench, MapPinned, MapPin, Package, CreditCard, FileWarning, List, Router, DollarSign, Receipt, ReceiptText, FileBarChart, Clock, Calendar, AlertTriangle, Tag, MessageSquare, Settings, Network, Activity, AlertCircle, RefreshCw, Building, Shield, UserCheck, Gift } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useTransactionStore } from '../store/transactionStore';
 import { useTransactionRevertStore } from '../store/transactionRevertStore';
@@ -69,10 +69,10 @@ interface SidebarProps {
  * of its children is.
  *
  * `onlyRoles` / `exceptRoles` exist for the two entries that appear twice under
- * different labels: an agent sees their own payout history as "History" at the
- * top level, while an administrator reaches the same page as "Pay Out/In" inside
- * the Agent group. Both users hold the same key, so the key alone cannot choose
- * between the two presentations.
+ * different labels: an agent sees their own bonus history as "History" at the
+ * top level, while an administrator reaches the same page as "Bonus History"
+ * inside the Agent group. Both users hold the same key, so the key alone cannot
+ * choose between the two presentations.
  */
 interface MenuItem {
   id: string;
@@ -174,7 +174,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
     { id: 'reports', label: 'Reports', icon: FileText },
     // An agent's own payout/incentive/bonus history. Read-only and scoped server side to
     // the signed-in agent — same entry the mobile app exposes as "History".
-    { id: 'commission', label: 'History', icon: ReceiptText, onlyRoles: [ROLE.AGENT] },
+    { id: 'bonus-history', label: 'History', icon: ReceiptText, onlyRoles: [ROLE.AGENT] },
     // An agent's own weekly referral invoices. Scoped server side to their team,
     // or to themselves when they belong to none, so this entry can never show
     // another team's documents.
@@ -187,7 +187,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
       // a one-child "Agent" group duplicating them.
       exceptRoles: [ROLE.AGENT],
       children: [
-        { id: 'commission', label: 'Pay Out/In', icon: DollarSign },
+        { id: 'bonus-history', label: 'Bonus History', icon: Gift },
         { id: 'team-agent', label: 'Team Agents', icon: Users },
         { id: 'agent-management', label: 'Agent Management', icon: User },
         { id: 'agent-payout', label: 'Agent Payout', icon: DollarSign },

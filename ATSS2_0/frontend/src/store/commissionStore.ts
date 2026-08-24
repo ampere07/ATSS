@@ -251,6 +251,11 @@ export const useCommissionStore = create<CommissionState>((set, get) => ({
                 });
             }
 
+            // The cursor always advances, including on a tick that found
+            // nothing. It must never be left null: fetchUpdates() treats a null
+            // cursor as "never loaded" and falls back to a full fetchCommissions
+            // with its loading spinner, so a cursor that stops advancing turns
+            // the 3-second poll into a 3-second full reload.
             set({ lastUpdated: new Date() });
         } catch (error) {
             console.error('[CommissionStore] Update failed:', error);

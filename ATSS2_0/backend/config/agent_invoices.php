@@ -15,18 +15,16 @@ return [
     'number_padding' => 6,
 
     /*
-    | The fallback rate shown as UNIT PRICE when it cannot be derived.
+    | NOT used by the invoice run any more.
     |
-    | It is only ever a DISPLAY figure now, and it does NOT drive any total.
-    | The invoice states the rate one completed quota was worth, and that is
-    | read back from the incentives the cron actually awarded, so the printed
-    | rate always agrees with the printed total even after an administrator
-    | changes the setting.
+    | UNIT PRICE on an invoice is the referring agent's own commission rate,
+    | read from `agent_balance.commission` — see the COMMISSION note below. Each
+    | customer line carries the rate of the agent who brought that customer in,
+    | so a mixed-rate team prices every line correctly rather than averaging.
     |
-    | This value stands in only where no rate can be derived — a week with no
-    | incentive at all, or a team whose members earned at different rates, where
-    | no single figure is the truth. It then falls back to the agent's own
-    | configured `agent_balance.incentives_value` before reaching this.
+    | This key remains only because JobOrderAgentPaymentService still falls back
+    | to it when an agent has no rate of their own. Changing it does not affect
+    | any invoice.
     */
     'unit_price' => env('AGENT_INVOICE_UNIT_PRICE', 100),
 
@@ -39,6 +37,9 @@ return [
     | on the referring agent's own record (agent_balance.commission), so the
     | invoice total is the sum across its customers. A team on one rate bills
     | customers x rate; a team on mixed rates bills each customer at theirs.
+    |
+    | That same rate is what each customer line states as its UNIT PRICE, so the
+    | line items add up to COMMISSION exactly.
     |
     | TOTAL AMOUNT is the incentive, and it is NOT configured or calculated
     | anywhere in the invoice run either. It is read from the completed quotas

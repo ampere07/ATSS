@@ -81,7 +81,7 @@ final class Permissions
         'support',
 
         // Agent
-        'commission',
+        'bonus-history',
         'agent-invoices',
         'agent-payout',
         'agent-management',
@@ -200,8 +200,8 @@ final class Permissions
 
         // Raising a payout, incentive or bonus, and signing one off. Both were
         // previously inferred from "is this user not an agent".
-        'commission' => [
-            'commission.payout',
+        'bonus-history' => [
+            'bonus-history.payout',
         ],
 
         // Approving or rejecting on the Agent Payout page. This one had no
@@ -278,7 +278,7 @@ final class Permissions
             'reports', 'reports.manage',
             'support',
             // Agent
-            'commission', 'commission.payout',
+            'bonus-history', 'bonus-history.payout',
             'team-agent',
             'agent-management',
             'agent-payout', 'agent-payout.approve',
@@ -337,7 +337,7 @@ final class Permissions
             'agent-application',
             'job-order',
             'work-order',
-            'commission',
+            'bonus-history',
             'agent-invoices',
         ],
 

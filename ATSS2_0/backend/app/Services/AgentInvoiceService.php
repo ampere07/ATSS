@@ -122,17 +122,22 @@ class AgentInvoiceService
     }
 
     /**
-     * The seven days a run bills: the week immediately before the run itself.
+     * The seven days a run bills: the last calendar week that has fully ended,
+     * always Monday 00:00:00 to Sunday 23:59:59.
      *
      * A run on Monday 17 August bills 10 August 00:00:00 to 16 August 23:59:59.
-     * The day of the run is never included — work completed during it belongs to
-     * the following week's invoice.
+     * The week the run sits in is never billed — it has not finished yet, and its
+     * work belongs to the following week's invoice.
      *
-     * Rolling rather than calendar-aligned, so the rule holds whatever day the
-     * run happens on: a catch-up run on Wednesday 19 August bills the 12th to the
-     * 18th, not the part-finished week the 19th sits in. Consecutive weekly runs
-     * therefore produce windows that abut exactly — no day is billed twice and
-     * none is skipped.
+     * Calendar-aligned rather than rolling, so the window is the same Monday to
+     * Sunday no matter which day the run happens on: a catch-up run on Wednesday
+     * 19 August still bills the 10th to the 16th, exactly as the Monday run it is
+     * standing in for would have. A late run therefore corrects itself instead of
+     * dragging the boundary forward, and consecutive weeks abut exactly — no day
+     * is billed twice and none is skipped.
+     *
+     * Monday is named explicitly rather than left to Carbon's locale default, so
+     * the boundary cannot move with a locale change.
      *
      * Dates come from Carbon, which Laravel has already set to the app timezone
      * (config/app.php — Asia/Manila), so the boundaries are local midnights
@@ -145,9 +150,13 @@ class AgentInvoiceService
     {
         $generatedOn = ($asOf ? $asOf->copy() : Carbon::now())->startOfDay();
 
+        // The Monday that opens the week the run sits in; the billed week is the
+        // one before it.
+        $thisWeekMonday = $generatedOn->copy()->startOfWeek(Carbon::MONDAY);
+
         return [
-            $generatedOn->copy()->subDays(7)->startOfDay(),
-            $generatedOn->copy()->subDay()->endOfDay(),
+            $thisWeekMonday->copy()->subWeek()->startOfDay(),
+            $thisWeekMonday->copy()->subDay()->endOfDay(),
         ];
     }
 
@@ -195,7 +204,10 @@ class AgentInvoiceService
 
         $this->writeLog("[CONFIG] Triggered By: " . ($this->triggeredBy ?? ($this->isCli ? 'scheduler (cron)' : 'web request')));
         $this->writeLog("[CONFIG] Billing Week: {$summary['period_start']} to {$summary['period_end']}");
-        $this->writeLog("[CONFIG] Unit Price: ₱" . number_format((float) config('agent_invoices.unit_price', 100), 2));
+        // Not a configured figure any more: the unit price on each line is the
+        // referring agent's own agent_balance.commission, so there is no single
+        // rate to state here before the owners are known.
+        $this->writeLog("[CONFIG] Unit Price: per agent (agent_balance.commission)");
         $this->writeLog("[CONFIG] Installation Fee: ₱" . number_format((float) config('agent_invoices.installation_fee', 0), 2));
         $this->writeLog("[CONFIG] Agent Programme Start: " . ($programmeStart ? $programmeStart->format('Y-m-d') : 'not set'));
         if ($onlyOwnerAgentId !== null) {
@@ -335,7 +347,6 @@ class AgentInvoiceService
                 'u.agent_id as team_id',
                 'u.organization_id',
                 'a.team_name',
-                'ab.incentives_value',
                 'ab.quota',
                 'ab.commission'
             );
@@ -353,9 +364,6 @@ class AgentInvoiceService
                 'user_id'         => (int) $row->user_id,
                 'name'            => $this->fullName($row),
                 'email'           => trim((string) ($row->email_address ?? '')),
-                'unit_price'      => $row->incentives_value !== null && (float) $row->incentives_value > 0
-                    ? (float) $row->incentives_value
-                    : (float) config('agent_invoices.unit_price', 100),
                 // Referrals needed to earn the incentive once. Zero means the
                 // agent is not on the quota scheme and bills no incentive.
                 'quota'           => (int) ($row->quota ?? 0),
@@ -480,24 +488,25 @@ class AgentInvoiceService
         $totalAmount     = $incentive['amount'];
         $installationFee = (float) config('agent_invoices.installation_fee', 0);
 
-        // What one completed quota was worth on this invoice.
+        // What one referred customer is worth on this invoice: the commission
+        // rate on the referring agent's own record (agent_balance.commission).
         //
-        // Taken from the awards themselves rather than from the agent's current
-        // configuration, so the stated rate and the stated total always agree.
-        // They would otherwise drift the moment an administrator changed the
-        // rate: the cron pays a quota at the rate in force when it completed,
-        // and printing today's rate beside a total built from last week's would
-        // make an arithmetically impossible document.
+        // Read per customer rather than per invoice, because a team's members
+        // can sit on different rates and each customer is worth whatever their
+        // own agent earns. The header figure below is only the summary of that:
+        // the one rate every line shares, or — on a mixed-rate team, where no
+        // single number is the truth — the owner's own rate.
         //
-        // The configured rate stands in only where it cannot be derived —
-        // no incentive this week, or a team whose members earned at different
-        // rates, where no single figure is the truth.
-        $configuredRate = (float) ($owner['members'][0]['unit_price'] ?? config('agent_invoices.unit_price', 100));
-        $ratesPaid      = array_values(array_unique(array_map(
-            fn ($b) => (float) $b['amount'],
-            $incentive['batches']
+        // This is the same $c['commission_rate'] the commission total is summed
+        // from a few lines down, so the line items and the COMMISSION figure are
+        // built from one source and cannot disagree.
+        $ratesCharged = array_values(array_unique(array_map(
+            fn ($c) => (float) $c['commission_rate'],
+            $billable
         )));
-        $unitPrice = count($ratesPaid) === 1 ? $ratesPaid[0] : $configuredRate;
+        $unitPrice = count($ratesCharged) === 1
+            ? $ratesCharged[0]
+            : (float) ($owner['members'][0]['commission_rate'] ?? 0);
 
         // Commission is earned per referral, at the rate of the agent who
         // brought that customer in — so it is the sum across the invoice, not a
@@ -558,9 +567,12 @@ class AgentInvoiceService
                         'referred_by_name'     => $c['referred_by_name'],
                         'referred_by_raw'      => $c['referred_by_raw'],
                         'installed_date'       => $c['installed_date'],
-                        'unit_price'           => $unitPrice,
+                        // This customer's own agent's rate, not the invoice
+                        // header's — on a mixed-rate team the header cannot
+                        // represent every line, and the line is what is owed.
+                        'unit_price'           => (float) $c['commission_rate'],
                         'quantity'             => 1,
-                        'total'                => $unitPrice,
+                        'total'                => (float) $c['commission_rate'],
                         'created_at'           => $now,
                         'updated_at'           => $now,
                     ];
@@ -1010,11 +1022,13 @@ class AgentInvoiceService
         $prefix = $tag !== '' ? "{$tag} " : '';
 
         try {
-            $path = app(AgentInvoicePdfService::class)->render($invoice);
-            $invoice->forceFill(['pdf_path' => $path])->save();
+            // The PDF goes straight to Google Drive; render() records the link
+            // and the layout-versioned name on the invoice itself, so there is
+            // nothing to save here.
+            $url = app(AgentInvoicePdfService::class)->render($invoice);
 
             $summary['pdfs_written']++;
-            $this->writeLog("{$prefix}  [PDF] {$path}");
+            $this->writeLog("{$prefix}  [PDF] {$url}");
         } catch (Throwable $e) {
             // The invoice itself stands. The PDF can be produced again on
             // demand from the rows already recorded.

@@ -40,31 +40,104 @@ class AgentInvoiceController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
-            $query = $this->scopedQuery($user)->with(['customers' => fn ($q) => $q->orderBy('id')]);
-
             // ── Filters, mirroring the billing invoice page ──────────────────
-            if ($search = trim((string) $request->input('search', ''))) {
-                $query->where(function ($q) use ($search) {
-                    $q->where('invoice_number', 'like', "%{$search}%")
-                      ->orWhere('team_name', 'like', "%{$search}%")
-                      ->orWhere('agent_name', 'like', "%{$search}%");
-                });
-            }
+            //
+            // Held in a closure because the by-period mode below needs the same
+            // filters on a second query. Applying them twice from one definition
+            // is what stops a page of periods being chosen by different rules
+            // from the invoices that fill it.
+            $applyFilters = function ($q) use ($request) {
+                if ($search = trim((string) $request->input('search', ''))) {
+                    $q->where(function ($w) use ($search) {
+                        $w->where('invoice_number', 'like', "%{$search}%")
+                          ->orWhere('team_name', 'like', "%{$search}%")
+                          ->orWhere('agent_name', 'like', "%{$search}%");
+                    });
+                }
 
-            if ($status = trim((string) $request->input('status', ''))) {
-                $query->where('status', $status);
-            }
+                if ($status = trim((string) $request->input('status', ''))) {
+                    $q->where('status', $status);
+                }
 
-            if ($type = trim((string) $request->input('type', ''))) {
-                $query->where('invoice_type', $type);
-            }
+                if ($type = trim((string) $request->input('type', ''))) {
+                    $q->where('invoice_type', $type);
+                }
 
-            if ($from = $request->input('date_from')) {
-                $query->whereDate('invoice_date', '>=', Carbon::parse($from)->format('Y-m-d'));
-            }
+                if ($from = $request->input('date_from')) {
+                    $q->whereDate('invoice_date', '>=', Carbon::parse($from)->format('Y-m-d'));
+                }
 
-            if ($to = $request->input('date_to')) {
-                $query->whereDate('invoice_date', '<=', Carbon::parse($to)->format('Y-m-d'));
+                if ($to = $request->input('date_to')) {
+                    $q->whereDate('invoice_date', '<=', Carbon::parse($to)->format('Y-m-d'));
+                }
+
+                return $q;
+            };
+
+            $query = $applyFilters(
+                $this->scopedQuery($user)->with(['customers' => fn ($q) => $q->orderBy('id')])
+            );
+
+            // ── Paginating by billing period ─────────────────────────────────
+            //
+            // The invoice list is read as a list of weeks, each collapsible. A
+            // page of N invoices cuts across those weeks — a week's invoices can
+            // straddle a page boundary and its header then appears twice, once
+            // per page — so this mode pages the WEEKS and sends every invoice
+            // belonging to the weeks on that page. `total` then counts weeks,
+            // not invoices, which is what the page's counter reports.
+            if ($request->boolean('group_by_period')) {
+                $perPage = min(max((int) $request->input('per_page', 5), 1), 50);
+                $page    = max((int) $request->input('page', 1), 1);
+
+                $periods = $applyFilters($this->scopedQuery($user))
+                    ->getQuery()
+                    ->select('period_start', 'period_end')
+                    ->distinct()
+                    ->orderByDesc('period_start')
+                    ->orderByDesc('period_end')
+                    ->get();
+
+                $total    = $periods->count();
+                $lastPage = max((int) ceil($total / $perPage), 1);
+                $slice    = $periods->forPage($page, $perPage)->values();
+
+                $records = collect();
+
+                if ($slice->isNotEmpty()) {
+                    $query->where(function ($q) use ($slice) {
+                        foreach ($slice as $period) {
+                            $q->orWhere(function ($w) use ($period) {
+                                $w->where('period_start', $period->period_start)
+                                  ->where('period_end', $period->period_end);
+                            });
+                        }
+                    });
+
+                    // Ordered by period first so the groups arrive in the order
+                    // the page renders them; the existing invoice ordering then
+                    // decides the rows inside each one.
+                    $records = $query->orderByDesc('period_start')
+                                     ->orderByDesc('invoice_date')
+                                     ->orderByDesc('id')
+                                     ->get();
+                }
+
+                return response()->json([
+                    'success' => true,
+                    'data'    => $records->map(fn ($i) => $this->present($i))->all(),
+                    'meta'    => [
+                        'current_page'  => min($page, $lastPage),
+                        'last_page'     => $lastPage,
+                        'per_page'      => $perPage,
+                        'total'         => $total,
+                        // Named so the client can label its counter honestly:
+                        // this page holds `total` weeks, and `invoice_count`
+                        // invoices within the ones on it.
+                        'unit'          => 'period',
+                        'invoice_count' => $records->count(),
+                    ],
+                ]);
             }
 
             $perPage = min(max((int) $request->input('per_page', 25), 1), 200);
@@ -81,6 +154,7 @@ class AgentInvoiceController extends Controller
                     'last_page'    => $invoices->lastPage(),
                     'per_page'     => $invoices->perPage(),
                     'total'        => $invoices->total(),
+                    'unit'         => 'invoice',
                 ],
             ]);
         } catch (Throwable $e) {
@@ -155,37 +229,28 @@ class AgentInvoiceController extends Controller
             // generation was served unchanged forever.
             $expected = $pdfService->pathFor($invoice);
             $isCurrent = $invoice->pdf_path === $expected;
-            $path = $invoice->pdf_path ? storage_path('app/public/' . $invoice->pdf_path) : null;
 
-            if (!$isCurrent || !$path || !is_file($path)) {
-                // Rebuild from the stored rows rather than failing — the invoice
-                // is the record, the file is only a rendering of it.
-                $invoice->load(['customers' => fn ($q) => $q->orderBy('id')]);
-                $relative = $pdfService->render($invoice, true);
-                $invoice->forceFill(['pdf_path' => $relative])->save();
-                $path = storage_path('app/public/' . $relative);
+            // Drive is where the PDF lives. A link that was produced by the
+            // current layout is the answer; the reader is sent straight to it
+            // and this server never touches the file.
+            if ($isCurrent && $invoice->pdf_drive_url) {
+                return response()->json([
+                    'success' => true,
+                    'url'     => $invoice->pdf_drive_url,
+                    'storage' => 'drive',
+                ]);
             }
 
-            if (!is_file($path)) {
-                return response()->json(['success' => false, 'message' => 'The invoice PDF is unavailable'], 404);
-            }
+            // No stored link, or one produced by an older layout: render it and
+            // upload. An invoice issued before Drive existed is migrated the
+            // first time somebody opens it. Nothing is written to this server.
+            $invoice->load(['customers' => fn ($q) => $q->orderBy('id')]);
+            $url = $pdfService->render($invoice, true);
 
-            // These constants are ResponseHeaderBag's, not BinaryFileResponse's.
-            // Naming the wrong class was silent until the line actually ran:
-            // PHP 8 raises an undefined-constant Error, which surfaced as a 500
-            // on every View and Download while the invoice itself was fine.
-            $disposition = $request->boolean('download')
-                ? ResponseHeaderBag::DISPOSITION_ATTACHMENT
-                : ResponseHeaderBag::DISPOSITION_INLINE;
-
-            // Built by makeDisposition rather than by joining strings, so a
-            // filename needing escaping cannot produce a malformed header.
-            return response()->file($path, [
-                'Content-Type'        => 'application/pdf',
-                'Content-Disposition' => (new ResponseHeaderBag())->makeDisposition(
-                    $disposition,
-                    $invoice->invoice_number . '.pdf'
-                ),
+            return response()->json([
+                'success' => true,
+                'url'     => $url,
+                'storage' => 'drive',
             ]);
         } catch (Throwable $e) {
             // Enough to identify the fault from the log alone. The message on
@@ -505,7 +570,12 @@ class AgentInvoiceController extends Controller
             'commission'      => (float) $invoice->commission,
             'subtotal'        => (float) $invoice->subtotal,
             'status'          => $invoice->status,
-            'has_pdf'         => (bool) $invoice->pdf_path,
+            // A rendering exists somewhere — on Drive, or locally when an upload
+            // could not be made. Not a precondition for opening one: the PDF is
+            // rendered on demand when there is none, so this is a hint about
+            // whether that will happen, never a gate on the button.
+            'has_pdf'         => (bool) ($invoice->pdf_drive_url ?: $invoice->pdf_path),
+            'pdf_drive_url'   => $invoice->pdf_drive_url,
             'created_at'      => optional($invoice->created_at)->toIso8601String(),
         ];
 

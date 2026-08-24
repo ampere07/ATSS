@@ -163,9 +163,14 @@ const AgentPayoutForm: React.FC<{
         // the rate one referral pays, a setting rather than a balance.
         const commission = Number(agentObj?.agent_balance?.commission_value || 0);
         const incentives = Number(agentObj?.agent_balance?.incentives || 0);
-        const bonus = Number(agentObj?.agent_balance?.Bonus || agentObj?.agent_balance?.bonus || 0);
+        const bonus = Number(agentObj?.agent_balance?.bonus || agentObj?.agent_balance?.Bonus || 0);
+        const achievement = Number(agentObj?.agent_balance?.achievement || 0);
+        // Achievement is shown but deliberately NOT part of the total: the
+        // payout buckets the server drains on "All Balance" are commission,
+        // balance, incentives and bonus. Adding achievement here would offer to
+        // pay out money no bucket holds.
         const total = commission + balance + incentives + bonus;
-        return { balance, commission, incentives, bonus, total };
+        return { balance, commission, incentives, bonus, achievement, total };
     };
 
     // Auto-fill when agentId changes or isOpen triggers
@@ -329,6 +334,10 @@ const AgentPayoutForm: React.FC<{
         }
     };
 
+    // "All Balance" cashes out every bucket, so the amount is the agent's whole
+    // balance and is not the operator's to change.
+    const isAllBalance = formData.payout_type === 'all';
+
     const inputClass = `w-full px-3 py-2.5 rounded-lg border text-sm transition-all duration-200 outline-none focus:ring-2 focus:ring-opacity-50 ${isDarkMode
         ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500 focus:ring-gray-600 focus:border-gray-600'
         : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:ring-gray-400 focus:border-gray-400'
@@ -400,24 +409,28 @@ const AgentPayoutForm: React.FC<{
 
                 {/* Agent Balances Info */}
                 {formData.agent_id && (
-                    <div className={`col-span-full mb-2 grid grid-cols-3 gap-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                    <div className={`col-span-full mb-2 grid grid-cols-4 gap-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                         {(() => {
                             const selectedAgentObj = agents.find(a => Number(a.id) === Number(formData.agent_id));
-                            const { balance, incentives, bonus } = getAgentBalances(selectedAgentObj);
+                            // Each tile reads its own column: commission_value,
+                            // incentives, bonus, achievement. The Commission tile
+                            // previously rendered `balance`, which is a different
+                            // bucket entirely and is why it read 0.
+                            const { commission, incentives, bonus, achievement } = getAgentBalances(selectedAgentObj);
+                            const tile = (label: string, value: number) => (
+                                <div className={`p-2 rounded border text-center ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
+                                    <div className="text-[10px] uppercase font-bold text-gray-500">{label}</div>
+                                    <div className={`font-semibold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
+                                        ₱{value.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                    </div>
+                                </div>
+                            );
                             return (
                                 <>
-                                    <div className={`p-2 rounded border text-center ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                                        <div className="text-[10px] uppercase font-bold text-gray-500">Commission</div>
-                                        <div className={`font-semibold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>₱{balance.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                                    </div>
-                                    <div className={`p-2 rounded border text-center ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                                        <div className="text-[10px] uppercase font-bold text-gray-500">Incentives</div>
-                                        <div className={`font-semibold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>₱{incentives.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                                    </div>
-                                    <div className={`p-2 rounded border text-center ${isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'}`}>
-                                        <div className="text-[10px] uppercase font-bold text-gray-500">Bonus</div>
-                                        <div className={`font-semibold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>₱{bonus.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
-                                    </div>
+                                    {tile('Commission', commission)}
+                                    {tile('Incentives', incentives)}
+                                    {tile('Bonus', bonus)}
+                                    {tile('Achievement', achievement)}
                                 </>
                             );
                         })()}
@@ -455,7 +468,12 @@ const AgentPayoutForm: React.FC<{
                     />
                 </div>
 
-                {/* Total Amount */}
+                {/* Total Amount
+                    Locked on "All Balance": that option means every bucket is
+                    being cashed out, so the figure is the agent's whole balance
+                    and is filled in automatically. A typed-down amount would say
+                    "all" while paying part, leaving a remainder no bucket
+                    accounts for. Pick a specific payout type to enter a figure. */}
                 <div>
                     <label className={labelClass}>Total Amount <span className="text-red-500">*</span></label>
                     <input
@@ -465,9 +483,18 @@ const AgentPayoutForm: React.FC<{
                         min="0"
                         value={formData.total_amount}
                         onChange={handleInputChange}
-                        className={inputClass}
+                        readOnly={isAllBalance}
+                        className={`${inputClass}${isAllBalance ? ' cursor-not-allowed opacity-75' : ''}`}
                         placeholder="0.00"
+                        title={isAllBalance
+                            ? 'The full balance is paid out on "All Balance". Choose another payout type to enter an amount.'
+                            : undefined}
                     />
+                    {isAllBalance && (
+                        <p className={`text-[11px] mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                            Paying the agent's full balance — amount is set automatically.
+                        </p>
+                    )}
                 </div>
 
                 {/* Proof — Image Upload */}

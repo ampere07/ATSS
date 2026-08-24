@@ -57,6 +57,11 @@ const formatDate = (value?: string | null): string => {
  */
 const STATUS_OPTIONS = ['Generated', 'Paid', 'Unpaid'];
 
+// The "Show N entries" choices. A page is counted in BILLING WEEKS, not
+// invoices: the table renders one collapsible group per week, and paging by
+// invoice split a week across two pages so its header showed up on both.
+const PAGE_SIZES = [5];
+
 /** Status colours, matching the way the billing invoice list colours its own. */
 const statusTone = (status: string, isDarkMode: boolean): string => {
     const tone: Record<string, string> = {
@@ -154,11 +159,12 @@ const AgentInvoice: React.FC = () => {
     const [typeFilter, setTypeFilter] = useState('');
 
     const [currentPage, setCurrentPage] = useState(1);
-    const [itemsPerPage, setItemsPerPage] = useState(25);
+    // Billing weeks per page, not invoices — see PAGE_SIZES.
+    const [itemsPerPage, setItemsPerPage] = useState(5);
     const [totalCount, setTotalCount] = useState(0);
     const [lastPage, setLastPage] = useState(1);
 
-    const [collapsedPeriods, setCollapsedPeriods] = useState<string[]>([]);
+    const [expandedPeriods, setExpandedPeriods] = useState<string[]>([]);
     const [isDownloadOpen, setIsDownloadOpen] = useState(false);
     const [selected, setSelected] = useState<AgentInvoiceRecord | null>(null);
     const [isLoadingDetail, setIsLoadingDetail] = useState(false);
@@ -231,10 +237,10 @@ const AgentInvoice: React.FC = () => {
         return groups;
     }, [records]);
 
-    // Collapsed rather than expanded is tracked, so a week that arrives on a
-    // later page is open by default instead of hidden.
+    // Expanded rather than collapsed is tracked, so every week starts closed —
+    // the page is a list of weeks first, and one opens only when asked for.
     const togglePeriod = (key: string) => {
-        setCollapsedPeriods(current =>
+        setExpandedPeriods(current =>
             current.includes(key) ? current.filter(k => k !== key) : [...current, key]
         );
     };
@@ -277,6 +283,8 @@ const AgentInvoice: React.FC = () => {
                 type: typeFilter,
                 page,
                 per_page: itemsPerPage,
+                // A page is N weeks, and carries every invoice in them.
+                group_by_period: true,
             });
 
             if (response?.success) {
@@ -370,8 +378,18 @@ const AgentInvoice: React.FC = () => {
     const handlePdf = async (record: AgentInvoiceRecord, download: boolean) => {
         setPdfPending(record.id);
         try {
-            const blob = await agentInvoiceService.pdfBlob(record.id, download);
-            const url = window.URL.createObjectURL(blob);
+            const source = await agentInvoiceService.pdfBlob(record.id, download);
+
+            // Hosted on Drive: open the link. There is no blob to build and
+            // nothing to revoke, and a download is left to Drive's own viewer —
+            // the file is not on this origin, so `download` could not name it
+            // anyway.
+            if (source.kind === 'url') {
+                window.open(source.url, '_blank', 'noopener');
+                return;
+            }
+
+            const url = window.URL.createObjectURL(source.blob);
 
             if (download) {
                 const link = document.createElement('a');
@@ -613,7 +631,7 @@ const AgentInvoice: React.FC = () => {
                         </thead>
                         <tbody>
                             {periodGroups.map(group => {
-                                const isOpen = !collapsedPeriods.includes(group.key);
+                                const isOpen = expandedPeriods.includes(group.key);
 
                                 return (
                                     <React.Fragment key={group.key}>
@@ -687,14 +705,19 @@ const AgentInvoice: React.FC = () => {
                                 onChange={(e) => setItemsPerPage(Number(e.target.value))}
                                 className={`px-2 py-1 rounded border text-sm focus:outline-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
                             >
-                                {[10, 25, 50, 100].map(n => <option key={n} value={n}>{n}</option>)}
+                                {PAGE_SIZES.map(n => <option key={n} value={n}>{n}</option>)}
                             </select>
-                            <span>entries</span>
+                            <span>weeks</span>
                         </div>
                         <span>
                             Showing <span className="font-medium">{(currentPage - 1) * itemsPerPage + 1}</span> to{' '}
                             <span className="font-medium">{Math.min(currentPage * itemsPerPage, totalCount)}</span> of{' '}
-                            <span className="font-medium">{totalCount}</span> results
+                            <span className="font-medium">{totalCount}</span>{' '}
+                            {totalCount === 1 ? 'week' : 'weeks'}
+                            {records.length > 0 && (
+                                <> · <span className="font-medium">{records.length}</span>{' '}
+                                {records.length === 1 ? 'invoice' : 'invoices'}</>
+                            )}
                         </span>
                     </div>
 

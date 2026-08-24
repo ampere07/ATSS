@@ -13,6 +13,7 @@ import JobOrderEditFormModal from '../modals/JobOrderEditFormModal';
 import JOAttachmentModal from '../modals/JOAttachmentModal';
 import ApprovalConfirmationModal from '../modals/ApprovalConfirmationModal';
 import ConfirmationModal from '../modals/MoveToJoModal';
+import PreInstalledModal from '../modals/PreInstalledModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { getApplication } from '../services/applicationService';
 import RelatedDataTable from './RelatedDataTable';
@@ -55,6 +56,10 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
   const [isAttachmentModalOpen, setIsAttachmentModalOpen] = useState(false);
   const [isApprovalModalOpen, setIsApprovalModalOpen] = useState(false);
   const [isFailedModalOpen, setIsFailedModalOpen] = useState(false);
+  const [isPreInstalledModalOpen, setIsPreInstalledModalOpen] = useState(false);
+  // Tracked separately from `loading` so the modal's own button shows the
+  // spinner and cannot be pressed twice, without disabling the whole panel.
+  const [preInstalledSaving, setPreInstalledSaving] = useState(false);
   const [billingStatuses, setBillingStatuses] = useState<BillingStatus[]>([]);
   const [userRole, setUserRole] = useState<string>('');
   const [roleId, setRoleId] = useState<number | null>(null);
@@ -917,6 +922,69 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
       setShowErrorModal(true);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePreInstalledClick = () => {
+    setIsPreInstalledModalOpen(true);
+  };
+
+  /**
+   * Record the pre-installation visit.
+   *
+   * Written through the same updateJobOrder() every other action on this panel
+   * uses, so the change picks up the update log and the technician lock without
+   * needing an endpoint of its own.
+   *
+   * The timestamp is built from the browser clock in the server's own
+   * 'Y-m-d H:i:s' shape rather than sent as an ISO string, which the API would
+   * read as UTC and store several hours out.
+   */
+  const handlePreInstalledSave = async (remarks: string) => {
+    if (preInstalledSaving || !jobOrder.id) return;
+
+    const trimmed = (remarks || '').trim();
+    if (!trimmed) {
+      setErrorMessage('Pre installed remarks are required.');
+      setShowErrorModal(true);
+      return;
+    }
+
+    try {
+      setPreInstalledSaving(true);
+
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} `
+        + `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+      const response = await updateJobOrder(jobOrder.id, {
+        pre_installed: 'preinstalled',
+        pre_remarks: trimmed,
+        pre_installed_datetime: stamp
+      });
+
+      if (response.success) {
+        setIsPreInstalledModalOpen(false);
+        setSuccessMessage('Job Order marked as Pre Installed!');
+        setShowSuccessModal(true);
+        if (onRefresh) {
+          onRefresh();
+        }
+      } else {
+        setErrorMessage(response.message || 'Failed to save pre installed details');
+        setShowErrorModal(true);
+      }
+    } catch (err: any) {
+      // The API's own message first: a refusal to record the visit explains why
+      // (no email on the account, for one), and "Request failed with status
+      // code 422" would hide it.
+      setErrorMessage(
+        err.response?.data?.message || err.message || 'An error occurred while saving pre installed details'
+      );
+      setShowErrorModal(true);
+    } finally {
+      setPreInstalledSaving(false);
     }
   };
 
@@ -2096,6 +2164,17 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
                 <span>Failed</span>
               </button>
             )}
+            <button
+              className="bg-amber-600 hover:bg-amber-700 text-white px-2 py-1 rounded-sm flex items-center transition-colors text-sm font-medium whitespace-nowrap"
+              onClick={handlePreInstalledClick}
+              disabled={loading || preInstalledSaving}
+              title={jobOrder.pre_installed
+                ? `Already recorded${jobOrder.pre_installed_datetime ? ' on ' + formatDate(jobOrder.pre_installed_datetime) : ''}`
+                  + `${jobOrder.preinstalled_updated_by ? ' by ' + jobOrder.preinstalled_updated_by : ''} — click to update`
+                : 'Record a pre-installation visit'}
+            >
+              <span>{jobOrder.pre_installed ? 'Pre Installed ✓' : 'Pre Installed'}</span>
+            </button>
             {shouldShowEditButton() && (
               <button
                 className="text-white px-2 py-1 rounded-sm flex items-center transition-colors text-sm font-medium whitespace-nowrap"
@@ -2407,6 +2486,14 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
         cancelText="Cancel"
         onConfirm={handleFailedConfirm}
         onCancel={() => setIsFailedModalOpen(false)}
+      />
+
+      <PreInstalledModal
+        isOpen={isPreInstalledModalOpen}
+        saving={preInstalledSaving}
+        initialRemarks={jobOrder.pre_remarks}
+        onSave={handlePreInstalledSave}
+        onCancel={() => setIsPreInstalledModalOpen(false)}
       />
 
       <ConfirmationModal
