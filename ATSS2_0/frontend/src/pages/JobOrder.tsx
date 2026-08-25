@@ -14,7 +14,7 @@ import apiClient from '../config/api';
 import { exportToCSV } from '../utils/exportUtils';
 import { userService } from '../services/userService';
 import { User } from '../types/api';
-import { agentOwnsReferral, isAgentUser, isOnOrAfterAgentStartDate } from '../utils/agentReferral';
+import { agentOwnsReferral, getOnsiteStatus, isAgentUser, isDoneOnsiteStatus } from '../utils/agentReferral';
 import {
   buildTechnicianLockedJobOrderIds,
   isTechnicianUser,
@@ -153,6 +153,79 @@ const storedAuth = (): { role: string; roleId: string | number | null; fullName:
     return empty;
   }
 };
+
+/**
+ * A status word in the colour its state calls for.
+ *
+ * At module scope on purpose. Declared inside the page, every render built a
+ * new component type, so React could not match it against the previous one and
+ * tore down and rebuilt every status in the table instead of leaving it alone.
+ */
+const StatusText = React.memo(({ status, type }: { status?: string | null, type: 'onsite' | 'billing' }) => {
+  if (!status) return <span className="text-gray-400">-</span>;
+
+  let textColor = '';
+
+  if (type === 'onsite') {
+    switch (status.toLowerCase()) {
+      case 'done':
+      case 'completed':
+        textColor = 'text-green-400';
+        break;
+      case 'reschedule':
+        textColor = 'text-blue-400';
+        break;
+      case 'inprogress':
+      case 'in progress':
+        textColor = 'text-blue-400';
+        break;
+      case 'pending':
+        textColor = 'text-orange-400';
+        break;
+      case 'failed':
+      case 'cancelled':
+        textColor = 'text-red-500';
+        break;
+      default:
+        textColor = 'text-gray-400';
+    }
+  } else {
+    switch (status.toLowerCase()) {
+      case 'done':
+      case 'active':
+      case 'completed':
+      case 'vip':
+      case 'service account':
+        textColor = 'text-green-400';
+        break;
+      case 'pending':
+      case 'in progress':
+        textColor = 'text-orange-400';
+        break;
+      case 'suspended':
+      case 'overdue':
+      case 'cancelled':
+      case 'blacklisted':
+      case 'pullout':
+        textColor = 'text-red-500';
+        break;
+      case 'freeze':
+        textColor = 'text-blue-400';
+        break;
+      case 'inactive':
+        textColor = 'text-gray-400';
+        break;
+      default:
+        textColor = 'text-gray-400';
+    }
+  }
+
+  return (
+    <span className={`${textColor} font-bold uppercase`}>
+      {status === 'inprogress' ? 'In Progress' : status}
+    </span>
+  );
+});
 
 const JobOrderPage: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
@@ -707,9 +780,10 @@ const JobOrderPage: React.FC = () => {
 
     // Then filter by agent if applicable.
     //
-    // Agents see every referral they own, whatever stage it has reached — in
-    // progress, rescheduled, completed or failed — so the page is the full
-    // picture of their own work.
+    // An agent sees the referrals they own that are still in flight, however
+    // long ago they were raised — there is no date cut-off. Completed ones are
+    // left out: they belong to the agent's history, and this page is what is
+    // still to come.
     //
     // Matching mirrors the mobile app: tolerant of middle names, or an exact
     // email match. The identity check is deliberately INSIDE the agent branch
@@ -722,8 +796,8 @@ const JobOrderPage: React.FC = () => {
         const referredBy = jo.Referred_By || jo.referred_by || '';
         if (!agentOwnsReferral(referredBy, agentName, agentEmail)) return false;
 
-        // Agents see recent work only, from the configured start date onwards.
-        return isOnOrAfterAgentStartDate(jo);
+        // Done and completed are history rather than work still to come.
+        return !isDoneOnsiteStatus(getOnsiteStatus(jo));
       });
     }
     return filtered;
@@ -1156,72 +1230,6 @@ const JobOrderPage: React.FC = () => {
     if (newPage >= 1 && newPage <= totalPages) {
       setCurrentPage(newPage);
     }
-  };
-
-  const StatusText = ({ status, type }: { status?: string | null, type: 'onsite' | 'billing' }) => {
-    if (!status) return <span className="text-gray-400">-</span>;
-
-    let textColor = '';
-
-    if (type === 'onsite') {
-      switch (status.toLowerCase()) {
-        case 'done':
-        case 'completed':
-          textColor = 'text-green-400';
-          break;
-        case 'reschedule':
-          textColor = 'text-blue-400';
-          break;
-        case 'inprogress':
-        case 'in progress':
-          textColor = 'text-blue-400';
-          break;
-        case 'pending':
-          textColor = 'text-orange-400';
-          break;
-        case 'failed':
-        case 'cancelled':
-          textColor = 'text-red-500';
-          break;
-        default:
-          textColor = 'text-gray-400';
-      }
-    } else {
-      switch (status.toLowerCase()) {
-        case 'done':
-        case 'active':
-        case 'completed':
-        case 'vip':
-        case 'service account':
-          textColor = 'text-green-400';
-          break;
-        case 'pending':
-        case 'in progress':
-          textColor = 'text-orange-400';
-          break;
-        case 'suspended':
-        case 'overdue':
-        case 'cancelled':
-        case 'blacklisted':
-        case 'pullout':
-          textColor = 'text-red-500';
-          break;
-        case 'freeze':
-          textColor = 'text-blue-400';
-          break;
-        case 'inactive':
-          textColor = 'text-gray-400';
-          break;
-        default:
-          textColor = 'text-gray-400';
-      }
-    }
-
-    return (
-      <span className={`${textColor} font-bold uppercase`}>
-        {status === 'inprogress' ? 'In Progress' : status}
-      </span>
-    );
   };
 
   const handleLocationSelect = (locationId: string) => {

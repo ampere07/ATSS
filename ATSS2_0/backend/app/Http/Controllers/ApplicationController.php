@@ -14,6 +14,39 @@ use App\Events\ApplicationViewingUpdate;
 
 class ApplicationController extends Controller
 {
+    /**
+     * How many applications the signed-in user has submitted.
+     *
+     * Counted on created_by_user_id, which store() stamps with the submitting
+     * account on every application. That answers "how many did I send" exactly,
+     * where the referred_by free text this used to match on answers a different
+     * question — who the customer was referred by, which someone else may have
+     * typed and which the agent's referral counts already report.
+     *
+     * Its own endpoint because index() is scoped to an organisation rather than
+     * to a caller, so an agent is refused it and could not count their own rows
+     * from the list.
+     *
+     * No organisation filter: the column already names the caller, and adding
+     * one would drop the applications of anyone since moved between them.
+     */
+    public function myCount(Request $request)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            $count = Application::where('created_by_user_id', $user->id)->count();
+
+            return response()->json(['success' => true, 'count' => $count]);
+        } catch (\Exception $e) {
+            Log::error('ApplicationController::myCount failed: ' . $e->getMessage());
+            return response()->json(['success' => false, 'message' => 'Failed to count applications'], 500);
+        }
+    }
+
     public function index(Request $request)
     {
         try {

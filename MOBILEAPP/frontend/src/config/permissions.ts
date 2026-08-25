@@ -106,7 +106,7 @@ export const PAGES = [
   'reports',
   'support',
 
-  'commission',
+  'bonus-history',
   'agent-invoices',
   'agent-payout',
   'agent-management',
@@ -193,7 +193,7 @@ export const ACTIONS: Record<string, string[]> = {
   // scheduled job other people rely on receiving.
   reports: ['reports.manage', 'reports.delete'],
   // Raising a payout, incentive or bonus, and signing one off.
-  commission: ['commission.payout'],
+  'bonus-history': ['bonus-history.payout'],
   'agent-payout': ['agent-payout.approve'],
   // Issuing the weekly referral invoices, and marking one settled. An agent
   // reads their own; neither of these is theirs.
@@ -248,7 +248,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'sms-blast': 'SMS Blast',
   'reports': 'Reports',
   'support': 'Support',
-  'commission': 'Pay Out/In',
+  'bonus-history': 'Pay Out/In',
   'agent-invoices': 'Agent Invoices',
   'agent-payout': 'Agent Payout',
   'agent-management': 'Agent Management',
@@ -317,7 +317,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'work-order.manage': 'Manage',
   'reports.manage': 'Manage',
   'reports.delete': 'Delete',
-  'commission.payout': 'Payout',
+  'bonus-history.payout': 'Payout',
   'agent-payout.approve': 'Approve',
   'agent-invoices.generate': 'Generate',
   'agent-invoices.status': 'Set Status',
@@ -354,7 +354,7 @@ export const PERMISSION_GROUPS: Array<{ label: string; pages: string[] }> = [
   },
   {
     label: 'Agent',
-    pages: ['commission', 'agent-invoices', 'agent-payout', 'agent-management', 'team-agent'],
+    pages: ['bonus-history', 'agent-invoices', 'agent-payout', 'agent-management', 'team-agent'],
   },
   { label: 'Inventory', pages: ['inventory', 'inventory-category-list'] },
   {
@@ -432,7 +432,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'sms-blast',
     'reports', 'reports.manage',
     'support',
-    'commission', 'commission.payout',
+    'bonus-history', 'bonus-history.payout',
     'team-agent',
     'agent-management',
     'agent-payout', 'agent-payout.approve',
@@ -478,7 +478,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'agent-application',
     'job-order',
     'work-order',
-    'commission',
+    'bonus-history',
     'agent-invoices',
   ],
 
@@ -549,10 +549,15 @@ export const SECTION_PERMISSION_OVERRIDES: Record<string, string | string[]> = {
   billing: 'customer',
   'activity-logs': 'data-logs',
 
+  // The page is "Pay Out/In" here and "Bonus History" on the web; the key the
+  // server knows it by is the web's. Listed before the two sections below so
+  // sectionForPermission() resolves the key back to the page, not to one of them.
+  commission: 'bonus-history',
+
   // ── Sections that exist only on mobile ───────────────────────────────────
   // An agent's own history and achievements, scoped server side to them.
-  'agent-history': 'commission',
-  achievement: 'commission',
+  'agent-history': 'bonus-history',
+  achievement: 'bonus-history',
   // Release notes and the in-app menu are open to anyone signed in.
   'release-notes': [],
   menu: [],

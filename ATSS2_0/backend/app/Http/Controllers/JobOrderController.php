@@ -34,6 +34,16 @@ use App\Events\JobOrderViewingUpdate;
 
 class JobOrderController extends Controller
 {
+    /** Is this account an agent, whose job orders are their own referrals? */
+    private function isAgentUser($user): bool
+    {
+        if ((int) ($user->role_id ?? 0) === \App\Models\Role::AGENT) {
+            return true;
+        }
+
+        return strtolower(trim((string) ($user->role->role_name ?? ''))) === 'agent';
+    }
+
     public function index(Request $request): JsonResponse
     {
         try {
@@ -65,6 +75,54 @@ class JobOrderController extends Controller
                 $assignedEmail = $request->query('assigned_email');
                 \Log::info('Filtering job orders by assigned_email: ' . $assignedEmail);
                 $query->where('assigned_email', $assignedEmail);
+            }
+
+            // An agent asks for their own referrals, so the page is narrowed to
+            // them here rather than after the fact.
+            //
+            // The list is ordered newest first and taken a page at a time, so a
+            // client that filters by ownership afterwards only ever sees the
+            // newest N rows of the whole organisation. An agent's completed
+            // referrals are their oldest, so those were the ones falling outside
+            // that window — the reason done work appeared to be missing while
+            // work in progress showed up fine.
+            //
+            // referred_by is free text, so this narrows rather than decides: it
+            // returns a superset, and the exact tolerant match in
+            // AgentProgramme::referralBelongsToAgent — which the clients carry as
+            // agentReferral.ts — still settles which rows are the agent's.
+            if ($currentUser && $this->isAgentUser($currentUser)) {
+                $first = trim((string) ($currentUser->first_name ?? ''));
+                $last  = trim((string) ($currentUser->last_name ?? ''));
+                $email = trim((string) ($currentUser->email_address ?? $currentUser->email ?? ''));
+
+                $referralMatch = function ($q) use ($first, $last, $email) {
+                    $q->where(function ($inner) use ($first, $last, $email) {
+                        if ($email !== '') {
+                            $inner->orWhere('referred_by', $email);
+                        }
+                        if ($first !== '' || $last !== '') {
+                            $inner->orWhere(function ($name) use ($first, $last) {
+                                if ($first !== '') {
+                                    $name->where('referred_by', 'like', '%' . $first . '%');
+                                }
+                                if ($last !== '') {
+                                    $name->where('referred_by', 'like', '%' . $last . '%');
+                                }
+                            });
+                        }
+                    });
+                };
+
+                if ($first !== '' || $last !== '' || $email !== '') {
+                    // Both sources: a job order carries its referral on the
+                    // application, or on the billing account's customer where
+                    // there is no application behind it.
+                    $query->where(function ($outer) use ($referralMatch) {
+                        $outer->whereHas('application', $referralMatch)
+                              ->orWhereHas('billingAccount.customer', $referralMatch);
+                    });
+                }
             }
             
             if ($request->has('user_role') && strtolower($request->query('user_role')) === 'technician') {
@@ -845,6 +903,12 @@ class JobOrderController extends Controller
                 $jobOrder->refresh();
             }
             
+            // Whether this update is what turned the job order Done. The agent
+            // is told after the commit rather than here: RADIUS below can still
+            // fail the whole update, and a referral that did not finish saving
+            // must not announce itself as installed.
+            $becameDone = false;
+
             if (($data['onsite_status'] ?? null) === 'Done' && $oldStatus !== 'Done') {
                 $this->broadcastJobOrderDone($jobOrder);
 
@@ -863,6 +927,8 @@ class JobOrderController extends Controller
                     ]);
                     throw new \Exception($detailedError);
                 }
+
+                $becameDone = true;
             }
             
             \Log::info('JobOrder After Update', [
@@ -940,6 +1006,10 @@ class JobOrderController extends Controller
             $jobOrder->load('application');
 
             DB::commit();
+
+            if ($becameDone) {
+                $this->notifyReferringAgentOfCompletion($jobOrder);
+            }
 
             return response()->json([
                 'success' => true,
@@ -1038,6 +1108,61 @@ class JobOrderController extends Controller
         }
 
         return 'the server could not be reached.';
+    }
+
+    /**
+     * Tell the agent who referred this customer that the visit is done.
+     *
+     * Reaches them as a push notification, so it arrives whether or not the app
+     * is open — an agent finds out their referral is installed without having to
+     * go looking for it.
+     *
+     * Who the referral belongs to is resolved by
+     * JobOrderAgentPaymentService::referringAgent, which applies the shared rule
+     * the incentives, achievements and invoices all use. An agent is therefore
+     * only ever told about a customer the rest of the system also counts as
+     * theirs, and a referral naming a team rather than a person matches nobody
+     * and quietly notifies no one.
+     *
+     * Called after the update commits and never inside it. Failing to send must
+     * not fail the visit: the work is saved and the technician is finished
+     * either way, so everything here is swallowed and logged.
+     */
+    private function notifyReferringAgentOfCompletion(JobOrder $jobOrder): void
+    {
+        try {
+            $agent = app(\App\Services\JobOrderAgentPaymentService::class)->referringAgent($jobOrder);
+
+            if (!$agent) {
+                return;
+            }
+
+            $email = trim((string) ($agent->email_address ?? $agent->email ?? ''));
+            if ($email === '') {
+                return;
+            }
+
+            $application = $jobOrder->application;
+            $customer = trim(($application->first_name ?? '') . ' ' . ($application->last_name ?? ''));
+
+            app(\App\Services\PushNotificationService::class)->sendToUserByEmail(
+                $email,
+                'Referral Installed',
+                $customer !== ''
+                    ? "{$customer} is now installed. Job Order #{$jobOrder->id} is marked Done."
+                    : "Your referral is now installed. Job Order #{$jobOrder->id} is marked Done.",
+                [
+                    'type' => 'job_order_done',
+                    'job_order_id' => $jobOrder->id,
+                ],
+                'JO'
+            );
+        } catch (\Throwable $e) {
+            \Log::warning('[JobOrder] Could not notify the referring agent that a job order was completed', [
+                'job_order_id' => $jobOrder->id ?? null,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     private function broadcastJobOrderDone($jobOrder)

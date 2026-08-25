@@ -1578,6 +1578,8 @@ Route::prefix('applications')->middleware('auth:sanctum')->group(function () {
     Route::get('/', [ApplicationController::class , 'index']);
     Route::post('/', [ApplicationController::class , 'store']);
     Route::post('/broadcast-viewing', [ApplicationController::class, 'broadcastViewing']);
+    // Above /{id}: the parameter is unconstrained and would match "my-count".
+    Route::get('/my-count', [ApplicationController::class , 'myCount']);
     Route::get('/{id}', [ApplicationController::class , 'show']);
     Route::put('/{id}', [ApplicationController::class , 'update']);
     Route::post('/{id}/upload-images', [ApplicationController::class, 'uploadImages']);

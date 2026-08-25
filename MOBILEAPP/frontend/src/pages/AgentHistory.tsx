@@ -10,6 +10,95 @@ import { JobOrder } from '../types/jobOrder';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { agentOwnsReferral, getOnsiteStatus, isDoneOnsiteStatus } from '../utils/agentReferral';
 
+/**
+ * A status word in the colour its state calls for.
+ *
+ * At module scope on purpose. Declared inside the component, every render built
+ * a new component type, so React could not match it against the previous one
+ * and tore down and rebuilt every status in the list instead of leaving it
+ * alone — React.memo around it was worth nothing, because the memo was new too.
+ */
+const StatusText = React.memo(({ status }: { status?: string | null; type: 'onsite' | 'billing' }) => {
+  if (!status) return <Text style={{ color: '#9ca3af' }}>-</Text>;
+
+  let textColor = '';
+  switch (status.toLowerCase().trim()) {
+    case 'done':
+    case 'active':
+    case 'completed':
+    case 'paid':
+    case 'collected':
+      textColor = '#4ade80';
+      break;
+    case 'pending':
+    case 'in progress':
+    case 'reschedule':
+    case 'rescheduled':
+      textColor = '#fb923c';
+      break;
+    case 'suspended':
+    case 'overdue':
+    case 'unpaid':
+    case 'not collected':
+    case 'cancelled':
+      textColor = '#ef4444';
+      break;
+    default:
+      textColor = '#9ca3af';
+  }
+
+  return (
+    <Text style={{ fontWeight: 'bold', textTransform: 'capitalize', color: textColor }}>
+      {status}
+    </Text>
+  );
+});
+
+// Pure of everything on the screen — they read their arguments and nothing
+// else — so they are built once rather than rebuilt on every render.
+const checkIsStarted = (time?: string | null) => {
+  if (!time) return false;
+  const lowerTime = String(time).toLowerCase().trim();
+  return !['0000-00-00 00:00:00', 'not set', '-', 'none', '', 'null', 'undefined'].includes(lowerTime);
+};
+
+const isWorkStarted = (item: JobOrder) => {
+  const hasStart = checkIsStarted(item.start_time) || checkIsStarted(item.StartTimeStamp) || checkIsStarted(item.start_timestamp);
+  const hasEnd = checkIsStarted(item.end_time) || checkIsStarted(item.EndTimeStamp) || checkIsStarted(item.end_timestamp);
+  return hasStart && !hasEnd;
+};
+
+const getClientFullName = (jobOrder: JobOrder): string => {
+  return [
+    jobOrder.First_Name || jobOrder.first_name || '',
+    jobOrder.Middle_Initial || jobOrder.middle_initial ? (jobOrder.Middle_Initial || jobOrder.middle_initial) + '.' : '',
+    jobOrder.Last_Name || jobOrder.last_name || ''
+  ].filter(Boolean).join(' ').trim() || '-';
+};
+
+const getClientFullAddress = (jobOrder: JobOrder): string => {
+  const addressParts = [
+    jobOrder.Installation_Address || jobOrder.installation_address || jobOrder.Address || jobOrder.address,
+    jobOrder.Barangay || jobOrder.barangay,
+    jobOrder.City || jobOrder.city,
+    jobOrder.Region || jobOrder.region
+  ].filter(Boolean);
+  return addressParts.length > 0 ? addressParts.join(', ') : '-';
+};
+
+const formatDateVal = (dateStr?: string | null): string => {
+  if (!dateStr) return '-';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '-';
+    const datePart = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
+    const timePart = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    return `${datePart} ${timePart}`;
+  } catch (e) {
+    return '-';
+  }
+};
+
 const AgentHistory: React.FC = () => {
   const { width } = useWindowDimensions();
   const isMobile = width < 768;
@@ -263,84 +352,7 @@ const AgentHistory: React.FC = () => {
     }
   }, []);
 
-  const StatusText = React.memo(({ status, type }: { status?: string | null, type: 'onsite' | 'billing' }) => {
-    if (!status) return <Text style={{ color: '#9ca3af' }}>-</Text>;
-    let textColor = '';
-    switch (status.toLowerCase().trim()) {
-      case 'done':
-      case 'active':
-      case 'completed':
-      case 'paid':
-      case 'collected':
-        textColor = '#4ade80';
-        break;
-      case 'pending':
-      case 'in progress':
-      case 'reschedule':
-      case 'rescheduled':
-        textColor = '#fb923c';
-        break;
-      case 'suspended':
-      case 'overdue':
-      case 'unpaid':
-      case 'not collected':
-      case 'cancelled':
-        textColor = '#ef4444';
-        break;
-      default:
-        textColor = '#9ca3af';
-    }
-    return (
-      <Text style={{ fontWeight: 'bold', textTransform: 'capitalize', color: textColor }}>
-        {status}
-      </Text>
-    );
-  });
-
-  const checkIsStarted = (time?: string | null) => {
-    if (!time) return false;
-    const lowerTime = String(time).toLowerCase().trim();
-    return !['0000-00-00 00:00:00', 'not set', '-', 'none', '', 'null', 'undefined'].includes(lowerTime);
-  };
-
-  const isWorkStarted = (item: JobOrder) => {
-    const hasStart = checkIsStarted(item.start_time) || checkIsStarted(item.StartTimeStamp) || checkIsStarted(item.start_timestamp);
-    const hasEnd = checkIsStarted(item.end_time) || checkIsStarted(item.EndTimeStamp) || checkIsStarted(item.end_timestamp);
-    return hasStart && !hasEnd;
-  };
-
-  const getClientFullName = (jobOrder: JobOrder): string => {
-    return [
-      jobOrder.First_Name || jobOrder.first_name || '',
-      jobOrder.Middle_Initial || jobOrder.middle_initial ? (jobOrder.Middle_Initial || jobOrder.middle_initial) + '.' : '',
-      jobOrder.Last_Name || jobOrder.last_name || ''
-    ].filter(Boolean).join(' ').trim() || '-';
-  };
-
-  const getClientFullAddress = (jobOrder: JobOrder): string => {
-    const addressParts = [
-      jobOrder.Installation_Address || jobOrder.installation_address || jobOrder.Address || jobOrder.address,
-      jobOrder.Barangay || jobOrder.barangay,
-      jobOrder.City || jobOrder.city,
-      jobOrder.Region || jobOrder.region
-    ].filter(Boolean);
-    return addressParts.length > 0 ? addressParts.join(', ') : '-';
-  };
-
-  const formatDateVal = (dateStr?: string | null): string => {
-    if (!dateStr) return '-';
-    try {
-      const d = new Date(dateStr);
-      if (isNaN(d.getTime())) return '-';
-      const datePart = `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
-      const timePart = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-      return `${datePart} ${timePart}`;
-    } catch (e) {
-      return '-';
-    }
-  };
-
-  const renderJobOrderItem = ({ item: jobOrder }: { item: JobOrder }) => {
+  const renderJobOrderItem = useCallback(({ item: jobOrder }: { item: JobOrder }) => {
     const rawStatus = String(jobOrder.commission_status || '').toLowerCase().trim();
     const displayStatus = (!jobOrder.commission_status || rawStatus === 'null' || rawStatus === 'unpaid' ? 'Not Collected' : 'Collected');
     const onsiteStatus = jobOrder.Onsite_Status || jobOrder.onsite_status || null;
@@ -381,16 +393,16 @@ const AgentHistory: React.FC = () => {
         </View>
       </View>
     );
-  };
+  }, [formatCurrency]);
 
-  const toggleBatch = (batchId: string) => {
+  const toggleBatch = useCallback((batchId: string) => {
     setExpandedBatches(prev => ({
       ...prev,
       [batchId]: !prev[batchId]
     }));
-  };
+  }, []);
 
-  const renderIncentiveBatch = ({ item }: { item: any }) => {
+  const renderIncentiveBatch = useCallback(({ item }: { item: any }) => {
     const isExpanded = expandedBatches[item.id] === true; // closed by default
 
     return (
@@ -449,7 +461,7 @@ const AgentHistory: React.FC = () => {
         )}
       </View>
     );
-  };
+  }, [expandedBatches, toggleBatch, formatCurrency, colorPalette]);
 
   const renderHeader = () => {
     return (

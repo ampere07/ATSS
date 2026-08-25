@@ -118,6 +118,14 @@ export const agentPortalService = {
         return response.data;
     },
 
+    // How many applications this agent has submitted. Counted server side on
+    // created_by_user_id: /applications is scoped to an organisation rather than
+    // to a caller, so an agent cannot count their own rows from the list.
+    getApplicationCount: async (): Promise<{ success: boolean; count?: number }> => {
+        const response = await apiClient.get<{ success: boolean; count?: number }>('/applications/my-count');
+        return response.data;
+    },
+
     getCommissionTrend: async (filter: string): Promise<{ success: boolean; data?: any[] }> => {
         const response = await apiClient.get<{ success: boolean; data?: any[] }>('/commissions/trend', {
             params: { filter }

@@ -205,7 +205,7 @@ final class ApiPermissionMap
             'job-order', 'service-order', 'work-order', 'application-management',
         ], 'tech-users'],
         ['agents*', [
-            'agent-management', 'team-agent', 'commission', 'agent-payout',
+            'agent-management', 'team-agent', 'bonus-history', 'agent-payout',
             'job-order', 'work-order', 'application-management',
         ], ['agent-management', 'team-agent']],
         ['roles*',                       null, 'roles'],
@@ -216,6 +216,13 @@ final class ApiPermissionMap
         // ── Applications ─────────────────────────────────────────────────────
         // An agent submits an application from the portal's own form, so the
         // write side accepts the agent key as well as the admin page key.
+        // Signed in is enough. The controller matches on the caller and answers
+        // with a single number about them, so there is nothing here to gate by
+        // page: an account that cannot see the applications list still knows how
+        // many of the rows are its own. Gating it on 'agent-application' meant an
+        // agent on a custom role that had not been ticked for that page was
+        // refused their own total.
+        ['applications/my-count',        null, null],
         ['applications*',                'application-management', ['application-management', 'agent-application']],
         ['application-visits*',          'application-management', 'application-management'],
 
@@ -346,7 +353,15 @@ final class ApiPermissionMap
         ['agent-invoices*',              'agent-invoices', 'agent-invoices.generate'],
         ['commissions/*/approve',        'agent-payout.approve', 'agent-payout.approve'],
         ['commissions/*/reject',         'agent-payout.approve', 'agent-payout.approve'],
-        ['commissions*',                 'commission', 'commission.payout'],
+        // Claiming an achievement is the agent's own act, so the page key is
+        // enough: storeAchievement() discards any agent_id a non-admin sends
+        // and credits the caller.
+        ['commissions/achievements',     'bonus-history', 'bonus-history'],
+        // Reading is the page — getHistory() scopes a non-admin to their own
+        // rows — while recording a payout is the button on it. The key is
+        // 'bonus-history'; 'commission' was never a key any role holds, so this
+        // rule refused every caller but SuperAdmin.
+        ['commissions*',                 'bonus-history', 'bonus-history.payout'],
 
         // ── Messaging ────────────────────────────────────────────────────────
         ['sms-blast*',                   'sms-blast', 'sms-blast'],

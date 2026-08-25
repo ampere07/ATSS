@@ -333,7 +333,7 @@ class ApiPermissionCoverageTest extends TestCase
     {
         // Granted the page and nothing else: may look, may not act.
         $reader = $this->user(20, [
-            'reports', 'commission', 'agent-payout', 'agent-invoices',
+            'reports', 'bonus-history', 'agent-payout', 'agent-invoices',
             'ports', 'router-models', 'status-remarks-list',
         ]);
 

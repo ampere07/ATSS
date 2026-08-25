@@ -28,6 +28,20 @@ const ReleaseNotes: React.FC<ReleaseNotesProps> = ({ onBack }) => {
 
     const allNotes: ReleaseNote[] = [
         {
+            version: '2.5.61',
+            date: 'August 25, 2026',
+            title: 'Agent Dashboard Rebuilt & Full Referral History',
+            updates: [
+                { text: 'One Card, Three Tabs: Your dashboard card now has Wallet, Referrals and Applications tabs across the top instead of the flip button. Tap a tab to move between them — whichever one you are on shows a single headline figure rather than a grid of four.', visibility: 'agent' },
+                { text: 'Tap to See the Breakdown: The arrow beside your balance opens the detail behind it. Wallet breaks down into Incentives, Commission, Bonus and Achievement; Referrals into In Progress, Done, Failed and Reschedule. Tap again to close it and the card shrinks back.', visibility: 'agent' },
+                { text: 'Hide Your Figures: The eye beside the label masks every amount on the card, so you can open your dashboard in public without your earnings on show.', visibility: 'agent' },
+                { text: 'Applications You Have Sent: A new Applications tab counts the application forms submitted from your account, with the form itself a tap away on the same card. The separate Total Balance panel below your achievements is gone — that figure is now the Wallet tab.', visibility: 'agent' },
+                { text: 'Earnings and Achievements Load Again: Fixed the error that left your commission history, cashout history and achievement progress blank. Your Pay Out/In page is reachable again too.', visibility: 'agent' },
+                { text: 'Your Full Referral History: The Job Order page no longer hides referrals for being old — every referral still in progress is listed however long ago it was raised, newest first. Completed ones are no longer mixed in with them: they live on your Agent History page, which is what that page is for.', visibility: 'agent' },
+                { text: 'Faster Dashboard and History: Your dashboard and history screens no longer redraw the whole page every second behind the reset countdown, so both scroll and respond noticeably faster.', visibility: 'agent' }
+            ]
+        },
+        {
             version: '2.5.56',
             date: 'August 15, 2026',
             title: 'Photo Backup & Job Order List Order',

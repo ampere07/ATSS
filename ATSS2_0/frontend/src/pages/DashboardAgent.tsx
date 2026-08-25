@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCcw, RefreshCw, Loader2, Timer } from 'lucide-react';
+import { ChevronDown, Eye, EyeOff, RefreshCw, Loader2, Timer } from 'lucide-react';
 import { agentPortalService } from '../services/commissionService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useJobOrderStore } from '../store/jobOrderStore';
@@ -20,6 +20,48 @@ import {
     millisUntilReset,
     parseResetsAt
 } from '../utils/agentReferral';
+
+/**
+ * How long is left in one tier's period.
+ *
+ * The tick lives here rather than on the dashboard so a second passing repaints
+ * this pill alone. Held one level up it re-rendered the whole page — both
+ * achievement cards, the balance card, the cashout list — once a second for a
+ * line of text that changes.
+ *
+ * The instant it counts to is the server's, and the difference between the two
+ * clocks is read fresh on every tick: a reply that lands mid-period corrects the
+ * countdown without it having to be torn down.
+ */
+const ResetCountdown: React.FC<{
+    resetsAt: number | null;
+    skew: React.MutableRefObject<number>;
+}> = ({ resetsAt, skew }) => {
+    const read = useCallback(
+        () => (resetsAt === null ? '' : formatCountdown(millisUntilReset(resetsAt, Date.now() + skew.current))),
+        [resetsAt, skew]
+    );
+
+    const [label, setLabel] = useState(read);
+
+    useEffect(() => {
+        const render = () => setLabel(read());
+        render();
+
+        const tick = window.setInterval(render, 1000);
+        return () => window.clearInterval(tick);
+    }, [read]);
+
+    if (!label) return <div className="mb-6" />;
+
+    return (
+        <div className="mb-6 mt-3 flex items-center gap-2 rounded-full bg-slate-50 px-3.5 py-1.5 ring-1 ring-slate-100">
+            <Timer size={14} className="shrink-0 text-slate-400" />
+            <span className="text-xs text-slate-500">Resets in</span>
+            <span className="font-mono text-xs font-bold tabular-nums text-slate-700">{label}</span>
+        </div>
+    );
+};
 
 /**
  * One achievement tier as the server reports it.
@@ -146,14 +188,6 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
 
     /** Tier state as the server reports it: period-bounded counts and claim state. */
     const [serverTiers, setServerTiers] = useState<ServerTier[]>([]);
-    /**
-     * Ticks once a second to drive the reset countdowns.
-     *
-     * The countdown is derived from this and the reset instant the server sent,
-     * never accumulated — so reopening the dashboard picks the clock back up
-     * where it genuinely stands instead of starting the period again.
-     */
-    const [nowTs, setNowTs] = useState<number>(() => Date.now());
     /** Device-to-server clock difference, applied before every comparison. */
     const clockSkew = useRef(0);
     /** When a reload was last triggered by a rollover, to space out retries. */
@@ -167,7 +201,24 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
     const [isClaiming, setIsClaiming] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
     const [isRefreshing, setIsRefreshing] = useState(false);
-    const [isCardFlipped, setIsCardFlipped] = useState(false);
+    /** Which face of the card is showing: Wallet, Referrals or Applications. */
+    const [activeCardTab, setActiveCardTab] = useState(0);
+    /** Whether the headline figure's breakdown is open. */
+    const [isCardExpanded, setIsCardExpanded] = useState(false);
+    /** Masks the figures, for reading the card in public. */
+    const [isAmountHidden, setIsAmountHidden] = useState(false);
+    /** Applications this agent has raised, counted server side. */
+    const [applicationCount, setApplicationCount] = useState(0);
+    /**
+     * The card body's height, which the active tab reproduces its gradient at.
+     *
+     * The gradient runs corner to corner, so the card's top edge is the palette
+     * colour at the left and well darkened by the right. A tab can only look
+     * like part of the card if it draws that same gradient at the same size and
+     * shows the slice belonging to its own position.
+     */
+    const [cardBodyHeight, setCardBodyHeight] = useState(0);
+    const cardBodyRef = useRef<HTMLDivElement | null>(null);
 
     const primaryColor = colorPalette?.primary || '#ef4444';
 
@@ -201,6 +252,15 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
             }
         } catch (err) {
             console.error('[DashboardAgent] Failed to fetch cashout history:', err);
+        }
+    }, []);
+
+    const fetchApplicationCount = useCallback(async () => {
+        try {
+            const response = await agentPortalService.getApplicationCount();
+            if (response?.success) setApplicationCount(Number(response.count) || 0);
+        } catch (err) {
+            console.error('[DashboardAgent] Failed to fetch application count:', err);
         }
     }, []);
 
@@ -239,10 +299,11 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         const agentId = identity.id;
         await Promise.all([
             fetchHistory(),
+            fetchApplicationCount(),
             agentId ? fetchAchievements(agentId) : Promise.resolve(),
             silentRefresh()
         ]);
-    }, [identity.id, fetchHistory, fetchAchievements, silentRefresh]);
+    }, [identity.id, fetchHistory, fetchApplicationCount, fetchAchievements, silentRefresh]);
 
     useEffect(() => {
         let cancelled = false;
@@ -263,53 +324,48 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         }
     }, [loadAll]);
 
-    // Drives the reset countdowns.
-    useEffect(() => {
-        const tick = window.setInterval(() => setNowTs(Date.now()), 1000);
-        return () => window.clearInterval(tick);
-    }, []);
-
     /**
      * Reloads the moment a period rolls over, so the count returns to zero and
      * the next countdown begins without anyone refreshing the page.
      *
-     * Driven by the tick rather than a timer set for the boundary: a monthly
-     * period can be more than 24 days out, which overflows a browser timeout
-     * and would fire it immediately. If the server has not moved on yet — its
-     * clock being a moment behind — the spacing below turns that into a quiet
-     * retry every few seconds until it has.
+     * Polled rather than set as a timer for the boundary: a monthly period can
+     * be more than 24 days out, which overflows a browser timeout and would fire
+     * it immediately. The poll reads the clock directly instead of through
+     * state, so watching for the rollover costs no renders. If the server has
+     * not moved on yet — its clock being a moment behind — the spacing below
+     * turns that into a quiet retry every few seconds until it has.
      */
     useEffect(() => {
         if (!serverTiers.length) return;
 
-        const serverNow = nowTs + clockSkew.current;
-        const rolledOver = serverTiers.some(t => t.resetsAt !== null && serverNow >= t.resetsAt);
-        if (!rolledOver) return;
+        const check = () => {
+            const now = Date.now();
+            const serverNow = now + clockSkew.current;
 
-        if (nowTs - lastResetReload.current < RESET_RELOAD_GRACE_MS) return;
-        lastResetReload.current = nowTs;
+            if (!serverTiers.some(t => t.resetsAt !== null && serverNow >= t.resetsAt)) return;
+            if (now - lastResetReload.current < RESET_RELOAD_GRACE_MS) return;
 
-        loadAll();
-    }, [nowTs, serverTiers, loadAll]);
+            lastResetReload.current = now;
+            loadAll();
+        };
+
+        check();
+
+        const tick = window.setInterval(check, 1000);
+        return () => window.clearInterval(tick);
+    }, [serverTiers, loadAll]);
 
     /**
-     * Time left before each tier resets, keyed by tier.
+     * When each tier's period ends, keyed by tier.
      *
-     * Weekly and monthly are read from their own reset instants, so the two
-     * countdowns run independently — the weekly one rolling over leaves the
-     * monthly one untouched.
+     * Weekly and monthly carry their own instant, so the two countdowns run
+     * independently — the weekly one rolling over leaves the monthly one alone.
      */
-    const countdowns = useMemo(() => {
-        const serverNow = nowTs + clockSkew.current;
-        const out: Record<string, string> = {};
-
-        serverTiers.forEach(tier => {
-            if (tier.resetsAt === null) return;
-            out[tier.key] = formatCountdown(millisUntilReset(tier.resetsAt, serverNow));
-        });
-
+    const resetsAtByTier = useMemo(() => {
+        const out: Record<string, number | null> = {};
+        serverTiers.forEach(tier => { out[tier.key] = tier.resetsAt; });
         return out;
-    }, [serverTiers, nowTs]);
+    }, [serverTiers]);
 
     // Referral funnel counts, derived from the agent's own job orders exactly as the
     // mobile dashboard derives them.
@@ -461,21 +517,77 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
     const displayName = identity.fullName || 'Agent';
     const initials = displayName.split(' ').filter(Boolean).map(n => n[0]).join('').substring(0, 2).toUpperCase();
 
-    const balanceTiles = [
-        { label: 'Incentives', value: agentIncentives },
-        // Commission earned from approved job orders, not the spendable
-        // balance — those are separate columns and pay out separately.
-        { label: 'Commission', value: agentCommission },
-        { label: 'Bonus', value: agentBonus },
-        { label: 'Achievement', value: agentAchievement }
-    ];
+    /**
+     * The three faces of the card, each a headline figure.
+     *
+     * Wallet and Referrals sum the parts listed under them, and `action` says
+     * so: those two open, while Applications has nothing to break down and
+     * offers the form instead. Wallet totals only what can actually be cashed
+     * out — `achievement` is listed for reference but stays out of the total,
+     * because a claimed reward is already paid into the balance and would
+     * otherwise be counted twice.
+     */
+    const cardTabs = useMemo(() => [
+        {
+            key: 'wallet',
+            label: 'Wallet',
+            caption: 'AVAILABLE BALANCE',
+            total: formatCurrency(totalBalance),
+            action: 'expand' as const,
+            items: [
+                { label: 'Incentives', value: formatCurrency(agentIncentives) },
+                // Commission earned from approved job orders, not the spendable
+                // balance — those are separate columns and pay out separately.
+                { label: 'Commission', value: formatCurrency(agentCommission) },
+                { label: 'Bonus', value: formatCurrency(agentBonus) },
+                { label: 'Achievement', value: formatCurrency(agentAchievement) },
+            ],
+        },
+        {
+            key: 'referrals',
+            label: 'Referrals',
+            caption: 'TOTAL REFERRALS',
+            total: String(inProgressCount + onboardedCount + failedCount + rescheduleCount),
+            action: 'expand' as const,
+            items: [
+                { label: 'In Progress', value: String(inProgressCount) },
+                { label: 'Done', value: String(onboardedCount) },
+                { label: 'Failed', value: String(failedCount) },
+                { label: 'Reschedule', value: String(rescheduleCount) },
+            ],
+        },
+        {
+            key: 'applications',
+            label: 'Applications',
+            caption: 'APPLICATIONS SUBMITTED',
+            total: String(applicationCount),
+            action: 'apply' as const,
+            items: [] as Array<{ label: string; value: string }>,
+        },
+    ], [totalBalance, agentIncentives, agentCommission, agentBonus, agentAchievement, inProgressCount, onboardedCount, failedCount, rescheduleCount, applicationCount]);
 
-    const funnelTiles = [
-        { label: 'In Progress', value: inProgressCount },
-        { label: 'Done', value: onboardedCount },
-        { label: 'Failed', value: failedCount },
-        { label: 'Reschedule', value: rescheduleCount }
-    ];
+    const activeCard = cardTabs[Math.min(activeCardTab, cardTabs.length - 1)];
+
+    // Applications has nothing to break down, so moving to it shuts the card.
+    const selectCardTab = useCallback((index: number) => {
+        if (cardTabs[index]?.action !== 'expand') setIsCardExpanded(false);
+        setActiveCardTab(index);
+    }, [cardTabs]);
+
+    // The body's height is what the active tab's gradient copy is sized to, so
+    // the two describe the same colour field. Re-read on resize, since the card
+    // grows and shrinks as the breakdown opens.
+    useEffect(() => {
+        const el = cardBodyRef.current;
+        if (!el) return;
+
+        const measure = () => setCardBodyHeight(el.offsetHeight);
+        measure();
+
+        const observer = new ResizeObserver(measure);
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [isCardExpanded, activeCardTab]);
 
     if (isLoading) {
         return (
@@ -501,49 +613,124 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
                     </button>
                 </div>
 
-                {/* Balance / referral card — the icon flips between the two faces. */}
-                <div
-                    className="overflow-hidden rounded-3xl transition-transform duration-300"
-                    style={{
-                        background: isCardFlipped
-                            ? `linear-gradient(135deg, #000000 0%, ${primaryColor} 100%)`
-                            : `linear-gradient(135deg, ${primaryColor} 0%, #000000 100%)`
-                    }}
-                >
-                    <div className="px-6 py-8 md:px-8">
-                        <div className="mb-8 flex items-center justify-between gap-3">
-                            <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-full border border-white/30 bg-white/15 text-lg font-bold text-white">
+                {/* Wallet, Referrals and Applications. The card shows one headline
+                    figure per tab; where there is a breakdown behind it, it is a
+                    click away. */}
+                <div className="overflow-hidden rounded-xl bg-white">
+                    <div className="flex items-end gap-2 bg-white px-2.5 pt-2.5">
+                        {cardTabs.map((tab, i) => {
+                            const isActive = i === activeCardTab;
+                            return (
+                                <button
+                                    key={tab.key}
+                                    onClick={() => selectCardTab(i)}
+                                    className="relative h-[38px] flex-1 overflow-hidden rounded-t-xl text-xs font-bold transition-colors"
+                                    style={{ color: isActive ? '#ffffff' : primaryColor }}
+                                >
+                                    {/* The card's gradient at card size, shifted left
+                                        by this tab's own position, so what shows
+                                        through is the slice belonging to it. A flat
+                                        fill could only match the card at one tab:
+                                        the gradient runs corner to corner, so the
+                                        card's top edge is the palette colour on the
+                                        left and well darkened by the right. */}
+                                    <span
+                                        aria-hidden
+                                        className="absolute left-0 top-0 transition-opacity duration-200"
+                                        style={{
+                                            width: `calc(${cardTabs.length} * 100% + ${(cardTabs.length - 1) * 8}px)`,
+                                            height: Math.max(cardBodyHeight, 38),
+                                            marginLeft: `calc(-${i} * (100% + 8px))`,
+                                            background: `linear-gradient(135deg, ${primaryColor} 0%, #000000 100%)`,
+                                            opacity: isActive ? 1 : 0,
+                                        }}
+                                    />
+                                    <span className="relative">{tab.label}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div
+                        ref={cardBodyRef}
+                        className="rounded-b-3xl rounded-t-xl px-6 py-7 md:px-8"
+                        style={{ background: `linear-gradient(135deg, ${primaryColor} 0%, #000000 100%)` }}
+                    >
+                        <div className="mb-5 flex items-center gap-3">
+                            <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-full border border-white/30 bg-white/15 text-base font-bold text-white">
                                 {initials}
                             </div>
                             <div className="min-w-0 flex-1">
-                                <div className="truncate text-lg font-bold capitalize text-white">{displayName}</div>
+                                <div className="truncate text-base font-bold capitalize text-white">{displayName}</div>
                                 <div className="truncate text-xs text-gray-200 opacity-90">
                                     Agent ID: {identity.username || 'N/A'}
                                 </div>
-                                {isCardFlipped && (
-                                    <div className="truncate text-xs text-gray-200 opacity-90">
-                                        {identity.email || 'N/A'}
-                                    </div>
-                                )}
                             </div>
+                        </div>
+
+                        <div className="mb-0.5 flex items-center gap-2">
+                            <span className="text-[11px] font-bold tracking-widest text-white/70">
+                                {activeCard.caption}
+                            </span>
                             <button
-                                onClick={() => setIsCardFlipped(prev => !prev)}
-                                className="flex-shrink-0 rounded-full p-2 text-white transition hover:bg-white/10"
-                                title={isCardFlipped ? 'Show balances' : 'Show referrals'}
+                                onClick={() => setIsAmountHidden(prev => !prev)}
+                                className="text-white/75 transition hover:text-white"
+                                title={isAmountHidden ? 'Show figures' : 'Hide figures'}
                             >
-                                <RefreshCcw size={20} />
+                                {isAmountHidden ? <EyeOff size={15} /> : <Eye size={15} />}
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-5">
-                            {(isCardFlipped ? funnelTiles : balanceTiles).map((tile, index) => (
-                                <div key={tile.label} className={index % 2 === 1 ? 'text-right' : 'text-left'}>
-                                    <div className="mb-1 truncate text-xs text-gray-200">{tile.label}</div>
-                                    <div className="truncate text-2xl font-bold text-white md:text-3xl">
-                                        {isCardFlipped ? tile.value : formatCurrency(tile.value)}
-                                    </div>
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0 truncate text-3xl font-bold text-white md:text-4xl">
+                                {isAmountHidden ? '••••••' : activeCard.total}
+                            </div>
+
+                            {activeCard.action === 'expand' ? (
+                                <button
+                                    onClick={() => setIsCardExpanded(prev => !prev)}
+                                    className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-white/35 bg-white/[0.18] text-white transition hover:bg-white/25"
+                                    title={isCardExpanded ? 'Hide breakdown' : 'Show breakdown'}
+                                >
+                                    <ChevronDown
+                                        size={20}
+                                        className={`transition-transform duration-200 ${isCardExpanded ? 'rotate-180' : ''}`}
+                                    />
+                                </button>
+                            ) : (
+                                /* The count has no parts to show, so the tab offers
+                                   the way to add to it instead. */
+                                <button
+                                    onClick={() => onNavigate?.('agent-application')}
+                                    className="flex-shrink-0 rounded-xl border-2 border-white px-4 py-1.5 text-xl font-bold text-white transition hover:bg-white/10"
+                                >
+                                    Form
+                                </button>
+                            )}
+                        </div>
+
+                        {/* Height is animated through a grid row rather than a
+                            max-height guess, so the card opens to exactly the space
+                            the rows need whatever they contain. */}
+                        <div
+                            className={`grid transition-all duration-200 ease-out ${
+                                isCardExpanded && activeCard.items.length > 0
+                                    ? 'grid-rows-[1fr] opacity-100'
+                                    : 'grid-rows-[0fr] opacity-0'
+                            }`}
+                        >
+                            <div className="overflow-hidden">
+                                <div className="mt-4 space-y-2.5 border-t border-white/20 pt-4">
+                                    {activeCard.items.map(item => (
+                                        <div key={item.label} className="flex items-center justify-between gap-3">
+                                            <span className="text-[13px] text-white/75">{item.label}</span>
+                                            <span className="text-[15px] font-bold text-white">
+                                                {isAmountHidden ? '••••' : item.value}
+                                            </span>
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -591,16 +778,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
 
                                     {/* Time left in this period. Each tier counts down on its
                                         own clock, and the count returns to zero when it ends. */}
-                                    {countdowns[tier.key] && (
-                                        <div className="mb-6 mt-3 flex items-center gap-2 rounded-full bg-slate-50 px-3.5 py-1.5 ring-1 ring-slate-100">
-                                            <Timer size={14} className="shrink-0 text-slate-400" />
-                                            <span className="text-xs text-slate-500">Resets in</span>
-                                            <span className="font-mono text-xs font-bold tabular-nums text-slate-700">
-                                                {countdowns[tier.key]}
-                                            </span>
-                                        </div>
-                                    )}
-                                    {!countdowns[tier.key] && <div className="mb-6" />}
+                                    <ResetCountdown resetsAt={resetsAtByTier[tier.key] ?? null} skew={clockSkew} />
 
                                     <AchievementGauge value={progress.onboarded} target={tier.target} color={primaryColor} />
 
@@ -667,25 +845,6 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
                             />
                         ))}
                     </div>
-                </div>
-
-                {/* Total balance + application entry point */}
-                <div
-                    className="flex flex-col gap-6 overflow-hidden rounded-3xl px-6 py-7 md:flex-row md:items-center md:justify-between md:px-8"
-                    style={{ background: `linear-gradient(135deg, ${primaryColor} 0%, #000000 100%)` }}
-                >
-                    <div className="min-w-0">
-                        <div className="mb-2 text-sm font-semibold text-gray-200">Total Balance</div>
-                        <div className="truncate text-4xl font-bold text-white md:text-5xl">
-                            {formatCurrency(totalBalance)}
-                        </div>
-                    </div>
-                    <button
-                        onClick={() => onNavigate?.('agent-application')}
-                        className="flex-shrink-0 rounded-xl border-2 border-white px-4 py-2.5 text-sm font-bold text-white transition hover:bg-white/10"
-                    >
-                        Application Form
-                    </button>
                 </div>
 
                 {/* Cashout history */}

@@ -20,6 +20,7 @@ import CommissionPayoutModal from '../modals/CommissionPayoutModal';
 import IncentivesPayoutModal from '../modals/IncentivesPayoutModal';
 import BonusPayoutModal from '../modals/BonusPayoutModal';
 import { useAgentStore } from '../store/agentStore';
+import usePermissions from '../hooks/usePermissions';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 
 type TabKey = 'payouts' | 'incentives' | 'bonus';
@@ -68,6 +69,12 @@ const Commission: React.FC = () => {
     const [showFromPicker, setShowFromPicker] = useState(false);
     const [showToPicker, setShowToPicker] = useState(false);
     const [showFilters, setShowFilters] = useState(false);
+
+    // An agent opens this page to read their own history; recording a payout
+    // against an agent is the administrator's act, and the API refuses it
+    // without the key, so the button is not offered without it either.
+    const { can } = usePermissions();
+    const canPayOut = can('bonus-history.payout');
 
     const [selectedRecord, setSelectedRecord] = useState<CommissionData | PayoutHistoryData | null>(null);
     const [showDetails, setShowDetails] = useState(false);
@@ -360,7 +367,7 @@ const Commission: React.FC = () => {
             }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
                     <Text style={{ fontSize: 18, fontWeight: '700', color: textColor }}>{headerTitle}</Text>
-                    {activeTab !== 'incentives' ? (
+                    {activeTab !== 'incentives' && canPayOut ? (
                         <TouchableOpacity
                             onPress={handleOpenPayout}
                             style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, backgroundColor: primaryColor }}

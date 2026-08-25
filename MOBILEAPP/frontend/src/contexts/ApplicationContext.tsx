@@ -94,6 +94,14 @@ export const ApplicationProvider: React.FC<ApplicationProviderProps> = ({ childr
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
     const fetchApplications = useCallback(async (force = false, silent = false) => {
+        // Checked here rather than only at mount: refreshApplications and
+        // silentRefresh are called from screens of every role, and /applications
+        // is org-wide rather than scoped to the caller, so anyone without the
+        // key collects a 403 instead of a list.
+        if (!permissionsReady || !can('application-management')) {
+            return;
+        }
+
         // If we have data and not forced, skip fetching
         if (!force && applications.length > 0) {
             return;
@@ -144,7 +152,7 @@ export const ApplicationProvider: React.FC<ApplicationProviderProps> = ({ childr
         } finally {
             setIsLoading(false);
         }
-    }, [applications.length]);
+    }, [applications.length, permissionsReady, can]);
 
     const refreshApplications = useCallback(async () => {
         await fetchApplications(true, false);
@@ -156,14 +164,12 @@ export const ApplicationProvider: React.FC<ApplicationProviderProps> = ({ childr
 
     // Initial fetch effect
     useEffect(() => {
-        // Wait for the keys to load, then only fetch for a user who may read applications.
-        if (!permissionsReady || !can('application-management')) return;
-
-        // Only fetch if empty, otherwise let the logic decide
+        // Only fetch if empty, otherwise let the logic decide. fetchApplications
+        // checks the key itself.
         if (applications.length === 0) {
             fetchApplications(false, false);
         }
-    }, [fetchApplications, applications.length, permissionsReady, can]);
+    }, [fetchApplications, applications.length]);
 
     return (
         <ApplicationContext.Provider

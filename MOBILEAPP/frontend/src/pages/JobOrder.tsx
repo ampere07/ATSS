@@ -11,7 +11,7 @@ import { JobOrder } from '../types/jobOrder';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { techInOutService } from '../services/techInOutService';
 import TimeInOutModal from '../modals/TimeInOutModal';
-import { agentOwnsReferral, isOnOrAfterAgentStartDate } from '../utils/agentReferral';
+import { agentOwnsReferral, getOnsiteStatus, isDoneOnsiteStatus } from '../utils/agentReferral';
 import {
   buildTechnicianLockedJobOrderIds,
   isTechnicianUser,
@@ -529,9 +529,10 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
       // Role-based filtering: Agents (role_id 4) only see their own referrals.
       //
-      // Agents see every referral they own, whatever stage it has reached — in
-      // progress, rescheduled, completed or failed — so the page is the full
-      // picture of their own work.
+      // An agent sees the referrals they own that are still in flight, however
+      // long ago they were raised — there is no date cut-off. Completed ones are
+      // left out: they are the Agent History page's, and this page is what is
+      // still to come.
       if (!isSuperUser && (userRole.toLowerCase() === 'agent' || userRoleId === 4)) {
         const referredBy = jobOrder.Referred_By || jobOrder.referred_by || '';
 
@@ -541,8 +542,8 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
         if (!agentOwnsReferral(referredBy, userFullName, userEmail)) return false;
 
-        // Agents see recent work only, from the configured start date onwards.
-        if (!isOnOrAfterAgentStartDate(jobOrder)) return false;
+        // Done and completed belong to Agent History.
+        if (isDoneOnsiteStatus(getOnsiteStatus(jobOrder))) return false;
       }
 
       // Hide job orders with onsite status "done", "completed", or "failed" after 1 day
@@ -611,6 +612,11 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   }, [jobOrders, debouncedSearch, statusFilter, identityReady, userRole, userRoleId, userFullName, userEmail, authUserData, filterValues, getClientFullName, getClientFullAddress]);
 
   const isTechnician = useMemo(() => isTechnicianUser(userRole, userRoleId), [userRole, userRoleId]);
+  const isAgentViewer = useMemo(
+    () => userRole.toLowerCase() === 'agent' || userRoleId === 4,
+    [userRole, userRoleId]
+  );
+
 
   /**
    * The job orders a technician may not open yet.
@@ -623,6 +629,20 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
     if (!identityReady || !isTechnician) return new Set<string>();
     return buildTechnicianLockedJobOrderIds(jobOrders);
   }, [identityReady, isTechnician, jobOrders]);
+
+  // Held steady across renders. Written inline, the list was handed a new
+  // renderer every time anything on the screen changed, which costs the memo
+  // around JobOrderCard the comparison it exists to make.
+  const renderJobOrderCard = useCallback(({ item: jobOrder }: { item: JobOrder }) => (
+    <JobOrderCard
+      jobOrder={jobOrder}
+      isSelected={selectedJobOrder?.id === jobOrder.id}
+      isLocked={technicianLockedIds.has(String(jobOrder.id))}
+      onPress={!isTablet ? handleMobileRowClick : handleRowClick}
+      userRole={userRole}
+      userRoleId={userRoleId}
+    />
+  ), [selectedJobOrder?.id, technicianLockedIds, isTablet, handleMobileRowClick, handleRowClick, userRole, userRoleId]);
 
   const sortedJobOrders = useMemo(() => {
     // A technician reads their list oldest first, running through to the
@@ -670,6 +690,16 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
       });
     }
 
+    // An agent's list is their own referral history, so it reads by recency
+    // alone. The started-first rule below pins whatever a technician currently
+    // has open to the top, which pushes an agent's completed referrals down the
+    // page for a reason that has nothing to do with them.
+    if (isAgentViewer) {
+      return [...filteredJobOrders].sort(
+        (a, b) => (parseInt(String(b.id), 10) || 0) - (parseInt(String(a.id), 10) || 0)
+      );
+    }
+
     // Every other role keeps the existing started-first, newest-first ordering.
     return [...filteredJobOrders].sort((a, b) => {
       const activeA = isWorkStarted(a) ? 1 : 0;
@@ -683,7 +713,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
       const idB = parseInt(String(b.id)) || 0;
       return idB - idA;
     });
-  }, [filteredJobOrders, isTechnician]);
+  }, [filteredJobOrders, isTechnician, isAgentViewer]);
 
 
   const shouldPaginate = true; // Consistently paginate for all roles to prevent UI jumping
@@ -868,16 +898,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
                     </View>
                   }
                   contentContainerStyle={{ paddingBottom: !isTablet ? 100 : 0 }}
-                  renderItem={({ item: jobOrder }) => (
-                    <JobOrderCard
-                      jobOrder={jobOrder}
-                      isSelected={selectedJobOrder?.id === jobOrder.id}
-                      isLocked={technicianLockedIds.has(String(jobOrder.id))}
-                      onPress={!isTablet ? handleMobileRowClick : handleRowClick}
-                      userRole={userRole}
-                      userRoleId={userRoleId}
-                    />
-                  )}
+                  renderItem={renderJobOrderCard}
                 />
               </View>
             )}
