@@ -166,7 +166,36 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
             // is the point: the balance arrives on the short request instead of behind the
             // long one, and Pay Now unlocks as soon as it does.
             setIsPaySummaryLoading(true);
-            const paySummaryDone = getCustomerPaySummary(parsedUser.username)
+
+            // One retry before giving up. getCustomerPaySummary never throws — a
+            // refused request, a timeout and an empty body all come back as null —
+            // so a single blip ended the balance's only fast path and left the
+            // card reading unavailable with a figure sitting in the database.
+            // The endpoint is a cheap read of one row; asking twice recovers the
+            // common case. One retry, not a loop: a second failure means
+            // something is actually wrong and the card should say so.
+            const fetchPaySummary = async () => {
+                const waits = [0, 400, 1200];
+
+                for (let attempt = 0; attempt < waits.length; attempt++) {
+                    if (waits[attempt] > 0) {
+                        await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
+                    }
+
+                    const summary = await getCustomerPaySummary(parsedUser.username);
+                    if (summary) {
+                        if (attempt > 0) {
+                            console.info('[Dashboard] Pay summary recovered on attempt', attempt + 1);
+                        }
+                        return summary;
+                    }
+                }
+
+                console.warn('[Dashboard] Pay summary unavailable after 3 attempts', parsedUser.username);
+                return null;
+            };
+
+            const paySummaryDone = fetchPaySummary()
                 .then((summary) => {
                     if (summary) {
                         setPaySummary(summary);

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     RefreshCw, Download, FileText, Users, User as UserIcon, Loader2,
-    ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, ChevronDown, X, Eye
+    ChevronsLeft, ChevronsRight, ChevronLeft, ChevronRight, ChevronDown, X
 } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { ROLE, roleIdOf } from '../config/permissions';
@@ -9,6 +9,8 @@ import { agentInvoiceService, AgentInvoiceRecord } from '../services/agentInvoic
 import AgentInvoiceDetails from '../components/AgentInvoiceDetails';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import AgentInvoiceDownloadModal from '../modals/AgentInvoiceDownloadModal';
+import AgentPayoutModal from '../modals/AgentPayoutModal';
+import { usePermissions } from '../hooks/usePermissions';
 
 const hexToRgba = (hex: string, opacity: number) => {
     const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -34,7 +36,8 @@ const columns: ColumnDefinition[] = [
     { key: 'total_amount', label: 'Total Amount', minWidth: 140, align: 'right' },
     { key: 'subtotal', label: 'Subtotal', minWidth: 140, align: 'right' },
     { key: 'status', label: 'Status', minWidth: 120 },
-    { key: 'actions', label: 'Actions', minWidth: 130, align: 'center' },
+    // No Actions column: a row opens its detail pane on click, and View PDF,
+    // Download and Pay Out all live there.
 ];
 
 
@@ -146,6 +149,7 @@ const StatusSelect: React.FC<{
 };
 
 const AgentInvoice: React.FC = () => {
+    const { can } = usePermissions();
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -167,6 +171,8 @@ const AgentInvoice: React.FC = () => {
     const [expandedPeriods, setExpandedPeriods] = useState<string[]>([]);
     const [isDownloadOpen, setIsDownloadOpen] = useState(false);
     const [selected, setSelected] = useState<AgentInvoiceRecord | null>(null);
+    // The invoice a payout is being raised for, or null when none is.
+    const [payoutFor, setPayoutFor] = useState<AgentInvoiceRecord | null>(null);
     const [isLoadingDetail, setIsLoadingDetail] = useState(false);
     const [pdfPending, setPdfPending] = useState<number | null>(null);
     // The invoice whose status is being saved right now, so only that row's
@@ -499,36 +505,6 @@ const AgentInvoice: React.FC = () => {
                         />
                     )
                     : <StatusBadge status={record.status} isDarkMode={isDarkMode} />;
-            case 'actions':
-                return (
-                    <div className="flex items-center justify-center gap-1.5">
-                        <button
-                            onClick={(e) => { e.stopPropagation(); handleOpenDetails(record); }}
-                            title="View details"
-                            className={`p-1.5 rounded transition-colors ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-                        >
-                            <Eye className="h-4 w-4" />
-                        </button>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); handlePdf(record, false); }}
-                            disabled={pdfPending === record.id}
-                            title="Open PDF"
-                            className={`p-1.5 rounded transition-colors disabled:opacity-50 ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-                        >
-                            {pdfPending === record.id
-                                ? <Loader2 className="h-4 w-4 animate-spin" />
-                                : <FileText className="h-4 w-4" />}
-                        </button>
-                        <button
-                            onClick={(e) => { e.stopPropagation(); handlePdf(record, true); }}
-                            disabled={pdfPending === record.id}
-                            title="Download PDF"
-                            className={`p-1.5 rounded transition-colors disabled:opacity-50 ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
-                        >
-                            <Download className="h-4 w-4" />
-                        </button>
-                    </div>
-                );
             default:
                 return '-';
         }
@@ -761,6 +737,7 @@ const AgentInvoice: React.FC = () => {
                         onNext={selectedIndex >= 0 && selectedIndex < records.length - 1 ? handleNextRecord : undefined}
                         onViewPdf={() => handlePdf(selected, false)}
                         onDownloadPdf={() => handlePdf(selected, true)}
+                        onPayOut={can('agent-invoices.payout') ? () => setPayoutFor(selected) : undefined}
                     />
                 </div>
             )}
@@ -768,6 +745,21 @@ const AgentInvoice: React.FC = () => {
             <AgentInvoiceDownloadModal
                 isOpen={isDownloadOpen}
                 onClose={() => setIsDownloadOpen(false)}
+            />
+
+            {/* Raised from an invoice, so the form asks only for the agent and
+                shows the invoice number as its reference. */}
+            <AgentPayoutModal
+                isOpen={payoutFor !== null}
+                onClose={() => setPayoutFor(null)}
+                onSuccess={() => {
+                    setPayoutFor(null);
+                    load(currentPage, true);
+                }}
+                fromInvoice
+                invoiceNumber={payoutFor?.invoice_number}
+                agentId={payoutFor?.agent_id ?? undefined}
+                agentName={payoutFor?.billed_to}
             />
         </div>
     );

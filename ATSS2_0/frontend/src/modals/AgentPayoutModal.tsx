@@ -13,6 +13,28 @@ interface AgentPayoutModalProps {
     onSuccess: () => void;
     agentId?: number;
     agentName?: string;
+    /**
+     * Raised from an agent invoice rather than entered by hand.
+     *
+     * The operator is recording that this invoice was settled, so only the agent
+     * and the invoice number are asked for — payout type, amount, proof and
+     * remarks are hidden and sent empty. The API relaxes its own requirements
+     * for the same reason when `from_invoice` is set.
+     */
+    fromInvoice?: boolean;
+    /** The invoice number, used as the reference and shown read-only. */
+    invoiceNumber?: string;
+    /**
+     * Approving a payout that already exists rather than raising a new one.
+     *
+     * Every field is shown and required — this is where the amount, type, proof
+     * and remarks are actually entered for a payout raised from an invoice with
+     * none of them. Saving approves the existing record instead of creating a
+     * second one, so the id is what the details are written against.
+     */
+    approveId?: number;
+    /** Reference of the record being approved, shown read-only. */
+    approveRefNumber?: string;
 }
 
 interface PayoutFormData {
@@ -31,7 +53,11 @@ const AgentPayoutForm: React.FC<{
     onClose: () => void;
     onSuccess: () => void;
     isOpen: boolean;
-}> = ({ agentId, agentName, onClose, onSuccess, isOpen }) => {
+    fromInvoice?: boolean;
+    invoiceNumber?: string;
+    approveId?: number;
+    approveRefNumber?: string;
+}> = ({ agentId, agentName, onClose, onSuccess, isOpen, fromInvoice = false, invoiceNumber, approveId, approveRefNumber }) => {
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
 
     useEffect(() => {
@@ -153,7 +179,7 @@ const AgentPayoutForm: React.FC<{
         total_amount: '',
         remarks: '',
         proof_of_payment: '',
-        payout_type: 'commission'
+        payout_type: 'all'
     });
 
     const getAgentBalances = (agentObj: any) => {
@@ -176,23 +202,57 @@ const AgentPayoutForm: React.FC<{
     // Auto-fill when agentId changes or isOpen triggers
     useEffect(() => {
         if (isOpen) {
-            setSelectedAgentName(agentName || '');
-            setSelectedAgentId(agentId || '');
+            // Which agent this opens on.
+            //
+            // The id is used when the caller has one. An agent invoice for a
+            // SOLO agent carries it; a TEAM invoice does not — its `agent_id` is
+            // null because the invoice is addressed to the team. In that case
+            // the name is matched against the loaded agents instead, so the
+            // dropdown still opens on the right person where the name identifies
+            // one. A team name matches nobody, which is correct: a payout is
+            // made to an agent, and the operator has to say which.
+            const normalise = (value: string) =>
+                value.toLowerCase().replace(/\s+/g, ' ').trim();
+
+            let resolvedId: number | string = agentId || '';
+            let resolvedName = agentName || '';
+
+            if (!resolvedId && agentName && agents.length > 0) {
+                const byName = agents.find(a => normalise(
+                    `${a.first_name || ''} ${a.middle_initial || ''} ${a.last_name || ''}`
+                ) === normalise(agentName)
+                    // Middle initials are rarely written on an invoice, so first
+                    // and last alone are tried as well.
+                    || normalise(`${a.first_name || ''} ${a.last_name || ''}`) === normalise(agentName));
+
+                if (byName) {
+                    resolvedId = byName.id;
+                    resolvedName = `${byName.first_name || ''} ${byName.middle_initial || ''} ${byName.last_name || ''}`
+                        .replace(/\s+/g, ' ').trim();
+                }
+            }
+
+            setSelectedAgentName(resolvedName);
+            setSelectedAgentId(resolvedId);
 
             let initialAmount = '';
-            if (agentId && agents.length > 0) {
-                const selectedAgentObj = agents.find(a => Number(a.id) === Number(agentId));
+            if (resolvedId && agents.length > 0) {
+                const selectedAgentObj = agents.find(a => Number(a.id) === Number(resolvedId));
                 const { total } = getAgentBalances(selectedAgentObj);
                 initialAmount = total > 0 ? String(total) : '';
             }
 
             setFormData({
-                agent_id: agentId || '',
-                ref_number: generateRefNumber(),
-                total_amount: initialAmount,
+                agent_id: resolvedId,
+                // Raised from an invoice: the invoice number IS the reference,
+                // which is what ties the payout back to the document it settles.
+                // Approving keeps the reference the record already carries.
+                ref_number: approveRefNumber
+                    || (fromInvoice && invoiceNumber ? invoiceNumber : generateRefNumber()),
+                total_amount: fromInvoice ? '' : initialAmount,
                 remarks: '',
                 proof_of_payment: '',
-                payout_type: 'commission'
+                payout_type: 'all'
             });
             setImageFile(null);
             setImagePreview(null);
@@ -205,7 +265,7 @@ const AgentPayoutForm: React.FC<{
             setImageFile(null);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isOpen, agentId, agentName, agents]);
+    }, [isOpen, agentId, agentName, agents, fromInvoice, invoiceNumber, approveRefNumber]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
@@ -260,6 +320,30 @@ const AgentPayoutForm: React.FC<{
     };
 
     const handleSave = async () => {
+        // Approving asks for everything, so everything is checked. It does not
+        // run the balance test below: the figure being entered is what the
+        // approver is settling, and the balance has not moved yet.
+        if (approveId) {
+            if (!formData.total_amount || Number(formData.total_amount) <= 0 || !formData.remarks || !imageFile) {
+                setError('Amount, proof, and remarks are required to approve.');
+                return;
+            }
+            await submit();
+            return;
+        }
+
+        // Only the agent and the reference are asked for when this came from an
+        // invoice, so only those can be checked. The balance test below is
+        // skipped for the same reason: there is no amount to test.
+        if (fromInvoice) {
+            if (!formData.agent_id || !formData.ref_number) {
+                setError('Agent and reference number are required.');
+                return;
+            }
+            await submit();
+            return;
+        }
+
         if (!formData.agent_id || !formData.ref_number || !formData.total_amount || !formData.remarks || !imageFile) {
             setError('Agent, reference number, amount, proof, and remarks are required.');
             return;
@@ -279,6 +363,12 @@ const AgentPayoutForm: React.FC<{
             setError(`Payout amount cannot exceed available balance for the selected type (₱${Number(maxAvailable).toLocaleString(undefined, { minimumFractionDigits: 2 })}).`);
             return;
         }
+
+        await submit();
+    };
+
+    /** The write itself, shared by both paths above. */
+    const submit = async () => {
         setLoading(true);
         setError(null);
 
@@ -313,9 +403,23 @@ const AgentPayoutForm: React.FC<{
               // buckets would be left untouched while the balance was debited.
               type: formData.payout_type,
               job_order_ids: [],
-              ...(currentUser?.organization_id ? { organization_id: currentUser.organization_id } : {})
+              ...(currentUser?.organization_id ? { organization_id: currentUser.organization_id } : {}),
+              // Tells the API this came from an invoice, which is what relaxes
+              // its requirement for the four fields the form did not ask for.
+              ...(fromInvoice ? { from_invoice: true } : {}),
             };
-            const response = await apiClient.post('/commissions/history', payload);
+
+            // Approving writes these details onto the record that already exists
+            // and applies it. Posting to /commissions/history instead would raise
+            // a SECOND payout beside the one being approved.
+            const response = approveId
+                ? await apiClient.post(`/commissions/history/${approveId}/approve`, {
+                    total_amount: formData.total_amount,
+                    type: formData.payout_type,
+                    remarks: formData.remarks,
+                    proof_of_payment: proofUrl,
+                })
+                : await apiClient.post('/commissions/history', payload);
 
             if ((response.data as any).success) {
                 onSuccess();
@@ -336,7 +440,10 @@ const AgentPayoutForm: React.FC<{
 
     // "All Balance" cashes out every bucket, so the amount is the agent's whole
     // balance and is not the operator's to change.
+    // The only payout type there is now — but the field is still editable when
+    // approving, so the lock is expressed as "locked" rather than "is all".
     const isAllBalance = formData.payout_type === 'all';
+    const amountLocked = isAllBalance && !approveId;
 
     const inputClass = `w-full px-3 py-2.5 rounded-lg border text-sm transition-all duration-200 outline-none focus:ring-2 focus:ring-opacity-50 ${isDarkMode
         ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500 focus:ring-gray-600 focus:border-gray-600'
@@ -362,7 +469,16 @@ const AgentPayoutForm: React.FC<{
             primaryAction={{
                 label: 'Save',
                 onClick: handleSave,
-                disabled: loading || !formData.agent_id || !formData.total_amount || Number(formData.total_amount) <= 0 || Number(formData.total_amount) > availableTotal || !formData.remarks || !imageFile
+                // On an invoice payout only the agent and the reference exist,
+                // so the fields the form no longer shows cannot gate Save.
+                // Approving needs every field but not the balance ceiling: the
+                // amount being entered is what is being settled, and no money
+                // has moved yet for it to exceed.
+                disabled: loading || !formData.agent_id || (approveId
+                    ? (!formData.total_amount || Number(formData.total_amount) <= 0 || !formData.remarks || !imageFile)
+                    : fromInvoice
+                        ? !formData.ref_number
+                        : (!formData.total_amount || Number(formData.total_amount) <= 0 || Number(formData.total_amount) > availableTotal || !formData.remarks || !imageFile))
             }}
         >
             <div className="space-y-5">
@@ -437,7 +553,8 @@ const AgentPayoutForm: React.FC<{
                     </div>
                 )}
 
-                {/* Payout Type */}
+                {/* Payout Type — not asked for on an invoice payout. */}
+                {!fromInvoice && (
                 <div>
                     <label className={labelClass}>Payout Type <span className="text-red-500">*</span></label>
                     <select
@@ -446,15 +563,14 @@ const AgentPayoutForm: React.FC<{
                         onChange={handleInputChange}
                         className={inputClass}
                     >
-                        {/* Commission earnings and the spendable balance are
-                            separate buckets, so each is cashed out on its own. */}
-                        <option value="commission">Commission</option>
-                        <option value="balance">Balance</option>
-                        <option value="incentives_payout">Incentives</option>
-                        <option value="Bonus_payout">Bonus</option>
+                        {/* One option only: a payout cashes out every bucket the
+                            agent holds. The per-bucket choices are gone, so the
+                            amount is always the whole balance and there is no
+                            partial settlement to reconcile later. */}
                         <option value="all">All Balance</option>
                     </select>
                 </div>
+                )}
 
                 {/* Reference Number */}
                 <div>
@@ -468,12 +584,13 @@ const AgentPayoutForm: React.FC<{
                     />
                 </div>
 
-                {/* Total Amount
+                {/* Total Amount — not asked for on an invoice payout.
                     Locked on "All Balance": that option means every bucket is
                     being cashed out, so the figure is the agent's whole balance
                     and is filled in automatically. A typed-down amount would say
                     "all" while paying part, leaving a remainder no bucket
                     accounts for. Pick a specific payout type to enter a figure. */}
+                {!fromInvoice && (
                 <div>
                     <label className={labelClass}>Total Amount <span className="text-red-500">*</span></label>
                     <input
@@ -483,21 +600,28 @@ const AgentPayoutForm: React.FC<{
                         min="0"
                         value={formData.total_amount}
                         onChange={handleInputChange}
-                        readOnly={isAllBalance}
-                        className={`${inputClass}${isAllBalance ? ' cursor-not-allowed opacity-75' : ''}`}
+                        // Locked when raising a payout, since All Balance means
+                        // the whole balance and the figure is filled in. NOT
+                        // locked when approving: that is where the amount is
+                        // actually decided, and an agent whose balance already
+                        // reads zero could otherwise never be approved at all.
+                        readOnly={amountLocked}
+                        className={`${inputClass}${amountLocked ? ' cursor-not-allowed opacity-75' : ''}`}
                         placeholder="0.00"
-                        title={isAllBalance
-                            ? 'The full balance is paid out on "All Balance". Choose another payout type to enter an amount.'
+                        title={amountLocked
+                            ? 'A payout cashes out the agent\'s whole balance, so the amount is filled in automatically.'
                             : undefined}
                     />
-                    {isAllBalance && (
+                    {amountLocked && (
                         <p className={`text-[11px] mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                             Paying the agent's full balance — amount is set automatically.
                         </p>
                     )}
                 </div>
+                )}
 
-                {/* Proof — Image Upload */}
+                {/* Proof — not asked for on an invoice payout. */}
+                {!fromInvoice && (
                 <div>
                     <label className={labelClass}>Proof <span className="text-red-500">*</span></label>
                     <div
@@ -546,8 +670,10 @@ const AgentPayoutForm: React.FC<{
                         Image will be saved to Google Drive automatically
                     </p>
                 </div>
+                )}
 
-                {/* Remarks */}
+                {/* Remarks — not asked for on an invoice payout. */}
+                {!fromInvoice && (
                 <div>
                     <label className={labelClass}>Remarks <span className="text-red-500">*</span></label>
                     <textarea
@@ -558,6 +684,7 @@ const AgentPayoutForm: React.FC<{
                         placeholder="Any additional details..."
                     />
                 </div>
+                )}
             </div>
         </ModalUITemplate>
     );

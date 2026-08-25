@@ -234,6 +234,17 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const revalidateInFlight = isFromCache && isPaySummaryLoading;
     const revalidateFailed = isFromCache && !isPaySummaryLoading;
 
+    // Nothing is in flight any more and still no figure arrived.
+    //
+    // The skeleton below used to be the only alternative to a known balance, so a
+    // pay-summary that resolved with an empty body — which records no error, the store
+    // just clears its loading flag — left the amount shimmering for good on a fast
+    // connection with every request long finished. Once nothing is loading, none is
+    // coming: say so, and let the customer pull to refresh rather than watch an
+    // animation that will never resolve.
+    const balanceRequestsSettled = !isPaySummaryLoading && !contextLoading;
+    const balanceUnavailable = !balanceKnown && balanceRequestsSettled;
+
     // The summary's flag is what labels the button on load; the fuller pendingPayment
     // object only exists once Pay Now has been tapped and fetched the payment URL.
     const hasPendingPayment = !!pendingPayment?.payment_url || !!paySummary?.hasPendingPayment;
@@ -694,6 +705,16 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                             >
                                                 {formatCurrency(balance)}
                                             </Text>
+                                        ) : balanceUnavailable ? (
+                                            // Every request has finished without a figure.
+                                            // A shimmer here would never resolve.
+                                            <Text
+                                                numberOfLines={1}
+                                                allowFontScaling={false}
+                                                style={[styles.balanceAmountText, { fontSize: isShort ? 20 : 24 }]}
+                                            >
+                                                Unavailable
+                                            </Text>
                                         ) : (
                                             <Skeleton light width={isShort ? 150 : 180} height={isShort ? 34 : 42} radius={10} style={{ marginTop: 4 }} />
                                         )}
@@ -703,6 +724,11 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                                         <View style={styles.dueDateContainer}>
                                             {balanceKnown ? (
                                                 <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>{dueDateString}</Text></Text>
+                                            ) : balanceUnavailable ? (
+                                                // Same reasoning as the amount above: a
+                                                // shimmer with nothing left in flight
+                                                // never resolves.
+                                                <Text allowFontScaling={false} style={styles.infoText}>Due Date: <Text allowFontScaling={false} style={styles.infoValue}>—</Text></Text>
                                             ) : (
                                                 <Skeleton light width={110} height={12} radius={6} />
                                             )}

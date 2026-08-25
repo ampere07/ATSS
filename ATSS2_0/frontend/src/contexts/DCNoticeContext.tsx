@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import { dcNoticeService, DCNotice } from '../services/dcNoticeService';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface DCNoticeContextType {
     dcNoticeRecords: DCNotice[];
@@ -26,6 +27,15 @@ interface DCNoticeProviderProps {
 }
 
 export const DCNoticeProvider: React.FC<DCNoticeProviderProps> = ({ children }) => {
+    const { can } = usePermissions();
+
+    // This provider wraps the whole app shell in Dashboard.tsx, so it mounts for
+    // every role — including a customer, who has no DC Notice page to open and
+    // whose request comes back 403. Ask before fetching rather than fetching and
+    // swallowing the failure: the call pulls the entire table, and a role that
+    // cannot open the page has no use for a row of it.
+    const canRead = can('dc-notice');
+
     const [dcNoticeRecords, setDCNoticeRecords] = useState<DCNotice[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
@@ -33,6 +43,10 @@ export const DCNoticeProvider: React.FC<DCNoticeProviderProps> = ({ children }) 
     const [isFullyLoaded, setIsFullyLoaded] = useState<boolean>(false);
 
     const fetchDCNoticeRecords = useCallback(async (force = false, silent = false) => {
+        if (!canRead) {
+            return;
+        }
+
         // If we have data and not forced, skip fetching
         if (!force && dcNoticeRecords.length > 0) {
             return;
@@ -103,7 +117,7 @@ export const DCNoticeProvider: React.FC<DCNoticeProviderProps> = ({ children }) 
         } finally {
             setIsLoading(false);
         }
-    }, [dcNoticeRecords.length]);
+    }, [dcNoticeRecords.length, canRead]);
 
     const refreshDCNoticeRecords = useCallback(async () => {
         await fetchDCNoticeRecords(true, false);

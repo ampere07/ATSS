@@ -225,7 +225,15 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     // The other failure: no snapshot to fall back on either, so there is nothing to show
     // at all. This used to leave the card shimmering and the button reading LOADING for
     // good, with no way to try again short of reloading the page.
-    const loadFailedOutright = !!loadError && !balanceKnown;
+    //
+    // Settled-ness decides this, NOT whether an exception was thrown. A pay-summary
+    // request that resolves with an empty body records no error — the store only clears
+    // its loading flag — so keying off loadError alone left the balance shimmering
+    // indefinitely on a fast connection with both requests long finished. Whatever the
+    // cause, once nothing is in flight and no figure arrived, none is coming: say so and
+    // offer the retry instead of animating for ever.
+    const balanceRequestsSettled = !isPaySummaryLoading && !isDetailLoading;
+    const loadFailedOutright = !balanceKnown && (balanceRequestsSettled || !!loadError);
 
     // The summary's flag is what labels the button on load; the fuller pendingPayment
     // object only exists once Pay Now has been clicked and fetched the payment URL.

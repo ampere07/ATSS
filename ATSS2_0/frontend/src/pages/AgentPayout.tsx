@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { DollarSign, Download, Filter, Search, Loader2, TrendingUp, Calendar, ArrowUpRight, ArrowDownRight, Clock, Receipt, History, ExternalLink, ChevronRight, ChevronLeft, RefreshCw, Columns, Plus, ChevronUp, ChevronDown, GripVertical, Columns3, ArrowUp, ArrowDown, ChevronsLeft, ChevronsRight, Gift } from 'lucide-react';
+import { DollarSign, Download, Filter, Search, Loader2, TrendingUp, Calendar, ArrowUpRight, ArrowDownRight, Clock, Receipt, History, ExternalLink, ChevronRight, ChevronLeft, RefreshCw, Columns, ChevronUp, ChevronDown, GripVertical, Columns3, ArrowUp, ArrowDown, ChevronsLeft, ChevronsRight, Gift } from 'lucide-react';
 import { exportToCSV, exportToPDF } from '../utils/exportUtils';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useCommissionStore } from '../store/commissionStore';
@@ -12,6 +12,7 @@ import { Agent, User } from '../types/api';
 import { userService } from '../services/userService';
 import apiClient from '../config/api';
 import { usePermissions } from '../hooks/usePermissions';
+import { agentInvoiceService } from '../services/agentInvoiceService';
 
 interface ColumnDefinition {
     key: string;
@@ -204,6 +205,9 @@ const AgentPayout: React.FC = () => {
     // True while an approve/reject request is in flight, so the buttons cannot be
     // pressed twice and apply a payout more than once.
     const [approvalPending, setApprovalPending] = useState(false);
+    // The pending payout being approved, or null. Approving opens the payout
+    // form so its details can be entered before it is applied.
+    const [approveRecord, setApproveRecord] = useState<any | null>(null);
     const [agentList, setAgentList] = useState<User[]>([]);
     const [selectedAgentId, setSelectedAgentId] = useState<string | number>('all');
     const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
@@ -218,8 +222,6 @@ const AgentPayout: React.FC = () => {
     const [isRefreshingManual, setIsRefreshingManual] = useState(false);
     const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
     const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
-    const [showAgentPayoutModal, setShowAgentPayoutModal] = useState(false);
-    const [payoutAgent, setPayoutAgent] = useState<Agent | null>(null);
     const { agents, fetchAgents } = useAgentStore();
     const [columnOrderPayouts, setColumnOrderPayouts] = useState<string[]>(
         () => mergeColumnOrder(localStorage.getItem('agentPayoutPayoutColumnOrder'), payoutColumns)
@@ -431,15 +433,9 @@ const AgentPayout: React.FC = () => {
         setDragOverColumn(null);
     };
 
-    const handleOpenPayout = () => {
-        setPayoutAgent(null);
-        setShowAgentPayoutModal(true);
-    };
-
-    const handleSelectAgentForPayout = (agent: Agent) => {
-        setPayoutAgent(agent);
-        setShowAgentPayoutModal(true);
-    };
+    // No handler raises a payout from this page any more. One is raised from the
+    // agent invoice it settles, which is what gives it a reference tying back to
+    // that document; this page approves and rejects what already exists.
 
     const sortedData = React.useMemo(() => {
         const rawData = payoutHistory;
@@ -468,7 +464,12 @@ const AgentPayout: React.FC = () => {
         const normalizedQuery = searchTerm.toLowerCase().replace(/\s+/g, '');
         return sortedData.filter((row: any) => {
             if (selectedAgentId !== 'all') {
-                if (row.agent_id && String(row.agent_id) !== String(selectedAgentId)) return false;
+                // Compared as strings because the id arrives as a number from
+                // the API and as whatever the sidebar button held. A row with no
+                // agent_id belongs to no agent, so it is excluded rather than
+                // shown under every one of them — which is what the old
+                // `row.agent_id &&` guard did.
+                if (String(row.agent_id ?? '') !== String(selectedAgentId)) return false;
             }
 
             const checkValue = (val: any): boolean => {
@@ -491,7 +492,9 @@ const AgentPayout: React.FC = () => {
 
             return matchesSearch;
         });
-    }, [sortedData, searchTerm, dateFrom, dateTo]);
+        // selectedAgentId belongs here: the filter reads it, so leaving it out
+        // meant picking an agent recomputed nothing and the list never changed.
+    }, [sortedData, searchTerm, dateFrom, dateTo, selectedAgentId]);
 
     const currentData = filteredData;
     const totalPages = Math.ceil(currentData.length / itemsPerPage);
@@ -514,16 +517,60 @@ const AgentPayout: React.FC = () => {
      * The approver is never sent from here — the server records the signed-in
      * user, exactly as it does when a transaction is approved.
      */
+    /**
+     * Open the agent invoice a payout settled, by its number.
+     *
+     * A payout raised from an invoice carries that invoice's number as its
+     * reference, which is the only link back to it — there is no invoice id on
+     * the payout row. The number is searched for and matched exactly, so a
+     * reference that merely contains another invoice's number cannot open the
+     * wrong document.
+     *
+     * Best effort: a hand-entered payout has a random reference matching no
+     * invoice, and nothing opens. That is not a failure worth interrupting the
+     * approver with, so it is logged rather than raised.
+     */
+    const openInvoicePdfByNumber = async (refNumber: string) => {
+        try {
+            const list = await agentInvoiceService.list({ search: refNumber, per_page: 10 });
+            const invoice = (list?.data || []).find(i => i.invoice_number === refNumber);
+
+            if (!invoice) {
+                console.info('[AgentPayout] No agent invoice matches the reference', refNumber);
+                return;
+            }
+
+            const source = await agentInvoiceService.pdfBlob(invoice.id, false);
+
+            if (source.kind === 'url') {
+                window.open(source.url, '_blank', 'noopener');
+                return;
+            }
+
+            const url = window.URL.createObjectURL(source.blob);
+            window.open(url, '_blank', 'noopener');
+            window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+        } catch (err) {
+            console.error('[AgentPayout] Could not open the invoice PDF:', err);
+        }
+    };
+
     const handleApproval = async (record: any, action: 'approve' | 'reject') => {
         if (approvalPending) return;
 
-        // This screen lists the commission ledger; bonus records are approved
-        // from the Bonus History tab on the Commission page.
-        // Spelled out rather than interpolated, so each endpoint can be found by
-        // searching for it.
-        const url = action === 'approve'
-            ? `/commissions/history/${record.id}/approve`
-            : `/commissions/history/${record.id}/reject`;
+        // Approving collects the payout's details first — amount, type, proof
+        // and remarks — because a payout raised from an invoice was recorded
+        // without them. The modal posts to the same approve endpoint once they
+        // are entered, so this returns rather than approving with nothing.
+        if (action === 'approve') {
+            setApproveRecord(record);
+            return;
+        }
+
+        // Only a rejection reaches here — approving returned above to collect
+        // its details first. This screen lists the commission ledger; bonus
+        // records are rejected from the Bonus History tab on the Commission page.
+        const url = `/commissions/history/${record.id}/reject`;
 
         setApprovalPending(true);
         try {
@@ -571,29 +618,12 @@ const AgentPayout: React.FC = () => {
             {/* Sidebar */}
             <div className={`hidden md:flex border-r flex-shrink-0 flex-col relative ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`} style={{ width: `${sidebarWidth}px` }}>
                 <div className={`p-4 border-b flex-shrink-0 ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-                    <div className="flex items-center justify-between mb-1">
+                    {/* No Add here: a payout is raised from the agent invoice it
+                        settles, so the reference ties back to that document. */}
+                    <div className="flex items-center mb-1">
                         <h2 className={`text-lg font-semibold uppercase ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
                             PAYOUT HISTORY
                         </h2>
-                        <button
-                            onClick={handleOpenPayout}
-                            className="px-3 py-1.5 rounded text-white text-sm font-medium flex items-center gap-1.5 transition-colors shadow-sm"
-                            style={{ backgroundColor: colorPalette?.primary || '#ef4444' }}
-                            onMouseEnter={(e) => {
-                                if (colorPalette?.accent) {
-                                    e.currentTarget.style.backgroundColor = colorPalette.accent;
-                                } else {
-                                    e.currentTarget.style.backgroundColor = '#dc2626';
-                                }
-                            }}
-                            onMouseLeave={(e) => {
-                                e.currentTarget.style.backgroundColor = colorPalette?.primary || '#ef4444';
-                            }}
-                            title="New Payout"
-                        >
-                            <Plus size={14} />
-                            Add
-                        </button>
                     </div>
                 </div>
 
@@ -692,9 +722,21 @@ const AgentPayout: React.FC = () => {
                 {selectedAgentId !== 'all' && (
                     <div className={`p-4 border-b flex-shrink-0 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
                         {(() => {
-                            const selectedAgent = agentList.find(a => a.id === selectedAgentId);
+                            // Compared as numbers: the id comes back from the API
+                            // as a number and a strict === against a string id
+                            // silently found nobody, which read as every card
+                            // being zero.
+                            const selectedAgent = agentList.find(a => Number(a.id) === Number(selectedAgentId));
                             const bal = selectedAgent?.agent_balance;
-                            const balance = bal?.balance || 0;
+                            // COMMISSION, not `balance`. What an agent has earned
+                            // from approved job orders lives in commission_value;
+                            // `commission` is the per-referral rate and `balance`
+                            // is a separate spendable bucket that is 0 for every
+                            // agent here. Showing balance meant the cards read
+                            // zero while the money sat in the column beside it.
+                            // These four now match the payout modal's tiles.
+                            // @ts-ignore
+                            const commission = bal?.commission_value || 0;
                             const incentives = bal?.incentives || 0;
                             // @ts-ignore
                             const bonus = bal?.bonus || bal?.Bonus || 0;
@@ -713,7 +755,7 @@ const AgentPayout: React.FC = () => {
 
                             return (
                                 <>
-                                    {card('Balance', balance)}
+                                    {card('Commission', commission)}
                                     {card('Incentives', incentives)}
                                     {card('Bonus', bonus)}
                                     {card('Achievement', achievement)}
@@ -738,17 +780,6 @@ const AgentPayout: React.FC = () => {
                                 style={searchTerm ? { borderColor: colorPalette?.primary || '#7c3aed' } : {}}
                             />
                         </div>
-
-                        {isMobile && (
-                            <button
-                                onClick={handleOpenPayout}
-                                className="p-2 rounded border transition-colors flex-shrink-0 text-white"
-                                style={{ backgroundColor: colorPalette?.primary || '#ef4444', borderColor: colorPalette?.primary || '#ef4444' }}
-                                title="Add Record"
-                            >
-                                <Plus size={18} />
-                            </button>
-                        )}
 
                         {isMobile && (
                             <button
@@ -1021,16 +1052,37 @@ const AgentPayout: React.FC = () => {
                 </div>
             )}
 
-            {/* Agent Payout Modal */}
+            {/* Approving a pending payout: the same form, every field required,
+                writing its details onto the record and applying it. */}
             <AgentPayoutModal
-                isOpen={showAgentPayoutModal}
-                onClose={() => setShowAgentPayoutModal(false)}
+                isOpen={approveRecord !== null}
+                onClose={() => setApproveRecord(null)}
                 onSuccess={() => {
-                    setShowAgentPayoutModal(false);
+                    const settled = approveRecord;
+                    setApproveRecord(null);
+
+                    // The record on screen is now Approved, and the detail pane
+                    // hides Approve/Reject for anything that is not Pending — so
+                    // marking it here is what takes the buttons away, without
+                    // closing the pane the approver is reading.
+                    setSelectedRecord((current: any) =>
+                        current && current.id === settled?.id
+                            ? { ...current, status: 'Approved' }
+                            : current
+                    );
+
                     handleRefresh();
+
+                    // The invoice this payout settled, opened so the approver
+                    // sees the document they just paid.
+                    if (settled?.ref_number) {
+                        openInvoicePdfByNumber(String(settled.ref_number));
+                    }
                 }}
-                agentId={payoutAgent?.id}
-                agentName={payoutAgent?.team_name}
+                approveId={approveRecord?.id}
+                approveRefNumber={approveRecord?.ref_number}
+                agentId={approveRecord?.agent_id}
+                agentName={approveRecord?.agent_name}
             />
         </div>
     );

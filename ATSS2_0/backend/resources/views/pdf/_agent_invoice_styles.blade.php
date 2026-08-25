@@ -67,7 +67,12 @@
             font-size: 10px;
             color: #1a2e46;
         }
-        .page-number:after { content: counter(page); }
+        /* The figure itself is NOT written here.
+           counter(pages) resolves to 0 during layout — the total is not known
+           until the document has been rendered — so every sheet came out
+           reading "Page 1 of 0". AgentInvoicePdfService::stampPageNumbers()
+           writes it onto the canvas afterwards instead, where Dompdf can
+           substitute the real count. This rule only reserves the space. */
 
         /* ── Header ─────────────────────────────────────────────────────── */
         /* The supplied artwork carries the ATSS FIBER mark and the watermark,
@@ -87,9 +92,11 @@
         }
 
         .banner {
-            /* Top margin gives the banner room away from the header artwork;
-               38px is the 28pt the sample generator uses, at Dompdf's 96dpi. */
-            margin: 38px 0 10px 0;
+            /* The gap to the header artwork, tightened from 38px. That 38 was
+               the sample generator's 28pt, but it cost more height than the
+               design needed and was part of why a ten-row invoice pushed its
+               totals block onto a second sheet. */
+            margin: 16px 0 8px 0;
             text-align: center;
             color: #1a2e46;
             font-family: {{ $fonts['title'] ? 'InvoiceTitle, ' : '' }}Helvetica, Arial, sans-serif;
@@ -103,7 +110,7 @@
 
         /* The date sits hard left; the team or agent name is centred across the
            full width of the page, not merely against the date. */
-        .meta { width: 100%; border-collapse: collapse; margin-bottom: 12px; position: relative; }
+        .meta { width: 100%; border-collapse: collapse; margin-bottom: 8px; position: relative; }
         .meta td {
             color: #d0202f;
             font-family: {{ $fonts['meta'] ? 'InvoiceMeta, ' : '' }}Helvetica, Arial, sans-serif;
@@ -137,7 +144,7 @@
             font-size: 10px;
             font-weight: {{ $fonts['head'] ? 'normal' : 'bold' }};
             letter-spacing: 2px;
-            padding: 12px 14px;
+            padding: 7px 14px;
             text-align: center;
         }
         table.items thead th.desc { text-align: left; padding-left: 22px; }
@@ -145,7 +152,7 @@
         table.items tbody td {
             border: 1px solid #1a2e46;
             font-family: {{ $fonts['body'] ? 'InvoiceBody, ' : '' }}Helvetica, Arial, sans-serif;
-            padding: 11px 14px;
+            padding: 5px 14px;
             text-align: center;
             font-size: 11px;
         }
@@ -155,7 +162,7 @@
             display: block;
             color: #6b7280;
             font-size: 8px;
-            margin-top: 2px;
+            margin-top: 1px;
         }
 
         /* Break between one page of rows and the next. An empty block with

@@ -220,21 +220,43 @@ class CommissionController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
+            // A payout raised from an agent invoice carries only the agent and
+            // the invoice number: the operator is recording that the invoice was
+            // settled, not entering a payment by hand. The amount, type, proof
+            // and remarks are not asked for and so cannot be required.
+            //
+            // Everything else still is. agent_id and ref_number identify the
+            // record and are what make it traceable back to the invoice, so
+            // neither is relaxed.
+            $fromInvoice = $request->boolean('from_invoice');
+
+            $optional = $fromInvoice ? 'nullable' : 'required';
+
             $validated = $request->validate([
                 'agent_id'      => 'required|integer',
                 'ref_number'    => 'required|string|max:100',
-                'total_amount'  => 'required|numeric|min:0',
-                'remarks'       => 'required|string',
-                'proof_of_payment' => 'required|string',
+                'total_amount'  => $optional . '|numeric|min:0',
+                'remarks'       => $optional . '|string',
+                'proof_of_payment' => $optional . '|string',
                 'job_order_ids' => 'nullable|array',
                 'job_order_ids.*' => 'integer',
                 'type'          => 'nullable|string|max:50',
+                'from_invoice'  => 'nullable|boolean',
             ]);
 
             $jobOrderIds = $validated['job_order_ids'] ?? [];
-            unset($validated['job_order_ids']);
+            unset($validated['job_order_ids'], $validated['from_invoice']);
 
             $validated['type'] = $validated['type'] ?? 'commission';
+
+            // The columns are written either way, so an omitted field becomes an
+            // explicit zero or empty string rather than a NULL the reports would
+            // have to special-case.
+            if ($fromInvoice) {
+                $validated['total_amount']     = $validated['total_amount'] ?? 0;
+                $validated['remarks']          = $validated['remarks'] ?? '';
+                $validated['proof_of_payment'] = $validated['proof_of_payment'] ?? '';
+            }
             
             $customerNamesStr = null;
             if (!empty($jobOrderIds)) {
@@ -246,7 +268,7 @@ class CommissionController extends Controller
             }
             
             $validated['commission_id_list'] = $customerNamesStr;
-            $validated['created_by'] = $user->full_name ?? $user->email_address ?? 'System';
+            $validated['created_by'] = $this->creatorIdentity($user);
             $validated['organization_id'] = $user->organization_id ?? null;
 
             // Recorded as Pending, exactly like a transaction. Nothing is applied
@@ -405,7 +427,7 @@ class CommissionController extends Controller
             ]);
 
             $validated['type'] = $validated['type'] ?? 'Bonus_payout';
-            $validated['created_by'] = $user->full_name ?? $user->email_address ?? 'System';
+            $validated['created_by'] = $this->creatorIdentity($user);
             $validated['organization_id'] = $user->organization_id ?? null;
 
             // Recorded as Pending, exactly like a transaction. The agent's bonus
@@ -832,6 +854,19 @@ class CommissionController extends Controller
     }
 
     /**
+     * The identity recorded against raising a payout.
+     *
+     * The email address, not the display name, matching approverIdentity()
+     * above: an account's name can be edited afterwards and two people can
+     * share one, so a name does not reliably say who raised a record. The
+     * address does, and it is what the two columns are read side by side for.
+     */
+    private function creatorIdentity($user): string
+    {
+        return $user->email_address ?? $user->email ?? 'System';
+    }
+
+    /**
      * Apply a commission-ledger payout to the agent's balances.
      *
      * This is the movement that used to happen the moment a payout was saved. It
@@ -892,6 +927,51 @@ class CommissionController extends Controller
             // which is where an approved job order credits its payment.
             $agentBalance->update(['commission_value' => max(0, $commission - $amount)]);
         }
+    }
+
+    /**
+     * Settle the one invoice a payout names as its reference.
+     *
+     * The counterpart of settleAgentInvoicesFor() for the case where the payout
+     * knows which invoice it is paying: the invoice is marked Paid and the job
+     * orders on its lines follow, read from `agent_invoice_customers` so the
+     * invoice itself says what it settled.
+     *
+     * An invoice already Paid is left alone and reported as 0, so approving twice
+     * cannot restate it.
+     *
+     * @return array{invoices: int, job_orders: int}
+     */
+    private function settleNamedInvoice(AgentInvoice $invoice, AgentCommissionHistory $history): array
+    {
+        if ($invoice->status === AgentInvoice::STATUS_PAID) {
+            return ['invoices' => 0, 'job_orders' => 0];
+        }
+
+        $jobOrderIds = AgentInvoiceCustomer::where('agent_invoice_id', $invoice->id)
+            ->whereNotNull('job_order_id')
+            ->pluck('job_order_id')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        $invoice->forceFill([
+            'status'     => AgentInvoice::STATUS_PAID,
+            'updated_by' => 'agent-payout #' . $history->id,
+        ])->save();
+
+        $jobOrdersPaid = 0;
+        if ($jobOrderIds !== []) {
+            $jobOrdersPaid = JobOrder::whereIn('id', $jobOrderIds)
+                ->where(function ($q) {
+                    $q->whereNull('commission_status')
+                      ->orWhere('commission_status', '!=', 'Paid');
+                })
+                ->update(['commission_status' => 'Paid']);
+        }
+
+        return ['invoices' => 1, 'job_orders' => $jobOrdersPaid];
     }
 
     /**
@@ -1016,6 +1096,28 @@ class CommissionController extends Controller
                 ], 400);
             }
 
+            // Details supplied at approval time.
+            //
+            // A payout raised from an agent invoice is recorded with only the
+            // agent and the invoice number — the amount, type, proof and remarks
+            // are asked for here instead, when somebody is actually signing it
+            // off. They are written before the movement is applied, so the
+            // balance moves by the figure just entered rather than the zero the
+            // record was created with.
+            $details = $request->validate([
+                'total_amount'     => 'nullable|numeric|min:0',
+                'type'             => 'nullable|string|max:50',
+                'remarks'          => 'nullable|string',
+                'proof_of_payment' => 'nullable|string',
+            ]);
+
+            $details = array_filter($details, fn ($v) => $v !== null && $v !== '');
+
+            if ($details !== []) {
+                $history->forceFill($details)->save();
+                $history->refresh();
+            }
+
             $this->applyCommissionMovement($history);
 
             // The referrals this payout settles are marked paid now, so they can
@@ -1034,7 +1136,16 @@ class CommissionController extends Controller
             // rejected one must leave no trace. Marking invoices Paid at that
             // point would settle them against a payment that may never happen.
             $settled = ['invoices' => 0, 'job_orders' => 0];
-            if ($history->type === 'all') {
+
+            // A payout raised from an invoice carries that invoice's number as
+            // its reference, so exactly one invoice is settled — the one being
+            // paid — rather than every outstanding one the owner has. Checked
+            // first, because it is the more specific answer of the two.
+            $named = AgentInvoice::where('invoice_number', trim((string) $history->ref_number))->first();
+
+            if ($named) {
+                $settled = $this->settleNamedInvoice($named, $history);
+            } elseif ($history->type === 'all') {
                 $settled = $this->settleAgentInvoicesFor($history);
             }
 

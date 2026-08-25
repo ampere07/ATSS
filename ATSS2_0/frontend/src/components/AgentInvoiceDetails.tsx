@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, ChevronDown, ChevronLeft, ChevronRight, Download, FileText, Loader } from 'lucide-react';
+import { X, ChevronDown, ChevronLeft, ChevronRight, Download, FileText, Loader, DollarSign } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import RelatedDataTable from './RelatedDataTable';
 import { AgentInvoiceRecord } from '../services/agentInvoiceService';
@@ -47,6 +47,8 @@ interface AgentInvoiceDetailsProps {
   onNext?: () => void;
   onViewPdf?: () => void;
   onDownloadPdf?: () => void;
+  /** Opens the payout modal for this invoice. Hidden when not provided. */
+  onPayOut?: () => void;
 }
 
 const AgentInvoiceDetails: React.FC<AgentInvoiceDetailsProps> = ({
@@ -58,6 +60,7 @@ const AgentInvoiceDetails: React.FC<AgentInvoiceDetailsProps> = ({
   onNext,
   onViewPdf,
   onDownloadPdf,
+  onPayOut,
 }) => {
   const [isDarkMode, setIsDarkMode] = useState<boolean>(localStorage.getItem('theme') !== 'light');
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -258,6 +261,16 @@ const AgentInvoiceDetails: React.FC<AgentInvoiceDetailsProps> = ({
 
       {/* Footer actions */}
       <div className={`px-5 py-3 border-t flex items-center justify-end gap-2 flex-shrink-0 ${isDarkMode ? 'border-gray-800 bg-gray-900' : 'border-gray-200 bg-white'}`}>
+        {/* Records that this invoice was settled. The payout form opens with
+            the invoice number already in as its reference. */}
+        {onPayOut && (
+          <button
+            onClick={onPayOut}
+            className={`px-3 py-2 rounded-lg text-sm border transition-colors flex items-center gap-2 mr-auto ${isDarkMode ? 'border-gray-700 text-gray-200 hover:bg-gray-800' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+          >
+            <DollarSign className="h-4 w-4" /> Pay Out
+          </button>
+        )}
         <button
           onClick={onViewPdf}
           disabled={isPdfPending}

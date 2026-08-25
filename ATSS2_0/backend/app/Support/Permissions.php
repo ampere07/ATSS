@@ -151,6 +151,9 @@ final class Permissions
             'job-order.tech-edit',
             'job-order.admin-edit',
             'job-order.attachment',
+            // Recording a pre-installation visit: what lets a referral earn
+            // quota progress before the install itself is finished.
+            'job-order.pre-install',
         ],
         'customer' => [
             'customer.so-request',
@@ -216,6 +219,9 @@ final class Permissions
         'agent-invoices' => [
             'agent-invoices.generate',
             'agent-invoices.status',
+            // Raising the payout that settles an invoice — the money side,
+            // granted apart from merely setting a status by hand.
+            'agent-invoices.payout',
         ],
 
         // The three list pages added since the Role modal was written. Each has
@@ -271,6 +277,7 @@ final class Permissions
             'application-management.move-to-jo', 'application-management.quick-status',
             'job-order',
             'job-order.approve', 'job-order.failed', 'job-order.admin-edit', 'job-order.attachment',
+            'job-order.pre-install',
             'service-order', 'service-order.admin-edit',
             'work-order', 'work-order.manage',
             'lcp-nap-location',
@@ -283,6 +290,7 @@ final class Permissions
             'agent-management',
             'agent-payout', 'agent-payout.approve',
             'agent-invoices', 'agent-invoices.generate', 'agent-invoices.status',
+            'agent-invoices.payout',
             // Inventory
             'inventory',
             'inventory-category-list',
@@ -312,6 +320,8 @@ final class Permissions
             'job-order',
             'job-order.tech-edit',
             'job-order.attachment',
+            // The pre-installation visit is site work.
+            'job-order.pre-install',
             'service-order',
             'service-order.tech-edit',
             // Work orders are a technician's work too. The web sidebar never
@@ -362,6 +372,7 @@ final class Permissions
             'application-management.move-to-jo', 'application-management.quick-status',
             'job-order',
             'job-order.approve', 'job-order.failed', 'job-order.admin-edit', 'job-order.attachment',
+            'job-order.pre-install',
             'service-order', 'service-order.admin-edit',
             'work-order', 'work-order.manage',
             'lcp-nap-location',

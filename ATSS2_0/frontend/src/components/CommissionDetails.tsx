@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
-    X, Info, ExternalLink, Receipt, CheckCircle,
+    X, ExternalLink, Receipt, CheckCircle,
     ChevronRight, ChevronLeft, DollarSign, Calendar,
     User, Hash, MessageSquare, Image as ImageIcon
 } from 'lucide-react';
@@ -171,6 +171,37 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
                 </div>
 
                 <div className="flex items-center space-x-3">
+                    {/* Approve / Reject, ahead of the record arrows.
+                        Offered only while the record is Pending and only to a
+                        viewer permitted to approve — the same test the detail
+                        section used before these moved up here. */}
+                    {!isEarning && (onApprove || onReject) && ((payout as any).status ?? 'Pending') === 'Pending' && (
+                        <div className="flex items-center gap-2">
+                            {onApprove && (
+                                <button
+                                    type="button"
+                                    disabled={approvalPending}
+                                    onClick={() => onApprove(payout)}
+                                    title="Approve this payout and apply it to the agent's balance"
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                                >
+                                    {approvalPending ? 'Working…' : 'Approve'}
+                                </button>
+                            )}
+                            {onReject && (
+                                <button
+                                    type="button"
+                                    disabled={approvalPending}
+                                    onClick={() => onReject(payout)}
+                                    title="Reject this payout. No money is moved."
+                                    className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                                >
+                                    Reject
+                                </button>
+                            )}
+                        </div>
+                    )}
+
                     <div className="flex items-center">
                         <button onClick={onPrevious} disabled={!onPrevious}
                             className={`p-2 rounded transition-colors ${!onPrevious ? 'opacity-50 cursor-not-allowed' : ''} ${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-gray-700' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'}`}
@@ -222,44 +253,6 @@ const CommissionDetails: React.FC<CommissionDetailsProps> = ({
                                 {renderField('Status', (payout as any).status || 'Pending')}
                                 {renderField('Approved By', (payout as any).approved_by || (payout as any).approve_by || 'Not yet approved')}
                                 {renderField('Remarks', payout.remarks || 'No remarks provided')}
-
-                                {/* Approve / Reject — offered only while the record is
-                                    Pending, and only to a viewer permitted to approve.
-                                    Mirrors the Transaction List, where approving is what
-                                    actually applies the money. */}
-                                {(onApprove || onReject) && ((payout as any).status ?? 'Pending') === 'Pending' && (
-                                    <div className={`mt-5 pt-4 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-                                        <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                                            Awaiting Approval
-                                        </p>
-                                        <p className={`text-xs mb-3 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                                            The agent&apos;s balance has not been changed yet. Approving applies
-                                            this payout; rejecting closes it without moving any money.
-                                        </p>
-                                        <div className="flex items-center gap-2">
-                                            {onApprove && (
-                                                <button
-                                                    type="button"
-                                                    disabled={approvalPending}
-                                                    onClick={() => onApprove(payout)}
-                                                    className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 transition-colors"
-                                                >
-                                                    {approvalPending ? 'Working…' : 'Approve'}
-                                                </button>
-                                            )}
-                                            {onReject && (
-                                                <button
-                                                    type="button"
-                                                    disabled={approvalPending}
-                                                    onClick={() => onReject(payout)}
-                                                    className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 transition-colors"
-                                                >
-                                                    Reject
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
 
                                 <div className="mt-4">
                                     <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>Proof of Payment</p>

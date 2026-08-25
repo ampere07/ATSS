@@ -147,7 +147,50 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
         // Started BEFORE the detail request is awaited, so the two are concurrent. This is
         // the whole point: the balance arrives on the short request instead of behind the
         // long one, and Pay Now unlocks as soon as it does.
-        const paySummaryDone = getCustomerPaySummary(usernameOrAccountNo)
+        // One retry before giving up.
+        //
+        // getCustomerPaySummary never throws — it returns null for a refused
+        // request, a timeout and an empty body alike — so a single blip on an
+        // otherwise fast connection ended the balance's only fast path and left
+        // the customer reading "Balance unavailable" with a figure sitting in the
+        // database. The endpoint is a cheap read of one row, so asking twice
+        // costs little and recovers the common case.
+        //
+        // Deliberately one retry, not a loop: if the second attempt fails too,
+        // something is actually wrong and the card should say so rather than
+        // spin.
+        // Three attempts on a short leash, rather than one on a long one.
+        //
+        // The service caps this request at 8s, so the whole sequence answers or
+        // gives up inside ~19s — where a single attempt on apiClient's 60s
+        // default could leave the balance shimmering for a minute. The balance
+        // is the one figure the page exists to show: everything else can arrive
+        // late, but without this the customer cannot pay.
+        //
+        // Backed off a little between tries so a server catching its breath is
+        // given a moment rather than hit three times in a row.
+        const fetchPaySummary = async () => {
+            const waits = [0, 400, 1200];
+
+            for (let attempt = 0; attempt < waits.length; attempt++) {
+                if (waits[attempt] > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
+                }
+
+                const summary = await getCustomerPaySummary(usernameOrAccountNo);
+                if (summary) {
+                    if (attempt > 0) {
+                        console.info('[Dashboard] Pay summary recovered on attempt', attempt + 1);
+                    }
+                    return summary;
+                }
+            }
+
+            console.warn('[Dashboard] Pay summary unavailable after 3 attempts', usernameOrAccountNo);
+            return null;
+        };
+
+        const paySummaryDone = fetchPaySummary()
             .then((summary) => {
                 // isFromCache clears here too. Whichever of the two responses lands first
                 // has confirmed the figure the flag exists to guard, so the card should
@@ -301,7 +344,15 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
         const { fetchedAccountNo, requestedAccountNo } = get();
         const target = fetchedAccountNo || requestedAccountNo;
         if (target) {
-            set({ fetchedAccountNo: null }); // Clear cached ID to force refresh
+            // Both flags are cleared, not just the account.
+            //
+            // fetchCustomerData bails out early while `isLoading` is set, so a
+            // Try again pressed during a stalled request did nothing at all —
+            // the very moment the customer is most likely to press it. Clearing
+            // isLoading here is what makes the button mean something: the old
+            // request's promise may still be running, but its result is no
+            // longer what the page is waiting on.
+            set({ fetchedAccountNo: null, isLoading: false });
             await get().fetchCustomerData(target);
         }
     }

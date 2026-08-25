@@ -160,6 +160,10 @@ export const ACTIONS: Record<string, string[]> = {
     'job-order.tech-edit',
     'job-order.admin-edit',
     'job-order.attachment',
+    // Recording a pre-installation visit. Kept apart from the edit keys because
+    // it is what lets a referral start earning quota progress before the
+    // install is finished — a scheduling decision, not an edit to the record.
+    'job-order.pre-install',
   ],
   customer: [
     'customer.so-request',
@@ -190,8 +194,10 @@ export const ACTIONS: Record<string, string[]> = {
   'bonus-history': ['bonus-history.payout'],
   'agent-payout': ['agent-payout.approve'],
   // Issuing the weekly referral invoices, and marking one settled. An agent
-  // reads their own; neither of these is theirs.
-  'agent-invoices': ['agent-invoices.generate', 'agent-invoices.status'],
+  // reads their own; none of these is theirs. `payout` raises the payout that
+  // settles an invoice — the money side, so it is granted separately from
+  // merely setting a status by hand.
+  'agent-invoices': ['agent-invoices.generate', 'agent-invoices.status', 'agent-invoices.payout'],
   // List pages whose add/edit/delete controls were open to anyone who could
   // open the page.
   ports: ['ports.manage'],
@@ -294,6 +300,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'job-order.tech-edit': 'Tech Edit',
   'job-order.admin-edit': 'Admin Edit',
   'job-order.attachment': 'Attachment',
+  'job-order.pre-install': 'Pre Installed',
   'customer.so-request': 'SO Request',
   'customer.details-edit': 'Details Edit',
   'customer.attachment': 'Attachment',
@@ -315,6 +322,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'agent-payout.approve': 'Approve',
   'agent-invoices.generate': 'Generate',
   'agent-invoices.status': 'Set Status',
+  'agent-invoices.payout': 'Pay Out',
   'ports.manage': 'Manage',
   'router-models.manage': 'Manage',
   'status-remarks-list.manage': 'Manage',
@@ -420,6 +428,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'application-management.move-to-jo', 'application-management.quick-status',
     'job-order',
     'job-order.approve', 'job-order.failed', 'job-order.admin-edit', 'job-order.attachment',
+    'job-order.pre-install',
     'service-order', 'service-order.admin-edit',
     'work-order', 'work-order.manage',
     'lcp-nap-location',
@@ -431,6 +440,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'agent-management',
     'agent-payout', 'agent-payout.approve',
     'agent-invoices', 'agent-invoices.generate', 'agent-invoices.status',
+    'agent-invoices.payout',
     'inventory',
     'inventory-category-list',
     'disconnected-logs',
@@ -455,6 +465,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'job-order',
     'job-order.tech-edit',
     'job-order.attachment',
+    'job-order.pre-install',
     'service-order',
     'service-order.tech-edit',
     // Work orders are a technician's work too. The web sidebar never listed the
@@ -497,6 +508,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'application-management.move-to-jo', 'application-management.quick-status',
     'job-order',
     'job-order.approve', 'job-order.failed', 'job-order.admin-edit', 'job-order.attachment',
+    'job-order.pre-install',
     'service-order', 'service-order.admin-edit',
     'work-order', 'work-order.manage',
     'lcp-nap-location',

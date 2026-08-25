@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import { staggeredInstallationService } from '../services/staggeredInstallationService';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface StaggeredInstallation {
     id: string;
@@ -70,6 +71,15 @@ interface StaggeredPaymentProviderProps {
 }
 
 export const StaggeredPaymentProvider: React.FC<StaggeredPaymentProviderProps> = ({ children }) => {
+    const { can } = usePermissions();
+
+    // This provider wraps the whole app shell in Dashboard.tsx, so it mounts for
+    // every role — including a customer, who has no Staggered Payment page to open and
+    // whose request comes back 403. Ask before fetching rather than fetching and
+    // swallowing the failure: the call pulls the entire table, and a role that
+    // cannot open the page has no use for a row of it.
+    const canRead = can('staggered-payment');
+
     const [staggeredRecords, setStaggeredRecords] = useState<StaggeredInstallation[]>([]);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
@@ -77,6 +87,10 @@ export const StaggeredPaymentProvider: React.FC<StaggeredPaymentProviderProps> =
     const [isFullyLoaded, setIsFullyLoaded] = useState<boolean>(false);
 
     const fetchStaggeredRecords = useCallback(async (force = false, silent = false) => {
+        if (!canRead) {
+            return;
+        }
+
         // If we have data and not forced, skip fetching
         if (!force && staggeredRecords.length > 0) {
             return;
@@ -109,7 +123,7 @@ export const StaggeredPaymentProvider: React.FC<StaggeredPaymentProviderProps> =
         } finally {
             setIsLoading(false);
         }
-    }, [staggeredRecords.length]);
+    }, [staggeredRecords.length, canRead]);
 
     const refreshStaggeredRecords = useCallback(async () => {
         await fetchStaggeredRecords(true, false);

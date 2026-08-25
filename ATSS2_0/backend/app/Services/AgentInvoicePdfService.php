@@ -62,8 +62,13 @@ class AgentInvoicePdfService
      *      the customer table adds up to, and the quota payout is labelled
      *      INCENTIVE rather than COMMISSION. Pre-installation remarks printed
      *      at the foot of the invoice where any of its job orders carry them.
+     *   4  tightened so ten referrals and the totals share one sheet — the gap
+     *      under the header artwork, the meta line and the table's padding all
+     *      reduced — and the page number reads "Page 1 of 2"
+     *   5  page one holds 15 rows on a solo invoice and 10 on a team one,
+     *      whose rows are taller for the "referred by" line
      */
-    private const LAYOUT_VERSION = 3;
+    private const LAYOUT_VERSION = 5;
 
     /** A4 portrait, in points — what setPaper('A4') gives Dompdf. */
     private const PAGE_WIDTH_PT = 595.28;
@@ -252,7 +257,49 @@ class AgentInvoicePdfService
         $dompdf->setPaper('A4', 'portrait');
         $dompdf->render();
 
+        $this->stampPageNumbers($dompdf);
+
         return (string) $dompdf->output();
+    }
+
+    /**
+     * Write "Page 1 of 2" into the top right of every page.
+     *
+     * Done on the canvas rather than in CSS. Dompdf's `counter(pages)` resolves
+     * to 0 here — the stylesheet is applied while the document is still being
+     * laid out, so the total is not known yet and every sheet came out reading
+     * "Page 1 of 0". page_text() runs after render(), when it is, and Dompdf
+     * substitutes {PAGE_NUM} and {PAGE_COUNT} as it writes each page.
+     *
+     * Positioned to match what the stylesheet reserved: the same 40px right
+     * margin and the same top band, converted to points, and right-aligned by
+     * measuring the string rather than guessing at its width.
+     */
+    private function stampPageNumbers(Dompdf $dompdf): void
+    {
+        $canvas = $dompdf->getCanvas();
+
+        $font = $dompdf->getFontMetrics()->getFont('Helvetica', 'normal');
+        if (!$font) {
+            return;
+        }
+
+        $size = 10.0;
+
+        // The longest the string can get, so the right edge does not shift
+        // between a single-digit page count and a double-digit one.
+        $sample = 'Page 00 of 00';
+        $width  = $dompdf->getFontMetrics()->getTextWidth($sample, $font, $size);
+
+        // 40px at 96dpi is 30pt — the same inset .sheet and .page-number use.
+        $right = 30.0;
+        $x = self::PAGE_WIDTH_PT - $right - $width;
+
+        // Vertically where the reserved band puts it: a little below the paper
+        // edge, clear of the header artwork's wordmark.
+        $y = self::TOP_BAND_PT - 30.0;
+
+        $canvas->page_text($x, $y, 'Page {PAGE_NUM} of {PAGE_COUNT}', $font, $size, [0.10, 0.18, 0.27]);
     }
 
     /**
@@ -268,13 +315,20 @@ class AgentInvoicePdfService
      * @param  array<int, array>  $rows
      * @return array<int, array<int, array>>
      */
-    private function paginateRows(array $rows): array
+    private function paginateRows(array $rows, bool $isTeam = true): array
     {
         if ($rows === []) {
             return [];
         }
 
-        $first = max(1, (int) config('agent_invoices.first_page_rows', 10));
+        // A solo invoice fits more on page one. Its rows are single-height,
+        // where a team's carry "referred by …" on a second line beneath the
+        // customer's name — see $showReferrer in invoiceViewData().
+        $first = $isTeam
+            ? (int) config('agent_invoices.first_page_rows', 10)
+            : (int) config('agent_invoices.first_page_rows_solo', 15);
+
+        $first = max(1, $first);
         $rest  = max(1, (int) config('agent_invoices.rows_per_page', 18));
 
         if (count($rows) <= $first) {
@@ -429,7 +483,7 @@ class AgentInvoicePdfService
              * A single page of rows stays a single chunk, so the common invoice
              * is unaffected.
              */
-            'customerPages' => $this->paginateRows($rows),
+            'customerPages' => $this->paginateRows($rows, $invoice->invoice_type === AgentInvoice::TYPE_TEAM),
 
             // The reference document shows the date in capitals: AUGUST 10, 2026.
             'invoiceDateLabel' => strtoupper($invoiceDate->format('F j, Y')),

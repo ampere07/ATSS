@@ -86,19 +86,57 @@ interface CustomerDetailApiResponse {
   message?: string;
 }
 
-export const getCustomerDetail = async (accountNo: string): Promise<CustomerDetailData | null> => {
-  try {
-    const response = await apiClient.get<CustomerDetailApiResponse>(`/customer-detail/${accountNo}`);
+/**
+ * The fuller payload: profile, plan, technical details, and the balance as a
+ * fallback for when the pay-summary request has failed.
+ *
+ * A longer leash than the balance request — four eager-loaded relations and two
+ * payment SUMs is genuinely more work than reading one row, so a few seconds
+ * here is slow rather than stalled. Still well short of apiClient's 60s default,
+ * which is long enough that a hung request looks to the customer like a page
+ * that simply never loads.
+ */
+const CUSTOMER_DETAIL_TIMEOUT_MS = 20000;
 
-    if (response.data?.success && response.data?.data) {
-      const data = response.data.data;
-      return data;
+export const getCustomerDetail = async (accountNo: string): Promise<CustomerDetailData | null> => {
+  // Two attempts. The dashboard can render its most important half without this
+  // — the balance and Pay Now come from the pay-summary — so a failure here is
+  // survivable, but it costs the customer their plan, install date and location,
+  // and a second try is cheap enough to be worth it.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await apiClient.get<CustomerDetailApiResponse>(
+        `/customer-detail/${accountNo}`,
+        { timeout: CUSTOMER_DETAIL_TIMEOUT_MS }
+      );
+
+      if (response.data?.success && response.data?.data) {
+        if (attempt > 1) {
+          console.info('[CustomerDetail] Recovered on attempt', attempt);
+        }
+        return response.data.data;
+      }
+
+      console.warn('[CustomerDetail] Response carried no data', {
+        accountNo,
+        attempt,
+        success: response.data?.success,
+      });
+    } catch (error: any) {
+      console.error('[CustomerDetail] Request failed', {
+        accountNo,
+        attempt,
+        status: error?.response?.status ?? null,
+        message: error?.response?.data?.message || error?.message || 'unknown',
+      });
     }
 
-    return null;
-  } catch (error) {
-    return null;
+    if (attempt === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
   }
+
+  return null;
 };
 
 /**
@@ -132,18 +170,52 @@ interface CustomerPaySummaryApiResponse {
  * carried on the full detail payload, so losing the fast path costs speed rather than
  * the ability to pay.
  */
+/**
+ * The balance, on its own short leash.
+ *
+ * apiClient's default timeout is 60 seconds. That is a sensible ceiling for a
+ * report, and a terrible one here: this endpoint reads a single row, so a
+ * request still unanswered after a few seconds has stalled rather than gone
+ * slow — and the customer spends a minute watching a shimmer on a connection
+ * that is perfectly fast, which is exactly the fault this was reported as.
+ *
+ * Failing quickly is what makes retrying worthwhile: two attempts on an 8s
+ * leash answer or give up in 16s, where one attempt on the default took 60.
+ */
+const PAY_SUMMARY_TIMEOUT_MS = 8000;
+
 export const getCustomerPaySummary = async (accountNo: string): Promise<CustomerPaySummary | null> => {
   try {
     const response = await apiClient.get<CustomerPaySummaryApiResponse>(
-      `/customer-detail/${accountNo}/pay-summary`
+      `/customer-detail/${accountNo}/pay-summary`,
+      { timeout: PAY_SUMMARY_TIMEOUT_MS }
     );
 
     if (response.data?.success && response.data?.data) {
       return response.data.data;
     }
 
+    // A 200 that carries nothing usable. Worth saying so: this returns the same
+    // null a thrown request does, and the dashboard then shows "Balance
+    // unavailable" with no way to tell the two apart from the outside.
+    console.warn('[PaySummary] Response carried no data', {
+      accountNo,
+      success: response.data?.success,
+      hasData: !!response.data?.data,
+    });
+
     return null;
-  } catch (error) {
+  } catch (error: any) {
+    // Swallowed for the caller's sake — the dashboard falls back to the fuller
+    // detail request — but never silently. A transient failure here is the
+    // difference between a balance and "Balance unavailable", so the reason has
+    // to be readable when somebody comes to ask why.
+    console.error('[PaySummary] Request failed', {
+      accountNo,
+      status: error?.response?.status ?? null,
+      message: error?.response?.data?.message || error?.message || 'unknown',
+    });
+
     return null;
   }
 };

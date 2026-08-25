@@ -19,6 +19,7 @@ use App\Models\ActivityLog;
 use App\Models\AuditTrailLog;
 use App\Models\Role;
 use App\Models\ServiceOrder;
+use App\Support\CustomerScope;
 
 class ServiceOrderApiController extends Controller
 {
@@ -71,7 +72,18 @@ class ServiceOrderApiController extends Controller
             $query = DB::table('service_orders as so')
                 ->select('so.*', 'so.id as ticket_id');
 
-            if (!$isSuperAdmin && $organizationId) {
+            // A customer has no organization_id, which would otherwise send them
+            // down the super-admin branch and hand them the whole table. Pin them
+            // to their own account before any request filter is applied — the
+            // account_no filter below is client-supplied and cannot be trusted to
+            // do this job.
+            $customerAccountNo = CustomerScope::accountNo('service-order');
+
+            if ($customerAccountNo !== null) {
+                $isSuperAdmin = false;
+                $query->where('so.account_no', $customerAccountNo);
+            }
+            elseif (!$isSuperAdmin && $organizationId) {
                 $query->where('so.organization_id', $organizationId);
             }
 
@@ -293,9 +305,14 @@ class ServiceOrderApiController extends Controller
                 $timestamp = now('Asia/Manila')->format('Y-m-d H:i:s');
             }
 
+            // A customer may only file under their own account, whatever the
+            // payload says.
+            $customerAccountNo = CustomerScope::accountNo('service-order');
+            $accountNo = $customerAccountNo ?? $validated['account_no'];
+
             $data = [
                 'ticket_id' => $ticketId,
-                'account_no' => $validated['account_no'],
+                'account_no' => $accountNo,
                 'timestamp' => $timestamp,
                 'support_status' => $validated['support_status'] ?? 'In Progress',
                 'concern' => $validated['concern'],
@@ -348,10 +365,10 @@ class ServiceOrderApiController extends Controller
 
             $reconnectStatus = null;
             if ($currentConcern && strtolower($currentConcern) === 'reconnect' && $supportStatus === 'resolved') {
-                $billingAccount = BillingAccount::where('account_no', $validated['account_no'])->first();
+                $billingAccount = BillingAccount::where('account_no', $accountNo)->first();
                 if ($billingAccount) {
                     Log::info('Triggering auto-reconnect for NEW Service Order with Reconnect concern', [
-                        'account_no' => $validated['account_no']
+                        'account_no' => $accountNo
                     ]);
                     $serviceOrderUpdatedByUser = $request->input('updated_by_user') ?: ($request->input('updated_by') ?: (Auth::user()->name ?? 'System'));
                     $reconnectStatus = $this->attemptReconnection($billingAccount, $id, $serviceOrderUpdatedByUser);

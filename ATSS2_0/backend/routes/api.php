@@ -324,11 +324,18 @@ Route::prefix('service-charges')->group(function () {
     Route::get('/', function (Request $request) {
             $query = DB::table('service_charge_logs');
 
-            if ($request->has('account_no')) {
+            // A customer reaching this from their own Dashboard or Bills page
+            // sees only their own charges, whatever account_no they ask for.
+            $customerAccountNo = \App\Support\CustomerScope::accountNo(['so-charge', 'customer']);
+
+            if ($customerAccountNo !== null) {
+                $query->where('account_no', $customerAccountNo);
+            }
+            elseif ($request->has('account_no')) {
                 $query->where('account_no', $request->account_no);
             }
 
-            if ($request->has('account_id')) {
+            if ($customerAccountNo === null && $request->has('account_id')) {
                 $billingAccount = \App\Models\BillingAccount::find($request->account_id);
                 if ($billingAccount) {
                     $query->where('account_no', $billingAccount->account_no);

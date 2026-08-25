@@ -105,37 +105,80 @@ interface CustomerPaySummaryApiResponse {
  */
 export const getCustomerPaySummary = async (accountNo: string): Promise<CustomerPaySummary | null> => {
   try {
+    // 8s, not apiClient's 60s default. This reads a single row, so a request
+    // unanswered after a few seconds has stalled rather than gone slow — and on
+    // mobile that meant a minute of shimmer on a perfectly good connection.
+    // Failing fast is what makes the retries above worth having.
     const response = await apiClient.get<CustomerPaySummaryApiResponse>(
-      `/customer-detail/${accountNo}/pay-summary`
+      `/customer-detail/${accountNo}/pay-summary`,
+      { timeout: 8000 }
     );
 
     if (response.data?.success && response.data?.data) {
       return response.data.data;
     }
 
+    // A 200 carrying nothing usable returns the same null a failed request does,
+    // and the dashboard then shows the balance as unavailable. Distinguish them
+    // here or there is no way to tell from the outside which happened.
+    console.warn('[PaySummary] Response carried no data', {
+      accountNo,
+      success: response.data?.success,
+      hasData: !!response.data?.data,
+    });
+
     return null;
-  } catch (error) {
-    console.error('Error fetching customer pay summary:', error);
+  } catch (error: any) {
+    console.error('[PaySummary] Request failed', {
+      accountNo,
+      status: error?.response?.status ?? null,
+      message: error?.response?.data?.message || error?.message || 'unknown',
+    });
     return null;
   }
 };
 
 export const getCustomerDetail = async (accountNo: string): Promise<CustomerDetailData | null> => {
-  try {
-    console.log('Fetching customer detail for account:', accountNo);
-    const response = await apiClient.get<CustomerDetailApiResponse>(`/customer-detail/${accountNo}`);
+  // Two attempts, on a 20s leash rather than apiClient's 60s default.
+  //
+  // This payload is heavier than the balance — four eager-loaded relations and
+  // two payment SUMs — so it earns a longer wait than the 8s the pay-summary
+  // gets, but 60s is long enough that a hung request reads as a page that never
+  // loads. The dashboard survives losing this: the balance and Pay Now come from
+  // the pay-summary. What it costs is the plan, install date and location, which
+  // is worth one more try.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await apiClient.get<CustomerDetailApiResponse>(
+        `/customer-detail/${accountNo}`,
+        { timeout: 20000 }
+      );
 
-    console.log('Customer detail API response:', response.data);
+      if (response.data?.success && response.data?.data) {
+        if (attempt > 1) {
+          console.info('[CustomerDetail] Recovered on attempt', attempt);
+        }
+        return response.data.data;
+      }
 
-    if (response.data?.success && response.data?.data) {
-      const data = response.data.data;
-      console.log('House front picture URL from API:', data.houseFrontPictureUrl);
-      return data;
+      console.warn('[CustomerDetail] Response carried no data', {
+        accountNo,
+        attempt,
+        success: response.data?.success,
+      });
+    } catch (error: any) {
+      console.error('[CustomerDetail] Request failed', {
+        accountNo,
+        attempt,
+        status: error?.response?.status ?? null,
+        message: error?.response?.data?.message || error?.message || 'unknown',
+      });
     }
 
-    return null;
-  } catch (error) {
-    console.error('Error fetching customer detail:', error);
-    return null;
+    if (attempt === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
   }
+
+  return null;
 };

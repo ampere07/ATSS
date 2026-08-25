@@ -244,6 +244,16 @@ final class ApiPermissionMap
         ['service_orders/*/enable-technician', 'service-order.admin-edit', 'service-order.admin-edit'],
         ['service-orders/by-account/*',  null, 'service-order'],
         ['service-orders/by-item/*',     null, 'service-order'],
+        // The customer portal's Support page: a customer lists their own
+        // tickets and files a new one. Both are pinned to their own account_no
+        // in ServiceOrderApiController — a customer carries no organization, so
+        // the org filter there does not scope them on its own.
+        //
+        // These sit on the bare collection path deliberately. The wildcard rules
+        // beneath cover service-orders/{id}, so reading someone else's ticket,
+        // editing one and deleting one all stay closed to 'customer-support'.
+        ['service-orders',               ['service-order', 'customer-support'], ['service-order.tech-edit', 'service-order.admin-edit', 'customer.so-request', 'customer-support']],
+        ['service_orders',               ['service-order', 'customer-support'], ['service-order.tech-edit', 'service-order.admin-edit', 'customer.so-request', 'customer-support']],
         ['service-orders*',              'service-order', ['service-order.tech-edit', 'service-order.admin-edit', 'customer.so-request']],
         ['service_orders*',              'service-order', ['service-order.tech-edit', 'service-order.admin-edit', 'customer.so-request']],
         ['service-order-items*',         'service-order', ['service-order.tech-edit', 'service-order.admin-edit']],
@@ -314,7 +324,10 @@ final class ApiPermissionMap
         ['invoices/*',                   ['invoice', 'customer', 'customer-bills', 'customer-dashboard'], 'invoice'],
         ['overdues*',                    ['overdue', 'customer', 'customer-bills', 'customer-dashboard'], 'overdue'],
         ['dc-notices*',                  'dc-notice', 'dc-notice'],
-        ['service-charges*',             ['so-charge', 'customer'], 'so-charge'],
+        // The customer portal's Dashboard and Bills pages both read the signed-in
+        // customer's own charges. CustomerScope pins the query to their account in
+        // routes/api.php — the account_no they send is a filter, not a boundary.
+        ['service-charges*',             ['so-charge', 'customer', 'customer-dashboard', 'customer-bills'], 'so-charge'],
         ['service-charge-logs/*',        ['so-charge', 'customer'], 'so-charge'],
         ['discounts*',                   'discounts', 'discounts.add'],
         ['mass-rebates*',                'mass-rebate', 'mass-rebate.add'],

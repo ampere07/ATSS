@@ -34,6 +34,11 @@ const CustomerDetails = React.lazy(() => import('./CustomerDetails'));
 const InventoryDetails = React.lazy(() => import('./InventoryDetails'));
 const NotFoundModal = React.lazy(() => import('../modals/NotFoundModal'));
 
+// Pre Installed is held closed while the flow behind it is being reworked.
+// The button stays visible so the feature does not look removed — flip this to
+// false to hand it back, no other change needed.
+const PRE_INSTALLED_UNDER_MAINTENANCE = true;
+
 const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, onRefresh, isMobile = false, onPrevious, onNext, onExpandSection, isTechnicianLocked = false }) => {
   const [localIsMobile, setLocalIsMobile] = useState<boolean>(window.innerWidth < 768);
   useEffect(() => {
@@ -2164,10 +2169,13 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
                 <span>Failed</span>
               </button>
             )}
+            {hasPermission('job-order.pre-install') && (
             <button
-              className="bg-amber-600 hover:bg-amber-700 text-white px-2 py-1 rounded-sm flex items-center transition-colors text-sm font-medium whitespace-nowrap"
+              className={`text-white px-2 py-1 rounded-sm flex items-center transition-colors text-sm font-medium whitespace-nowrap ${PRE_INSTALLED_UNDER_MAINTENANCE
+                ? 'bg-gray-400 cursor-not-allowed'
+                : 'bg-amber-600 hover:bg-amber-700'}`}
               onClick={handlePreInstalledClick}
-              disabled={loading || preInstalledSaving}
+              disabled={PRE_INSTALLED_UNDER_MAINTENANCE || loading || preInstalledSaving}
               title={jobOrder.pre_installed
                 ? `Already recorded${jobOrder.pre_installed_datetime ? ' on ' + formatDate(jobOrder.pre_installed_datetime) : ''}`
                   + `${jobOrder.preinstalled_updated_by ? ' by ' + jobOrder.preinstalled_updated_by : ''} — click to update`
@@ -2175,6 +2183,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
             >
               <span>{jobOrder.pre_installed ? 'Pre Installed ✓' : 'Pre Installed'}</span>
             </button>
+            )}
             {shouldShowEditButton() && (
               <button
                 className="text-white px-2 py-1 rounded-sm flex items-center transition-colors text-sm font-medium whitespace-nowrap"
