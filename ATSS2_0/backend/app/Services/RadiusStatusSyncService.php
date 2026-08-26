@@ -73,6 +73,55 @@ class RadiusStatusSyncService
     private const USER_CACHE_KEY = 'radius:status-sync:users';
 
     /**
+     * Proof that a run is still working, refreshed as it goes.
+     *
+     * The command holds a cache lock so two syncs cannot run at once, but a lock
+     * has a TTL and a run that outlives it releases its claim without knowing:
+     * the next invocation then acquires the lock and starts a second sync
+     * alongside the first. The TTL cannot simply be raised to cover that, because
+     * the same TTL is what frees the lock after a run is killed — a long one and
+     * a dead one look identical from the outside.
+     *
+     * This is what tells them apart. A working run stamps the key at every step
+     * that takes any time, so it stays fresh for as long as the run is genuinely
+     * doing something and goes stale within a minute or two of the process dying.
+     */
+    private const HEARTBEAT_KEY = 'radius:status-sync:heartbeat';
+
+    /**
+     * How long after the last stamp a run is presumed dead rather than slow.
+     *
+     * Comfortably longer than the largest gap between two stamps. The widest one
+     * is a single RADIUS request: a connect timeout plus a request timeout, both
+     * configurable, and stamped again after every attempt.
+     */
+    public const HEARTBEAT_STALE_AFTER = 90;
+
+    /** Mark the run as alive. Called at each step that takes measurable time. */
+    public static function heartbeat(): void
+    {
+        // Held for twice the staleness window so the key outlives the judgement
+        // that reads it — a heartbeat that expired from the cache and one that
+        // was never written are indistinguishable, and both mean "not alive".
+        Cache::put(self::HEARTBEAT_KEY, now()->timestamp, self::HEARTBEAT_STALE_AFTER * 2);
+    }
+
+    /** Is a sync still working, whatever the state of the lock? */
+    public static function isRunAlive(): bool
+    {
+        $last = Cache::get(self::HEARTBEAT_KEY);
+
+        return is_numeric($last)
+            && (now()->timestamp - (int) $last) < self::HEARTBEAT_STALE_AFTER;
+    }
+
+    /** Called by the run that finishes, so the next one is not made to wait. */
+    public static function clearHeartbeat(): void
+    {
+        Cache::forget(self::HEARTBEAT_KEY);
+    }
+
+    /**
      * The online_status columns this sync owns.
      *
      * A row is only rewritten when one of these differs from what the sync is
@@ -124,8 +173,11 @@ class RadiusStatusSyncService
         ];
 
         try {
+            self::heartbeat();
+
             // Step 1: Sync billing accounts to online_status quickly (outside of a long transaction)
             $this->syncAccountsToOnlineStatus($stats);
+            self::heartbeat();
 
             // Ordered by id so the labels "Radius Config 1", "Radius Config 2", ... are stable.
             $radiusConfigs = RadiusConfig::orderBy('id')->get();
@@ -136,7 +188,10 @@ class RadiusStatusSyncService
             // Step 2: Fetch from EVERY radius config, merged and de-duplicated by username.
             // Each server is queried independently — one being down does not stop the others.
             $usersReport    = $this->fetchRadiusUsersCached($radiusConfigs, $refreshUsers);
+            self::heartbeat();
+
             $sessionsReport = $this->fetchRadiusSessions($radiusConfigs);
+            self::heartbeat();
 
             $radiusUsers    = $usersReport['users'];
             $radiusSessions = $sessionsReport['sessions'];
@@ -154,10 +209,31 @@ class RadiusStatusSyncService
             Log::info('[STATUS SYNC] Duplicate users across servers: ' . $usersReport['duplicates']);
             Log::info('[STATUS SYNC] Unique users to process: ' . $usersReport['unique']);
 
-            // Guard: if EVERY server was unreachable for users, abort instead of wrongly
+            // Guard: if EVERY server was unreachable, abort instead of wrongly
             // flagging every account as "Not Found"/offline from an empty dataset.
-            if ($usersReport['reachable'] === 0) {
-                throw new \RuntimeException('All RADIUS servers were unreachable for user data; aborting to avoid mass status changes.');
+            //
+            // Which report carries that evidence depends on where the users came
+            // from. A freshly fetched list is itself the probe: nobody answered it
+            // means nobody is up. A CACHED list is not a probe at all — it records
+            // the reachability of the run that wrote it, and only complete
+            // snapshots are ever written, so it reports every server up no matter
+            // what is happening now. Trusting it would let a run where every
+            // server is dark sail past this guard on a stale "all reachable" and
+            // mark the entire estate offline from an empty session sweep, which
+            // is the exact outcome the guard exists to prevent.
+            //
+            // On a cached run the session sweep is the only live evidence there
+            // is, so it is what decides.
+            $usersFromCache = (bool) ($usersReport['from_cache'] ?? false);
+            $reachableNow   = $usersFromCache
+                ? $sessionsReport['reachable']
+                : $usersReport['reachable'];
+
+            if ($reachableNow === 0) {
+                throw new \RuntimeException(sprintf(
+                    'All RADIUS servers were unreachable for %s; aborting to avoid mass status changes.',
+                    $usersFromCache ? 'sessions (user list served from cache)' : 'user data'
+                ));
             }
 
             // Anti-timeout: the fetch phase can outlast the server's wait_timeout,
@@ -502,6 +578,11 @@ class RadiusStatusSyncService
                 $stats['batches']++;
 
                 $this->processAccountBatch($accounts, $radiusUsers, $radiusSessions, $stats);
+
+                // A batch is the unit of work in the longest phase of the run, so
+                // stamping one per batch is what keeps a large estate from being
+                // mistaken for a dead process.
+                self::heartbeat();
 
                 // Optional breather, so a long sync leaves headroom for
                 // interactive traffic instead of monopolising the database.
@@ -888,6 +969,12 @@ class RadiusStatusSyncService
                 $url = $baseUrl . $path . ($proplist !== null ? '?.proplist=' . $proplist : '');
 
                 try {
+                    // Before, not after: a request that never returns is exactly
+                    // the case this has to cover, and the stamp has to be down
+                    // before the wait begins for the gap to stay bounded by one
+                    // timeout rather than by two.
+                    self::heartbeat();
+
                     $response = Http::withBasicAuth($config->username, $config->password)
                         ->withOptions(['verify' => false])
                         ->connectTimeout($connectTimeout)

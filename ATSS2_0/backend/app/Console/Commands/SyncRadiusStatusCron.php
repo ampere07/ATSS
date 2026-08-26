@@ -45,7 +45,14 @@ class SyncRadiusStatusCron extends Command
     public function handle(): int
     {
         if ($this->option('no-lock')) {
-            return $this->runSync();
+            try {
+                return $this->runSync();
+            } finally {
+                // This run still stamps the heartbeat as it works, so clearing it
+                // on the way out stops a diagnostic run from making the next
+                // scheduled one stand down for a window after it has finished.
+                RadiusStatusSyncService::clearHeartbeat();
+            }
         }
 
         $lock = Cache::lock('radius:status-sync', self::LOCK_TTL);
@@ -59,9 +66,35 @@ class SyncRadiusStatusCron extends Command
             return Command::SUCCESS;
         }
 
+        // Holding the lock is not the same as the previous run having finished.
+        //
+        // The lock expires after LOCK_TTL, so a run that takes longer than that
+        // loses its claim while still working, and this invocation is handed a
+        // lock the first one thinks it owns. Left there, the second sync would
+        // start alongside the first — the exact overlap the lock exists to
+        // prevent, arriving precisely on the slow runs where it matters most.
+        //
+        // The heartbeat is the live evidence: a run that is still working keeps
+        // stamping it, and one that died stops. So a fresh stamp here means the
+        // lock lapsed under a healthy run, and this invocation stands down and
+        // hands the claim back rather than joining it.
+        if (RadiusStatusSyncService::isRunAlive()) {
+            $lock->release();
+
+            $this->info('A RADIUS status sync is still working past its lock; exiting.');
+            Log::channel('radiusrelated')->info(
+                '[STATUS SYNC] Skipped run: the previous sync has outlived its lock but is still working.'
+            );
+
+            return Command::SUCCESS;
+        }
+
         try {
             return $this->runSync();
         } finally {
+            // Cleared by the run that finishes, so the next scheduled one is not
+            // made to wait out the staleness window for no reason.
+            RadiusStatusSyncService::clearHeartbeat();
             $lock->release();
         }
     }

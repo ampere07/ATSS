@@ -103,15 +103,32 @@ interface CustomerPaySummaryApiResponse {
  * carried on the full detail payload, so losing the fast path costs speed rather than
  * the ability to pay.
  */
-export const getCustomerPaySummary = async (accountNo: string): Promise<CustomerPaySummary | null> => {
+/**
+ * The balance's leash, lengthening with each attempt.
+ *
+ * Not apiClient's 60s default: this reads a single row, so a request unanswered
+ * after a few seconds on a healthy connection has stalled rather than gone slow,
+ * and waiting a minute to find that out means a minute of shimmer.
+ *
+ * But a flat short leash cannot tell a stalled request from a slow one. Every
+ * attempt capped at 8s meant a phone on a weak signal — where the request needed
+ * twelve seconds and would have succeeded — was cut off three times over, and the
+ * card gave up on a server that was answering. On mobile that is the common case,
+ * not the edge one, and the balance is the figure the screen exists to show.
+ *
+ * The ladder keeps both properties: a short first attempt spots a stall in
+ * seconds, and each attempt after it gives a slow line the room it actually needs.
+ */
+export const PAY_SUMMARY_TIMEOUTS_MS = [8000, 20000, 45000];
+
+export const getCustomerPaySummary = async (
+  accountNo: string,
+  timeoutMs: number = PAY_SUMMARY_TIMEOUTS_MS[0]
+): Promise<CustomerPaySummary | null> => {
   try {
-    // 8s, not apiClient's 60s default. This reads a single row, so a request
-    // unanswered after a few seconds has stalled rather than gone slow — and on
-    // mobile that meant a minute of shimmer on a perfectly good connection.
-    // Failing fast is what makes the retries above worth having.
     const response = await apiClient.get<CustomerPaySummaryApiResponse>(
       `/customer-detail/${accountNo}/pay-summary`,
-      { timeout: 8000 }
+      { timeout: timeoutMs }
     );
 
     if (response.data?.success && response.data?.data) {

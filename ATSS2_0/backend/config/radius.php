@@ -140,27 +140,37 @@ return [
 
         /*
         | How long the merged RADIUS user list may be reused before it is fetched
-        | again, in MINUTES. 0 = fetch it every run (the original behaviour).
+        | again, in MINUTES. 0 = fetch it every run.
         |
         | The sync makes two bulk requests per server: the SESSION list, which is
         | what changes from minute to minute, and the USER list, which only says
         | which group each subscriber is in. The user list is the big one, and on
         | a settled estate it is identical run after run — so re-pulling it every
         | few minutes makes RouterOS serialise its whole subscriber table for
-        | nothing. Setting this lets sessions stay live while the heavy list is
-        | fetched on a slower beat.
+        | nothing. This lets sessions stay live while the heavy list is fetched on
+        | a slower beat.
         |
-        | The trade: a group change made directly on the router (not through this
-        | app) can take up to this long to appear in online_status. Changes made
-        | through the app are not affected in practice, because the app writes the
-        | group itself. Run `cron:sync-radius-status --refresh-users` to force an
-        | immediate re-fetch.
+        | Defaults to 30 rather than 0. At a five-minute schedule that is the
+        | difference between asking each server for its whole subscriber table
+        | twelve times an hour and asking twice, and it is the request most likely
+        | to leave a busy RouterOS box refusing new connections — the sync
+        | competing with the subscribers it is reporting on. Sessions are still
+        | read every run, so nothing about how quickly a login or logout shows up
+        | changes.
+        |
+        | The trade is narrow: a group change made DIRECTLY on the router, outside
+        | this app, can take up to this long to appear in online_status. A change
+        | made through the app is unaffected — ManualRadiusOperations,
+        | RadiusQueue, RadiusReconciliation and RadiusReconnection each drop this
+        | cache as they write, so the next run re-reads immediately. Set this to 0
+        | to go back to fetching every run, or run
+        | `cron:sync-radius-status --refresh-users` for a one-off re-fetch.
         |
         | Only a COMPLETE snapshot is cached: if any server was unreachable, the
         | partial result is used for that run and thrown away, so one bad run
         | cannot leave stale "Not Found" statuses standing.
         */
-        'user_cache_minutes' => (int) env('RADIUS_STATUS_SYNC_USER_CACHE_MINUTES', 0),
+        'user_cache_minutes' => (int) env('RADIUS_STATUS_SYNC_USER_CACHE_MINUTES', 30),
         /*
         | Per-request timeouts, in seconds, for the User Manager calls. The
         | request timeout has to cover RouterOS serialising an entire user or

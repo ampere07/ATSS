@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { getCustomerDetail, getCustomerPaySummary, CustomerDetailData, CustomerPaySummary } from '../services/customerDetailService';
+import { getCustomerDetail, getCustomerPaySummary, PAY_SUMMARY_TIMEOUTS_MS, CustomerDetailData, CustomerPaySummary } from '../services/customerDetailService';
 import { soaService } from '../services/soaService';
 import { invoiceService } from '../services/invoiceService';
 import { paymentPortalLogsService } from '../services/paymentPortalLogsService';
@@ -72,6 +72,16 @@ interface CustomerDashboardState {
     fetchCustomerData: (usernameOrAccountNo: string, isCustomerRole?: boolean) => Promise<void>;
     refreshCustomerData: () => Promise<void>;
 }
+
+/**
+ * How long the secondary lists wait for the balance before going out anyway.
+ *
+ * Covers the summary's first attempt and the pause before its second, so the
+ * lists do not compete with the try that answers on most connections. Not the
+ * whole ladder: a balance on its long third attempt must not hold the rest of
+ * the page back for the best part of a minute.
+ */
+const SECONDARY_REQUEST_GRACE_MS = 9000;
 
 const byDateDesc = <T extends { date: string }>(rows: T[]): T[] =>
     rows.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -159,25 +169,30 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
         // Deliberately one retry, not a loop: if the second attempt fails too,
         // something is actually wrong and the card should say so rather than
         // spin.
-        // Three attempts on a short leash, rather than one on a long one.
+        // Three attempts, each on a longer leash than the last.
         //
-        // The service caps this request at 8s, so the whole sequence answers or
-        // gives up inside ~19s — where a single attempt on apiClient's 60s
-        // default could leave the balance shimmering for a minute. The balance
-        // is the one figure the page exists to show: everything else can arrive
-        // late, but without this the customer cannot pay.
+        // The balance is the one figure the page exists to show: everything
+        // else can arrive late, but without this the customer cannot pay. So it
+        // is asked for first, retried hardest, and given progressively more time
+        // rather than being abandoned for being slow — see PAY_SUMMARY_TIMEOUTS_MS
+        // for why a single short leash could not serve both a stalled request
+        // and a slow connection.
         //
         // Backed off a little between tries so a server catching its breath is
         // given a moment rather than hit three times in a row.
         const fetchPaySummary = async () => {
             const waits = [0, 400, 1200];
 
-            for (let attempt = 0; attempt < waits.length; attempt++) {
+            for (let attempt = 0; attempt < PAY_SUMMARY_TIMEOUTS_MS.length; attempt++) {
                 if (waits[attempt] > 0) {
                     await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
                 }
 
-                const summary = await getCustomerPaySummary(usernameOrAccountNo);
+                const summary = await getCustomerPaySummary(
+                    usernameOrAccountNo,
+                    PAY_SUMMARY_TIMEOUTS_MS[attempt]
+                );
+
                 if (summary) {
                     if (attempt > 0) {
                         console.info('[Dashboard] Pay summary recovered on attempt', attempt + 1);
@@ -228,6 +243,23 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
 
         const accNo = detail.billingAccount.accountNo;
         const billingId = detail.billingAccount.id;
+
+        // The balance gets a clear run at the connection before the six lists
+        // below compete with it for one.
+        //
+        // A browser will only hold a handful of requests to a host at once. On a
+        // fast line that never matters — the summary has landed long before this
+        // point and the race resolves immediately. On a slow one it decides
+        // whether the figure the customer came for arrives before, or behind,
+        // six lists of history they have not scrolled to yet.
+        //
+        // Bounded by the grace period rather than by the summary alone: if the
+        // balance is on its third and longest attempt, the rest of the page
+        // should not be held back for the best part of a minute waiting on it.
+        await Promise.race([
+            paySummaryDone,
+            new Promise((resolve) => setTimeout(resolve, SECONDARY_REQUEST_GRACE_MS)),
+        ]);
 
         // The secondary payloads are requested together but published separately, each
         // as soon as its own request lands. They used to share one Promise.all barrier

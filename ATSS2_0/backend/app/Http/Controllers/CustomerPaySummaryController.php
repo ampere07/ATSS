@@ -42,6 +42,18 @@ class CustomerPaySummaryController extends Controller
                 ->first();
 
             if (!$account) {
+                // Logged, not just returned. The customer portal asks for this
+                // with the signed-in username, which is the only thing tying a
+                // login to a billing account — there is no key on the users
+                // table. So a miss here means that convention has broken for
+                // this account, and the dashboard shows "Balance unavailable"
+                // with the row sitting in the database. Naming the account in
+                // the log is what makes that answerable without asking the
+                // customer to open their browser console.
+                \Log::warning('CustomerPaySummaryController - No billing account for the requested identifier', [
+                    'requested' => $accountNo,
+                ]);
+
                 return response()->json([
                     'success' => false,
                     'message' => 'Billing account not found'

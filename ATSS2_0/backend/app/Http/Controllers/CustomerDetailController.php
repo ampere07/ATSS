@@ -111,7 +111,16 @@ class CustomerDetailController extends Controller
                     'billingDay' => $billingAccount->billing_day,
                     'billingStatusId' => $billingAccount->billing_status_id,
                     'billingStatusName' => $billingAccount->billingStatus ? $billingAccount->billingStatus->status_name : null,
-                    'accountBalance' => $billingAccount->account_balance,
+                    // Cast, like every other emitter of this figure — the
+                    // pay-summary endpoint and both payment-portal-log
+                    // responses all send a number. Passed through raw, a NULL
+                    // column arrives as null, and the customer dashboard reads
+                    // that as "no figure" rather than "nothing owed": it draws
+                    // "Balance unavailable" off a request that succeeded. That
+                    // distinction is deliberate on the client — a settled
+                    // account must not render a confident zero it never got —
+                    // so the zero has to come from here.
+                    'accountBalance' => (float) $billingAccount->account_balance,
                     'balanceUpdateDate' => $billingAccount->balance_update_date ? $billingAccount->balance_update_date->format('Y-m-d H:i:s') : null,
                     'createdBy' => $billingAccount->created_by,
                     'createdAt' => $billingAccount->created_at ? $billingAccount->created_at->format('Y-m-d H:i:s') : null,

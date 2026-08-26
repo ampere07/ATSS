@@ -171,24 +171,36 @@ interface CustomerPaySummaryApiResponse {
  * the ability to pay.
  */
 /**
- * The balance, on its own short leash.
+ * The balance's leash, lengthening with each attempt.
  *
  * apiClient's default timeout is 60 seconds. That is a sensible ceiling for a
- * report, and a terrible one here: this endpoint reads a single row, so a
- * request still unanswered after a few seconds has stalled rather than gone
- * slow — and the customer spends a minute watching a shimmer on a connection
- * that is perfectly fast, which is exactly the fault this was reported as.
+ * report and a terrible one here: this endpoint reads a single row, so a
+ * request still unanswered after a few seconds on a healthy connection has
+ * stalled rather than gone slow, and the customer spends a minute watching a
+ * shimmer.
  *
- * Failing quickly is what makes retrying worthwhile: two attempts on an 8s
- * leash answer or give up in 16s, where one attempt on the default took 60.
+ * But a flat short leash cannot tell those two apart. Every attempt capped at
+ * 8s meant a genuinely slow connection — where the request needed twelve
+ * seconds and would have succeeded — was cut off three times over, and the card
+ * gave up on a server that was answering perfectly well. The balance is the one
+ * figure the page exists to show, so it is the last thing that should be
+ * abandoned for being slow.
+ *
+ * The ladder keeps both properties. The first attempt is short, so a stalled
+ * request is spotted and retried in seconds rather than after a minute. Each
+ * one after it is longer, so a slow line is given the room it actually needs
+ * instead of being asked the same impossible question three times.
  */
-const PAY_SUMMARY_TIMEOUT_MS = 8000;
+export const PAY_SUMMARY_TIMEOUTS_MS = [8000, 20000, 45000];
 
-export const getCustomerPaySummary = async (accountNo: string): Promise<CustomerPaySummary | null> => {
+export const getCustomerPaySummary = async (
+  accountNo: string,
+  timeoutMs: number = PAY_SUMMARY_TIMEOUTS_MS[0]
+): Promise<CustomerPaySummary | null> => {
   try {
     const response = await apiClient.get<CustomerPaySummaryApiResponse>(
       `/customer-detail/${accountNo}/pay-summary`,
-      { timeout: PAY_SUMMARY_TIMEOUT_MS }
+      { timeout: timeoutMs }
     );
 
     if (response.data?.success && response.data?.data) {
@@ -212,6 +224,7 @@ export const getCustomerPaySummary = async (accountNo: string): Promise<Customer
     // to be readable when somebody comes to ask why.
     console.error('[PaySummary] Request failed', {
       accountNo,
+      timeoutMs,
       status: error?.response?.status ?? null,
       message: error?.response?.data?.message || error?.message || 'unknown',
     });

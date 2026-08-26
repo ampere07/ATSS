@@ -251,6 +251,41 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         }
     }, [balance, isBalancePositive]);
 
+    // Try the balance again whenever the page comes back to the foreground.
+    //
+    // Safari suspends a background page's JavaScript, and on iOS it does so
+    // whenever the customer switches apps, takes a call or simply locks the
+    // screen. Timers do not run while it is suspended and every pending one
+    // fires at once on resume — so a request that was mid-flight is timed out
+    // the instant the page wakes, and the balance can burn all three of its
+    // attempts without any of them having been given a fair run. The connection
+    // was never the problem, which is why this shows up on a fast one.
+    //
+    // The mobile app already recovers from exactly this through AppState; this
+    // is the browser's equivalent. pageshow covers the back/forward cache, which
+    // Safari restores from without firing visibilitychange.
+    //
+    // Bound to the failed state alone, so it attaches only when there is
+    // something to recover and detaches the moment a figure arrives — it cannot
+    // turn into a refresh on every tab switch.
+    useEffect(() => {
+        if (!loadFailedOutright) return;
+
+        const retryIfVisible = () => {
+            if (document.visibilityState === 'visible') {
+                refreshCustomerData();
+            }
+        };
+
+        document.addEventListener('visibilitychange', retryIfVisible);
+        window.addEventListener('pageshow', retryIfVisible);
+
+        return () => {
+            document.removeEventListener('visibilitychange', retryIfVisible);
+            window.removeEventListener('pageshow', retryIfVisible);
+        };
+    }, [loadFailedOutright, refreshCustomerData]);
+
     // Nothing to show at all — neither response has landed and there is no snapshot from
     // a previous visit. Mirrors the real grid below (greeting, profile card left, balance
     // and lists right) so that when the data lands it fills the boxes already on screen

@@ -1,9 +1,19 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
 import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getCustomerDetail, getCustomerPaySummary, CustomerDetailData, CustomerPaySummary } from '../services/customerDetailService';
+import { getCustomerDetail, getCustomerPaySummary, PAY_SUMMARY_TIMEOUTS_MS, CustomerDetailData, CustomerPaySummary } from '../services/customerDetailService';
 import apiClient from '../config/api';
 import { readDashboardCache, writeDashboardCache } from '../utils/customerDashboardCache';
+
+/**
+ * How long the secondary lists wait for the balance before going out anyway.
+ *
+ * Covers the summary's first attempt and the pause before its second, so the
+ * lists do not compete with the try that answers on most connections. Not the
+ * whole ladder: a balance on its long third attempt must not hold the rest of
+ * the screen back for the best part of a minute.
+ */
+const SECONDARY_REQUEST_GRACE_MS = 9000;
 
 interface PaymentRecord {
     id: string;
@@ -167,22 +177,28 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
             // long one, and Pay Now unlocks as soon as it does.
             setIsPaySummaryLoading(true);
 
-            // One retry before giving up. getCustomerPaySummary never throws — a
-            // refused request, a timeout and an empty body all come back as null —
-            // so a single blip ended the balance's only fast path and left the
-            // card reading unavailable with a figure sitting in the database.
-            // The endpoint is a cheap read of one row; asking twice recovers the
-            // common case. One retry, not a loop: a second failure means
-            // something is actually wrong and the card should say so.
+            // Three attempts, each on a longer leash than the last.
+            //
+            // getCustomerPaySummary never throws — a refused request, a timeout
+            // and an empty body all come back as null — so a single blip used to
+            // end the balance's only fast path and leave the card reading
+            // unavailable with the figure sitting in the database. Retrying
+            // recovers that. Lengthening the leash as it goes is what stops a
+            // phone on a weak signal being cut off three times over: see
+            // PAY_SUMMARY_TIMEOUTS_MS for why one short leash could not serve
+            // both a stalled request and a slow connection.
             const fetchPaySummary = async () => {
                 const waits = [0, 400, 1200];
 
-                for (let attempt = 0; attempt < waits.length; attempt++) {
+                for (let attempt = 0; attempt < PAY_SUMMARY_TIMEOUTS_MS.length; attempt++) {
                     if (waits[attempt] > 0) {
                         await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
                     }
 
-                    const summary = await getCustomerPaySummary(parsedUser.username);
+                    const summary = await getCustomerPaySummary(
+                        parsedUser.username,
+                        PAY_SUMMARY_TIMEOUTS_MS[attempt]
+                    );
                     if (summary) {
                         if (attempt > 0) {
                             console.info('[Dashboard] Pay summary recovered on attempt', attempt + 1);
@@ -224,6 +240,18 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
             const accNo = detail.billingAccount?.accountNo;
 
             if (accNo) {
+                // The balance gets a clear run at the connection before the five
+                // lists below compete with it for one.
+                //
+                // On a fast line this resolves at once — the summary landed long
+                // ago. On a weak signal it decides whether the figure the customer
+                // opened the app for arrives before, or behind, five lists of
+                // history they have not scrolled to yet.
+                await Promise.race([
+                    paySummaryDone,
+                    new Promise((resolve) => setTimeout(resolve, SECONDARY_REQUEST_GRACE_MS)),
+                ]);
+
                 // 2. Fetch everything else in parallel using correct backend routes
                 const [logsRes, txRes, soaRes, invoiceRes, soRes] = await Promise.all([
                     apiClient.get(`/payment-portal-logs/account/${accNo}`).catch((e) => { console.error('Payment logs fetch error:', e); return { data: { data: [] } }; }),
