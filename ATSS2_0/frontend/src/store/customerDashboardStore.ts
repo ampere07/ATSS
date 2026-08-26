@@ -69,7 +69,33 @@ interface CustomerDashboardState {
      */
     requestedAccountNo: string | null;
 
+    /**
+     * What fetchBillsData needs to issue its own requests, captured by the main
+     * load so Bills does not have to resolve the billing account a second time.
+     */
+    billsAccountNo: string | null;
+    billsBillingId: number | null;
+    billsIsCustomerRole: boolean;
+
+    /**
+     * Bills has loaded once this session. Opening the tab again reads what is
+     * already in the store rather than refetching, so switching between tabs is
+     * immediate; a refresh clears it.
+     */
+    billsLoaded: boolean;
+
     fetchCustomerData: (usernameOrAccountNo: string, isCustomerRole?: boolean) => Promise<void>;
+
+    /**
+     * Invoices, statements and service charges — the three lists only Bills
+     * renders. Deliberately not part of the dashboard load: see the note where
+     * they used to be fetched.
+     *
+     * Safe to call on every render of Bills. It returns immediately when the
+     * data is already loaded or a load is already running.
+     */
+    fetchBillsData: (force?: boolean) => Promise<void>;
+
     refreshCustomerData: () => Promise<void>;
 }
 
@@ -100,6 +126,10 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
     isInvoicesLoading: false,
     isSoaLoading: false,
     isServiceChargesLoading: false,
+    billsAccountNo: null,
+    billsBillingId: null,
+    billsIsCustomerRole: true,
+    billsLoaded: false,
     isFromCache: false,
     error: null,
     fetchedAccountNo: null,
@@ -134,9 +164,11 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
             isDetailLoading: true,
             isPaySummaryLoading: true,
             isPaymentsLoading: true,
-            isInvoicesLoading: true,
-            isSoaLoading: true,
-            isServiceChargesLoading: true,
+            // NOT set: this load no longer requests invoices, statements or
+            // service charges. Marking them in-flight when no request exists
+            // would leave Bills' skeletons up for a load that is never coming,
+            // and the dashboard reads isInvoicesLoading for its due-date
+            // fallback.
             error: null,
             requestedAccountNo: usernameOrAccountNo,
         });
@@ -166,9 +198,6 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
         // database. The endpoint is a cheap read of one row, so asking twice
         // costs little and recovers the common case.
         //
-        // Deliberately one retry, not a loop: if the second attempt fails too,
-        // something is actually wrong and the card should say so rather than
-        // spin.
         // Three attempts, each on a longer leash than the last.
         //
         // The balance is the one figure the page exists to show: everything
@@ -237,21 +266,21 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
         // Publish the primary record on its own, the moment it arrives. Everything the
         // header, profile card and balance card render lives in this one response, so
         // the customer sees their real name, plan and amount due one round trip in
-        // rather than waiting on the six list calls below. isFromCache clears here:
+        // rather than waiting on the list calls below. isFromCache clears here:
         // from this point what is on screen is server-confirmed.
         set({ customerDetail: detail, isDetailLoading: false, isFromCache: false });
 
         const accNo = detail.billingAccount.accountNo;
         const billingId = detail.billingAccount.id;
 
-        // The balance gets a clear run at the connection before the six lists
-        // below compete with it for one.
+        // The balance gets a clear run at the connection before the payment
+        // lists below compete with it for one.
         //
         // A browser will only hold a handful of requests to a host at once. On a
         // fast line that never matters — the summary has landed long before this
         // point and the race resolves immediately. On a slow one it decides
         // whether the figure the customer came for arrives before, or behind,
-        // six lists of history they have not scrolled to yet.
+        // lists of history they have not scrolled to yet.
         //
         // Bounded by the grace period rather than by the summary alone: if the
         // balance is on its third and longest attempt, the rest of the page
@@ -261,25 +290,18 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
             new Promise((resolve) => setTimeout(resolve, SECONDARY_REQUEST_GRACE_MS)),
         ]);
 
-        // The secondary payloads are requested together but published separately, each
-        // as soon as its own request lands. They used to share one Promise.all barrier
-        // and a single set() at the very end, which let the slowest of the six decide
-        // when *any* of them appeared.
-        const invoices = (isCustomerRole
-            ? invoiceService.getInvoicesByAccountNo(accNo)
-            : invoiceService.getInvoicesByAccount(billingId))
-            .catch(() => [])
-            .then((invoiceRes) => {
-                set({ invoiceRecords: invoiceRes || [], isInvoicesLoading: false });
-            });
-
-        const soa = (isCustomerRole
-            ? soaService.getStatementsByAccountNo(accNo)
-            : soaService.getStatementsByAccount(billingId))
-            .catch(() => [])
-            .then((soaRes) => {
-                set({ soaRecords: soaRes || [], isSoaLoading: false });
-            });
+        // Invoices, statements and service charges are NOT requested here.
+        //
+        // Nothing on the dashboard renders them: statements and service charges
+        // belong to Bills alone, and the dashboard's only use of invoices is a
+        // due-date fallback for when the pay-summary — which already carries
+        // dueDate — has failed. Fetching all three on load meant three requests
+        // per visit for data most visits never look at, competing with the one
+        // request the page actually depends on.
+        //
+        // Bills asks for them itself through fetchBillsData(), which is where
+        // they are read. See the accNo/billingId kept on the store for it.
+        set({ billsAccountNo: accNo, billsBillingId: billingId, billsIsCustomerRole: isCustomerRole });
 
         // Payments are one list assembled from two sources, so these two do have to
         // meet before the merged result can be published.
@@ -316,45 +338,31 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
             });
         });
 
-        // Same for service charges: manual charge logs and the charges carried on
-        // service orders are shown as one list.
-        const serviceCharges = Promise.all([
-            serviceChargeService.getServiceChargeLogsByAccountNo(accNo).catch(() => []),
-            serviceChargeService.getServiceOrdersByAccountNo(accNo).catch(() => []),
-        ]).then(([serviceChargeLogsRes, serviceOrdersRes]) => {
-            // Process Service Charges
-            const formattedServiceChargeLogs: ServiceChargeRecord[] = Array.isArray(serviceChargeLogsRes) ? serviceChargeLogsRes.map((l: any) => ({
-                id: `log-${l.id}`,
-                date: l.created_at,
-                amount: parseFloat(l.service_charge),
-                type: 'Manual Charge',
-                status: l.status || 'Unused',
-                remarks: l.remarks,
-                source: 'Log'
-            })) : [];
-
-            const formattedServiceOrderCharges: ServiceChargeRecord[] = Array.isArray(serviceOrdersRes) ? serviceOrdersRes
-                .filter((so: any) => parseFloat(so.service_charge) > 0)
-                .map((so: any) => ({
-                    id: `so-${so.id}`,
-                    date: so.created_at || so.timestamp,
-                    amount: parseFloat(so.service_charge),
-                    type: so.concern || 'Service Order',
-                    status: so.status === 'used' ? 'Used' : 'Unused',
-                    remarks: so.concern_remarks,
-                    source: 'Order'
-                })) : [];
-
-            set({
-                serviceChargeRecords: byDateDesc([...formattedServiceChargeLogs, ...formattedServiceOrderCharges]),
-                isServiceChargesLoading: false,
-            });
-        });
+        // Service charges are Bills' too — fetchBillsData owns them now.
 
         // Every list is already on screen by this point; awaiting them here only keeps
         // the promise honest for callers that await fetchCustomerData and then read the
         // store expecting a complete result.
-        await Promise.all([paySummaryDone, invoices, soa, payments, serviceCharges]);
+        //
+        // allSettled, not all. `all` rejects the moment any one of these does, and this
+        // await sits outside the try/catch above — so a single malformed response from
+        // any secondary list skipped the line below and left `isLoading` true for ever.
+        // From then on the guard at the top of this function early-returned on every
+        // later call, so the dashboard could never load again for that session: no
+        // refresh, no live update, and Try again did nothing either. The balance was
+        // whatever had landed before the throw, which is exactly the intermittent
+        // "no value on a fast connection" this was reported as.
+        //
+        // None of these lists is worth that. They are already rendered or already
+        // failed on their own terms; what matters here is that the flag comes down.
+        const names = ['pay-summary', 'payments'];
+        const settled = await Promise.allSettled([paySummaryDone, payments]);
+
+        settled.forEach((outcome, index) => {
+            if (outcome.status === 'rejected') {
+                console.error(`[Dashboard] ${names[index]} threw while loading`, outcome.reason);
+            }
+        });
 
         set({ fetchedAccountNo: usernameOrAccountNo, isLoading: false });
 
@@ -368,6 +376,131 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
             paymentRecords: loaded.paymentRecords,
             serviceChargeRecords: loaded.serviceChargeRecords,
         });
+    },
+
+    /**
+     * The three lists only Bills renders, fetched when Bills is opened.
+     *
+     * Guarded three ways so it can be called from a render without thought:
+     * already-loaded returns immediately, an in-flight load is not started
+     * twice, and a load before the main fetch has resolved the account is
+     * deferred rather than issued against a null.
+     */
+    fetchBillsData: async (force = false) => {
+        const {
+            billsLoaded, billsAccountNo, billsBillingId, billsIsCustomerRole,
+            isInvoicesLoading, isSoaLoading, isServiceChargesLoading,
+        } = get();
+
+        // Already have it, and nobody asked for it again.
+        if (billsLoaded && !force) return;
+
+        // Already running. Without this, Bills' effect firing twice — a remount,
+        // StrictMode, a dependency changing — issued every request twice.
+        if (isInvoicesLoading || isSoaLoading || isServiceChargesLoading) return;
+
+        // The main load has not resolved the account yet. Bills calls this again
+        // when customerDetail lands, so there is nothing to queue here.
+        if (!billsAccountNo) return;
+
+        set({ isInvoicesLoading: true, isSoaLoading: true, isServiceChargesLoading: true });
+
+        const accNo = billsAccountNo;
+        const billingId = billsBillingId ?? 0;
+        const isCustomerRole = billsIsCustomerRole;
+
+        // Each list publishes as it lands and owns its own failure: one list
+        // going missing must not cost the other two, so every request carries a
+        // catch and every branch clears its own flag.
+        // Each resolves to whether it actually landed, which is what decides
+        // below whether this counts as loaded.
+        const invoices = (isCustomerRole
+            ? invoiceService.getInvoicesByAccountNo(accNo)
+            : invoiceService.getInvoicesByAccount(billingId))
+            .then((invoiceRes) => {
+                set({ invoiceRecords: Array.isArray(invoiceRes) ? invoiceRes : [], isInvoicesLoading: false });
+                return true;
+            })
+            .catch((err) => {
+                console.error('[Bills] invoices failed', err);
+                set({ isInvoicesLoading: false });
+                return false;
+            });
+
+        const soa = (isCustomerRole
+            ? soaService.getStatementsByAccountNo(accNo)
+            : soaService.getStatementsByAccount(billingId))
+            .then((soaRes) => {
+                set({ soaRecords: Array.isArray(soaRes) ? soaRes : [], isSoaLoading: false });
+                return true;
+            })
+            .catch((err) => {
+                console.error('[Bills] statements failed', err);
+                set({ isSoaLoading: false });
+                return false;
+            });
+
+        // Manual charge logs and the charges carried on service orders are shown
+        // as one list, so these two do have to meet before publishing.
+        let serviceChargesPartial = false;
+        const serviceCharges = Promise.all([
+            serviceChargeService.getServiceChargeLogsByAccountNo(accNo)
+                .catch((err) => { console.error('[Bills] charge logs failed', err); serviceChargesPartial = true; return []; }),
+            serviceChargeService.getServiceOrdersByAccountNo(accNo)
+                .catch((err) => { console.error('[Bills] service orders failed', err); serviceChargesPartial = true; return []; }),
+        ]).then(([serviceChargeLogsRes, serviceOrdersRes]) => {
+            const formattedServiceChargeLogs: ServiceChargeRecord[] = Array.isArray(serviceChargeLogsRes)
+                ? serviceChargeLogsRes.map((l: any) => ({
+                    id: `log-${l.id}`,
+                    date: l.created_at,
+                    amount: parseFloat(l.service_charge),
+                    type: 'Manual Charge',
+                    status: l.status || 'Unused',
+                    remarks: l.remarks,
+                    source: 'Log',
+                }))
+                : [];
+
+            const formattedServiceOrderCharges: ServiceChargeRecord[] = Array.isArray(serviceOrdersRes)
+                ? serviceOrdersRes
+                    .filter((so: any) => parseFloat(so.service_charge) > 0)
+                    .map((so: any) => ({
+                        id: `so-${so.id}`,
+                        date: so.created_at || so.timestamp,
+                        amount: parseFloat(so.service_charge),
+                        type: so.concern || 'Service Order',
+                        status: so.status === 'used' ? 'Used' : 'Unused',
+                        remarks: so.concern_remarks,
+                        source: 'Order',
+                    }))
+                : [];
+
+            set({
+                serviceChargeRecords: byDateDesc([...formattedServiceChargeLogs, ...formattedServiceOrderCharges]),
+                isServiceChargesLoading: false,
+            });
+            return !serviceChargesPartial;
+        }).catch((err) => {
+            // The mapping above can throw on an unexpected shape, not just the
+            // requests. Either way the flag has to come down or Bills shimmers
+            // for ever.
+            console.error('[Bills] service charges failed', err);
+            set({ isServiceChargesLoading: false });
+            return false;
+        });
+
+        // allSettled: a rejection here must not skip the bookkeeping below, or
+        // the three in-flight flags would be the only thing left holding the
+        // door and a later visit could not get in.
+        const outcomes = await Promise.allSettled([invoices, soa, serviceCharges]);
+
+        // Only a clean pass counts as loaded. A tab whose lists failed retries on
+        // the next visit rather than staying empty for the rest of the session —
+        // and since only mounting Bills calls this, that is at most one more
+        // attempt per visit, not a loop.
+        const allLanded = outcomes.every((o) => o.status === 'fulfilled' && o.value === true);
+
+        set({ billsLoaded: allLanded });
     },
 
     refreshCustomerData: async () => {
@@ -384,7 +517,11 @@ export const useCustomerDashboardStore = create<CustomerDashboardState>((set, ge
             // isLoading here is what makes the button mean something: the old
             // request's promise may still be running, but its result is no
             // longer what the page is waiting on.
-            set({ fetchedAccountNo: null, isLoading: false });
+            //
+            // billsLoaded is cleared too, so a refresh genuinely refreshes:
+            // Bills fetches its three lists again the next time it is opened,
+            // rather than showing what was loaded before the refresh.
+            set({ fetchedAccountNo: null, isLoading: false, billsLoaded: false });
             await get().fetchCustomerData(target);
         }
     }

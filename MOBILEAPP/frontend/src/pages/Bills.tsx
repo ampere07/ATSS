@@ -267,7 +267,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
     const { width, height } = useWindowDimensions();
     const isMobile = width < 768;
     const isShort = height < 700;
-    const { customerDetail, payments: paymentRecords, soaRecords, invoiceRecords, isLoading: contextLoading, silentRefresh } = useCustomerDataContext();
+    const { customerDetail, payments: paymentRecords, soaRecords, invoiceRecords, isLoading: contextLoading, isBillsLoading, fetchBillsData, accountNo: resolvedAccountNo, silentRefresh } = useCustomerDataContext();
     const accountNo = customerDetail?.billingAccount?.accountNo || '';
     const balance = Number(customerDetail?.billingAccount?.accountBalance || 0);
     const [activeTab, setActiveTab] = useState<'soa' | 'invoices' | 'payments'>(initialTab);
@@ -359,6 +359,11 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
         initLoad();
         silentRefresh();
 
+        // Statements and invoices are no longer fetched at launch, so this screen
+        // asks for its own. A no-op after the first visit — the context keeps them —
+        // so returning to this tab does not re-request anything.
+        void fetchBillsData();
+
         const paletteSub = DeviceEventEmitter.addListener('colorPaletteChanged', (newPalette) => {
             setColorPalette(newPalette);
         });
@@ -368,6 +373,16 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
             paletteSub.remove();
         };
     }, []);
+
+    // The mount call above finds no account if this screen opened before the main
+    // load resolved one, or while a failed load was still retrying. This picks it
+    // up whenever it lands. fetchBillsData is a no-op once loaded, so this cannot
+    // start a second request.
+    useEffect(() => {
+        if (resolvedAccountNo) {
+            void fetchBillsData();
+        }
+    }, [resolvedAccountNo, fetchBillsData]);
 
     useEffect(() => {
         setCurrentPage(0);
@@ -477,13 +492,15 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
     const onRefresh = useCallback(async () => {
         setRefreshing(true);
         try {
-            await silentRefresh();
+            // allSettled: a failed statement list must not stop the payments on
+            // this same screen from refreshing.
+            await Promise.allSettled([silentRefresh(), fetchBillsData(true)]);
         } catch (error) {
             console.error('Refresh failed:', error);
         } finally {
             setRefreshing(false);
         }
-    }, [silentRefresh]);
+    }, [silentRefresh, fetchBillsData]);
 
     if (contextLoading && !customerDetail) return (
         <View style={styles.loadingContainer}>
@@ -646,9 +663,17 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa' }) => {
                 }
                 ListEmptyComponent={() => (
                     <View style={styles.emptyContainer}>
-                        <Text style={styles.emptyTitle}>
-                            {activeTab === 'soa' ? 'No Statements' : activeTab === 'invoices' ? 'No Invoices' : 'No History'}
-                        </Text>
+                        {/* Statements and invoices arrive after this screen opens now,
+                            so an empty list mid-load has to read as loading — not as
+                            "you have no invoices", which is a different and alarming
+                            thing to tell a customer. */}
+                        {isBillsLoading && activeTab !== 'payments' ? (
+                            <ActivityIndicator size="small" color={primaryColor} />
+                        ) : (
+                            <Text style={styles.emptyTitle}>
+                                {activeTab === 'soa' ? 'No Statements' : activeTab === 'invoices' ? 'No Invoices' : 'No History'}
+                            </Text>
+                        )}
                     </View>
                 )}
                 renderItem={({ item }) => (

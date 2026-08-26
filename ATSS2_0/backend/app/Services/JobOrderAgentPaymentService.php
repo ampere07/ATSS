@@ -178,21 +178,61 @@ class JobOrderAgentPaymentService
             ->select('u.id', 'u.first_name', 'u.middle_initial', 'u.last_name', 'u.email_address')
             ->get();
 
+        // Every agent the referral could belong to, not just the first.
+        //
+        // Returning the first match meant that where two agents shared a name,
+        // the commission always went to whichever row came back first — in
+        // practice the lowest user id — and the other could never be paid by
+        // name, with nothing written down to say it had happened.
+        $matches = [];
+        $exactEmail = null;
+
         foreach ($candidates as $candidate) {
             $fullName = trim(preg_replace('/\s+/', ' ', trim(
                 ($candidate->first_name ?? '') . ' ' . ($candidate->last_name ?? '')
             )));
+            $email = trim((string) ($candidate->email_address ?? ''));
 
-            if (AgentProgramme::referralBelongsToAgent(
-                $referredBy,
-                $fullName,
-                trim((string) ($candidate->email_address ?? ''))
-            )) {
-                return User::find($candidate->id);
+            if (!AgentProgramme::referralBelongsToAgent($referredBy, $fullName, $email)) {
+                continue;
+            }
+
+            $matches[] = ['id' => (int) $candidate->id, 'name' => $fullName, 'email' => $email];
+
+            // An address identifies exactly one account, so a referral written
+            // as an email is never ambiguous and always wins.
+            if ($email !== '' && strcasecmp(trim($referredBy), $email) === 0) {
+                $exactEmail = (int) $candidate->id;
             }
         }
 
-        return null;
+        if ($matches === []) {
+            return null;
+        }
+
+        if ($exactEmail !== null) {
+            return User::find($exactEmail);
+        }
+
+        if (count($matches) > 1) {
+            // Still settled with the first, because refusing to pay anybody is
+            // worse than paying the wrong one and being able to see it. The
+            // ambiguity is recorded so it can be corrected rather than sitting
+            // silent in the ledger.
+            Log::warning('[JOB ORDER PAYMENT] A referral matched more than one agent; '
+                . 'settling with the first and leaving the rest unpaid. Use the agent\'s '
+                . 'email address in "Referred By" to disambiguate.', [
+                    'job_order_id' => $jobOrder->getKey(),
+                    'referred_by'  => $referredBy,
+                    'matched'      => array_map(
+                        fn ($m) => "#{$m['id']} {$m['name']} <{$m['email']}>",
+                        $matches
+                    ),
+                    'settled_with' => $matches[0]['id'],
+                ]);
+        }
+
+        return User::find($matches[0]['id']);
     }
 
     /**

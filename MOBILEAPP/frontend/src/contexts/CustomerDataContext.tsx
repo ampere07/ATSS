@@ -79,6 +79,24 @@ interface CustomerDataContextType {
     invoiceRecords: InvoiceRecord[];
     serviceOrders: ServiceOrderRecord[];
     isLoading: boolean;
+    /**
+     * Statements and invoices, requested by Bills rather than at launch.
+     *
+     * Nothing on the dashboard renders them, so fetching them there put three
+     * requests on the connection ahead of the balance for lists most sessions
+     * never open. Call this when the tab mounts; it is a no-op once loaded, so
+     * tab switches are free. force reloads for pull-to-refresh.
+     */
+    fetchBillsData: (force?: boolean) => Promise<void>;
+    isBillsLoading: boolean;
+    /**
+     * The resolved billing account, or null until the main load returns one.
+     * Tabs watch it so they can load as soon as it appears, however late that is.
+     */
+    accountNo: string | null;
+    /** Service orders, requested by Support. Same contract as fetchBillsData. */
+    fetchSupportData: (force?: boolean) => Promise<void>;
+    isSupportLoading: boolean;
     error: string | null;
     refreshData: () => Promise<void>;
     silentRefresh: () => Promise<void>;
@@ -104,6 +122,9 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     const [soaRecords, setSoaRecords] = useState<SOARecord[]>([]);
     const [invoiceRecords, setInvoiceRecords] = useState<InvoiceRecord[]>([]);
     const [serviceOrders, setServiceOrders] = useState<ServiceOrderRecord[]>([]);
+    const [accountNo, setAccountNo] = useState<string | null>(null);
+    const [isBillsLoading, setIsBillsLoading] = useState<boolean>(false);
+    const [isSupportLoading, setIsSupportLoading] = useState<boolean>(false);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -117,6 +138,32 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     // the "do we have something to show?" guard; this is the "has the server actually
     // answered?" one, and the retry loop needs the second.
     const confirmedRef = React.useRef<boolean>(false);
+
+    /**
+     * The account the main load resolved, so the lazy tab loaders below do not
+     * have to resolve it again.
+     */
+    const accountNoRef = React.useRef<string | null>(null);
+
+    /**
+     * The lists Bills and Support own, mirrored into refs.
+     *
+     * Refs rather than the state above because the cache write and the load
+     * guards read them from inside callbacks that must not take the lists as
+     * dependencies — doing so would rebuild fetchData on every list update and
+     * remount the screens that depend on it, which is the problem
+     * customerDetailRef already exists to avoid.
+     */
+    const soaRecordsRef = React.useRef<SOARecord[]>([]);
+    const invoiceRecordsRef = React.useRef<InvoiceRecord[]>([]);
+
+    /** Each tab's data has been loaded once. Cleared by a forced refresh. */
+    const billsLoadedRef = React.useRef<boolean>(false);
+    const supportLoadedRef = React.useRef<boolean>(false);
+
+    /** A load is already running, so a second call is not started alongside it. */
+    const billsInFlightRef = React.useRef<boolean>(false);
+    const supportInFlightRef = React.useRef<boolean>(false);
 
     /**
      * Load the signed-in customer's data.
@@ -168,6 +215,8 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                     setPayments(cached.payments);
                     setSoaRecords(cached.soaRecords);
                     setInvoiceRecords(cached.invoiceRecords);
+                    soaRecordsRef.current = cached.soaRecords;
+                    invoiceRecordsRef.current = cached.invoiceRecords;
                     setIsFromCache(true);
                 }
             }
@@ -245,24 +294,35 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                 //
                 // On a fast line this resolves at once — the summary landed long
                 // ago. On a weak signal it decides whether the figure the customer
-                // opened the app for arrives before, or behind, five lists of
+                // opened the app for arrives before, or behind, lists of
                 // history they have not scrolled to yet.
                 await Promise.race([
                     paySummaryDone,
                     new Promise((resolve) => setTimeout(resolve, SECONDARY_REQUEST_GRACE_MS)),
                 ]);
 
-                // 2. Fetch everything else in parallel using correct backend routes
-                const [logsRes, txRes, soaRes, invoiceRes, soRes] = await Promise.all([
+                // 2. Only what the dashboard itself renders: the two payment
+                //    sources behind Recent Payments.
+                //
+                //    Statements, invoices and service orders are NOT requested
+                //    here any more. Nothing on this screen shows them — Bills
+                //    renders the first two, Support the third — so three of the
+                //    five requests were made on every dashboard open for data
+                //    most sessions never look at, competing with the balance.
+                //    Bills and Support ask for their own through
+                //    fetchBillsData() and fetchSupportData().
+                //
+                //    The account is kept so those two do not have to resolve it
+                //    again.
+                accountNoRef.current = accNo;
+                // Published as state as well, so a tab that mounted before the
+                // account resolved — or while a failed load was still retrying —
+                // is told when it finally does, instead of sitting empty.
+                setAccountNo(accNo);
+
+                const [logsRes, txRes] = await Promise.all([
                     apiClient.get(`/payment-portal-logs/account/${accNo}`).catch((e) => { console.error('Payment logs fetch error:', e); return { data: { data: [] } }; }),
                     apiClient.get(`/transactions/by-account/${accNo}`).catch((e) => { console.error('Transactions fetch error:', e); return { data: { data: [] } }; }),
-                    apiClient.get(`/statement-of-accounts/by-account/${accNo}`).catch((e) => { console.error('SOA fetch error:', e); return { data: { data: [] } }; }),
-                    apiClient.get(`/invoices/by-account/${accNo}`).catch((e) => { console.error('Invoices fetch error:', e); return { data: { data: [] } }; }),
-                    // The account-scoped route, not the `/service-orders` collection: the
-                    // collection is staff-only (it needs the `service-order` page key, which
-                    // the customer role does not hold) and answered 403 here. by-account
-                    // returns the same { data: [...] } shape, already filtered to this account.
-                    apiClient.get(`/service-orders/by-account/${accNo}`).catch((e) => { console.error('Service orders fetch error:', e); return { data: { success: false, data: [] } }; })
                 ]);
 
                 // Process Payment Portal Logs
@@ -292,39 +352,15 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                 );
 
                 setPayments(allPayments);
-                setSoaRecords(soaRes?.data?.data || []);
-                setInvoiceRecords(invoiceRes?.data?.data || []);
 
-                // Process Service Orders
-                const soData = soRes?.data?.data || [];
-                const mappedOrders: ServiceOrderRecord[] = Array.isArray(soData) ? soData.map((order: any) => ({
-                    id: order.id,
-                    date: order.created_at ? (() => {
-                        const d = new Date(order.created_at);
-                        if (isNaN(d.getTime())) return '';
-                        return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
-                    })() : '',
-                    // Preserve the precise submission time for the support cooldown calc.
-                    rawTimestamp: order.created_at || null,
-                    requestId: order.ticket_id,
-                    issue: order.concern || '',
-                    issueDetails: order.concern_remarks || '',
-                    status: order.support_status || 'Pending',
-                    statusNote: order.support_remarks || '',
-                    assignedEmail: order.assigned_email || '',
-                    visitNote: order.visit_remarks || '',
-                    visitInfo: { status: order.visit_status || 'Pending' }
-                })) : [];
-                setServiceOrders(mappedOrders);
-
-                // Written from the locals that were just published, so the next cold start
-                // opens on this instead of on skeletons. Not awaited: it is a local write
-                // and nothing on screen is waiting for it.
+                // Statements and invoices are whatever Bills last loaded — kept
+                // rather than blanked, so a refresh from the dashboard does not
+                // wipe a list the customer has already seen.
                 writeDashboardCache(parsedUser.username, {
                     customerDetail: detail,
                     payments: allPayments,
-                    soaRecords: soaRes?.data?.data || [],
-                    invoiceRecords: invoiceRes?.data?.data || [],
+                    soaRecords: soaRecordsRef.current,
+                    invoiceRecords: invoiceRecordsRef.current,
                 });
             }
 
@@ -352,7 +388,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
      * and DashboardCustomer's effect is keyed on the account no — which changes twice as it
      * resolves, from 'N/A' to the stored username to the account on the detail response —
      * so it called silentRefresh again each time. Nothing deduplicated them, so the
-     * customer's phone opened by requesting the same seven payloads three times over, on
+     * customer's phone opened by requesting the same payloads three times over, on
      * the connection this whole change is about.
      *
      * A silent load in progress will absorb a non-silent caller, so a refresh that wanted
@@ -366,6 +402,119 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         inFlightRef.current = run;
         return run;
     }, [runFetch]);
+
+    /**
+     * The account the tab loaders need, waiting for the main load if it has not
+     * resolved one yet.
+     *
+     * Bills and Support can be opened before the dashboard's fetch has returned —
+     * the tab bar is live immediately, which is the point of this change — so
+     * "no account yet" has to mean "wait", not "give up". Without this a customer
+     * who went straight to Bills got an empty screen until they navigated away
+     * and back.
+     */
+    const resolveAccountNo = useCallback(async (): Promise<string | null> => {
+        if (accountNoRef.current) return accountNoRef.current;
+        if (inFlightRef.current) await inFlightRef.current;
+        return accountNoRef.current;
+    }, []);
+
+    /**
+     * Statements and invoices, for Bills.
+     *
+     * Loaded on the first visit to the tab and then kept, so moving between tabs
+     * costs nothing. force is for pull-to-refresh.
+     */
+    const fetchBillsData = useCallback(async (force = false): Promise<void> => {
+        if (billsLoadedRef.current && !force) return;
+        if (billsInFlightRef.current) return;
+
+        billsInFlightRef.current = true;
+        setIsBillsLoading(true);
+
+        try {
+            const accNo = await resolveAccountNo();
+            if (!accNo) return;
+
+            // Separate catches, not one around both: a failed statements request
+            // must still leave the customer their invoices.
+            const [soaRes, invoiceRes] = await Promise.all([
+                apiClient.get(`/statement-of-accounts/by-account/${accNo}`).catch((e) => { console.error('SOA fetch error:', e); return null; }),
+                apiClient.get(`/invoices/by-account/${accNo}`).catch((e) => { console.error('Invoice fetch error:', e); return null; }),
+            ]);
+
+            if (soaRes) {
+                const rows = soaRes?.data?.data || [];
+                soaRecordsRef.current = rows;
+                setSoaRecords(rows);
+            }
+
+            if (invoiceRes) {
+                const rows = invoiceRes?.data?.data || [];
+                invoiceRecordsRef.current = rows;
+                setInvoiceRecords(rows);
+            }
+
+            // Only a clean pass counts as loaded, so a tab that failed retries on
+            // the next visit instead of staying empty for the session.
+            if (soaRes && invoiceRes) billsLoadedRef.current = true;
+        } catch (e) {
+            console.error('Bills data fetch error:', e);
+        } finally {
+            billsInFlightRef.current = false;
+            setIsBillsLoading(false);
+        }
+    }, [resolveAccountNo]);
+
+    /**
+     * Service orders, for Support. Same guards as fetchBillsData.
+     */
+    const fetchSupportData = useCallback(async (force = false): Promise<void> => {
+        if (supportLoadedRef.current && !force) return;
+        if (supportInFlightRef.current) return;
+
+        supportInFlightRef.current = true;
+        setIsSupportLoading(true);
+
+        try {
+            const accNo = await resolveAccountNo();
+            if (!accNo) return;
+
+            const soRes = await apiClient
+                .get(`/service-orders/by-account/${accNo}`)
+                .catch((e) => { console.error('Service orders fetch error:', e); return null; });
+
+            if (!soRes) return;
+
+            const soData = soRes?.data?.data || [];
+            const mappedOrders: ServiceOrderRecord[] = Array.isArray(soData) ? soData.map((order: any) => ({
+                id: order.id,
+                date: order.created_at ? (() => {
+                    const d = new Date(order.created_at);
+                    if (isNaN(d.getTime())) return '';
+                    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
+                })() : '',
+                // Preserve the precise submission time for the support cooldown calc.
+                rawTimestamp: order.created_at || null,
+                requestId: order.ticket_id,
+                issue: order.concern || '',
+                issueDetails: order.concern_remarks || '',
+                status: order.support_status || 'Pending',
+                statusNote: order.support_remarks || '',
+                assignedEmail: order.assigned_email || '',
+                visitNote: order.visit_remarks || '',
+                visitInfo: { status: order.visit_status || 'Pending' }
+            })) : [];
+
+            setServiceOrders(mappedOrders);
+            supportLoadedRef.current = true;
+        } catch (e) {
+            console.error('Support data fetch error:', e);
+        } finally {
+            supportInFlightRef.current = false;
+            setIsSupportLoading(false);
+        }
+    }, [resolveAccountNo]);
 
     // A failed first load used to be permanent. This runs once on mount, and
     // getCustomerDetail turns any 401, timeout or dropped connection into a plain
@@ -414,7 +563,25 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         };
     }, [fetchData]);
 
-    const refreshData = useCallback(async () => { await fetchData(true, false); }, [fetchData]);
+    /**
+     * Pull-to-refresh. Reloads the dashboard, then re-runs only the tab loaders
+     * the customer has actually opened this session — a refresh from the
+     * dashboard should not go and fetch lists they never asked for, which is
+     * the whole reason those requests were split out.
+     */
+    const refreshData = useCallback(async () => {
+        const hadBills = billsLoadedRef.current;
+        const hadSupport = supportLoadedRef.current;
+        billsLoadedRef.current = false;
+        supportLoadedRef.current = false;
+
+        await fetchData(true, false);
+
+        await Promise.allSettled([
+            hadBills ? fetchBillsData(true) : Promise.resolve(),
+            hadSupport ? fetchSupportData(true) : Promise.resolve(),
+        ]);
+    }, [fetchData, fetchBillsData, fetchSupportData]);
     const silentRefresh = useCallback(async () => { await fetchData(true, true); }, [fetchData]);
 
     return (
@@ -429,6 +596,11 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                 invoiceRecords,
                 serviceOrders,
                 isLoading,
+                fetchBillsData,
+                isBillsLoading,
+                accountNo,
+                fetchSupportData,
+                isSupportLoading,
                 error,
                 refreshData,
                 silentRefresh,

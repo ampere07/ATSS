@@ -47,7 +47,18 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
     const [displayName, setDisplayName] = useState('');
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
 
-    const { soaRecords, invoiceRecords, paymentRecords, serviceChargeRecords, customerDetail, isLoading, fetchCustomerData } = useCustomerDashboardStore();
+    const { soaRecords, invoiceRecords, paymentRecords, serviceChargeRecords, customerDetail, isLoading, fetchCustomerData, fetchBillsData, billsAccountNo, isSoaLoading, isInvoicesLoading, isServiceChargesLoading } = useCustomerDashboardStore();
+
+    /**
+     * What to put in an empty table.
+     *
+     * These three lists are fetched by this page now rather than at sign-in, so
+     * an empty one is far more often "still coming" than "you have none" — and
+     * telling a customer they have no invoices when the request is still in
+     * flight is a different and more alarming claim than the truth.
+     */
+    const emptyMessage = (stillLoading: boolean, noun: string) =>
+        stillLoading ? `Loading ${noun}…` : `No ${noun} found.`;
 
     const accountNo = customerDetail?.billingAccount?.accountNo || '';
     const balance = customerDetail?.billingAccount?.accountBalance || 0;
@@ -89,6 +100,12 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
 
                     if (parsedUser.username) {
                         await fetchCustomerData(parsedUser.username, parsedUser.role === 'customer');
+
+                        // Bills owns these three lists: the dashboard no longer
+                        // fetches invoices, statements or service charges, so this
+                        // is where they are asked for. Guarded in the store, so a
+                        // second visit costs nothing.
+                        void fetchBillsData();
 
                         const updatedDetail = useCustomerDashboardStore.getState().customerDetail;
                         if (updatedDetail && updatedDetail.billingAccount) {
@@ -132,6 +149,10 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                     const parsedUser = JSON.parse(storedUser);
                     if (parsedUser.username) {
                         await fetchCustomerData(parsedUser.username, parsedUser.role === 'customer');
+                        // Forced: these three lists are this page's own now, and an
+                        // invoice- or soa-updated event is precisely the case they
+                        // must not be served from what was already loaded.
+                        await fetchBillsData(true);
                         console.log('[Bills Soketi] Data refreshed successfully');
                     }
                 }
@@ -160,7 +181,18 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
             pusher.unsubscribe('soa');
             pusher.unsubscribe('payments');
         };
-    }, [fetchCustomerData]);
+    }, [fetchCustomerData, fetchBillsData]);
+
+    // The dashboard load may still have been running when the effect above ran,
+    // in which case the account was not resolved yet and fetchBillsData had
+    // nothing to work with. It becomes available a moment later; this picks it
+    // up then. The store's own guards make a duplicate call here a no-op, so
+    // this cannot double-fetch what the effect above already started.
+    useEffect(() => {
+        if (billsAccountNo) {
+            void fetchBillsData();
+        }
+    }, [billsAccountNo, fetchBillsData]);
 
     // Restriction logic removed as requested
 
@@ -331,7 +363,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                         {/* Mobile List View */}
                         <div className="md:hidden">
                             {currentSoaRecords.length === 0 ? (
-                                <div className="p-8 text-center text-gray-500">No statements found.</div>
+                                <div className="p-8 text-center text-gray-500">{emptyMessage(isSoaLoading, 'statements')}</div>
                             ) : (
                                 currentSoaRecords.map((record) => (
                                     <div key={record.id} className="p-4 border-b border-gray-100 last:border-0">
@@ -374,7 +406,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                                 </thead>
                                 <tbody>
                                     {currentSoaRecords.length === 0 ? (
-                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">No statements found.</td></tr>
+                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">{emptyMessage(isSoaLoading, 'statements')}</td></tr>
                                     ) : (
                                         currentSoaRecords.map((record) => (
                                             <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition">
@@ -428,7 +460,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                         {/* Mobile List View */}
                         <div className="md:hidden">
                             {currentInvoiceRecords.length === 0 ? (
-                                <div className="p-8 text-center text-gray-500">No invoices found.</div>
+                                <div className="p-8 text-center text-gray-500">{emptyMessage(isInvoicesLoading, 'invoices')}</div>
                             ) : (
                                 currentInvoiceRecords.map((record) => (
                                     <div key={record.id} className="p-4 border-b border-gray-100 last:border-0">
@@ -470,7 +502,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                                 </thead>
                                 <tbody>
                                     {currentInvoiceRecords.length === 0 ? (
-                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">No invoices found.</td></tr>
+                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">{emptyMessage(isInvoicesLoading, 'invoices')}</td></tr>
                                     ) : (
                                         currentInvoiceRecords.map((record) => (
                                             <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition">
@@ -616,7 +648,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                         {/* Mobile List View */}
                         <div className="md:hidden">
                             {currentServiceChargeRecords.length === 0 ? (
-                                <div className="p-8 text-center text-gray-500">No service charges found.</div>
+                                <div className="p-8 text-center text-gray-500">{emptyMessage(isServiceChargesLoading, 'service charges')}</div>
                             ) : (
                                 currentServiceChargeRecords.map((record) => (
                                     <div key={record.id} className="p-4 border-b border-gray-100 last:border-0">
@@ -651,7 +683,7 @@ const Bills: React.FC<BillsProps> = ({ initialTab = 'soa', onNavigate }) => {
                                 </thead>
                                 <tbody>
                                     {currentServiceChargeRecords.length === 0 ? (
-                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">No service charges found.</td></tr>
+                                        <tr><td colSpan={4} className="p-8 text-center text-gray-500">{emptyMessage(isServiceChargesLoading, 'service charges')}</td></tr>
                                     ) : (
                                         currentServiceChargeRecords.map((record) => (
                                             <tr key={record.id} className="border-b border-gray-50 hover:bg-gray-50 transition">

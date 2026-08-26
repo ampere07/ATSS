@@ -15,6 +15,32 @@ use App\Services\ActivityLogService;
 class UserController extends Controller
 {
     /**
+     * The relations a user listing may carry for this caller.
+     *
+     * `agentBalance` holds an agent's commission RATE, quota, incentive value
+     * and every earned figure they have. Reading the user list is open to
+     * holders of `job-order` / `work-order` / `application-management` (the
+     * technician and assignee pickers need it), and an AGENT holds two of
+     * those — so eager-loading the balance unconditionally handed every agent
+     * a full read of their colleagues' rates and earnings.
+     *
+     * It is loaded only for a caller who is entitled to manage agents or users,
+     * which is exactly who the Agent Payout, Agent Management and payout modal
+     * screens are drawn for.
+     */
+    private function listRelationsFor($authUser): array
+    {
+        $base = ['organization', 'role', 'agent'];
+
+        $mayReadBalances = Permissions::allows($authUser, [
+            'user-management', 'agent-management', 'team-agent',
+            'agent-payout', 'bonus-history.payout',
+        ]);
+
+        return $mayReadBalances ? array_merge($base, ['agentBalance']) : $base;
+    }
+
+    /**
      * May the caller only touch agent accounts?
      *
      * Agent Management renders this same controller with `agentOnly` set, and
@@ -70,7 +96,7 @@ class UserController extends Controller
             $organizationId = $user ? $user->organization_id : null;
             $roleId = $user ? $user->role_id : null;
 
-            $query = User::with(['organization', 'role', 'agent', 'agentBalance']);
+            $query = User::with($this->listRelationsFor($user));
             
             // A Global SuperAdmin must have role_id 7 AND no organization_id
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
@@ -242,7 +268,7 @@ class UserController extends Controller
             $roleId = $authUser ? $authUser->role_id : null;
             $isGlobalAdmin = ($roleId == 7 && $organizationId === null);
             
-            $user = User::with(['organization', 'role', 'agent', 'agentBalance'])->findOrFail($id);
+            $user = User::with($this->listRelationsFor($authUser))->findOrFail($id);
             
             if (!$isGlobalAdmin) {
                 if ($organizationId) {

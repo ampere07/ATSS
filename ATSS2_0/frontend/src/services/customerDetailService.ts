@@ -1,4 +1,5 @@
 import apiClient from '../config/api';
+import { reportClientEvent } from './clientLogService';
 import { BillingDetailRecord } from '../types/billing';
 import { accountStatusFrom, sessionStatusFrom } from '../utils/onlineStatus';
 
@@ -216,6 +217,15 @@ export const getCustomerPaySummary = async (
       hasData: !!response.data?.data,
     });
 
+    // Reported as well as logged. A console line is only readable by somebody
+    // with DevTools open on the device it happened to, which is never the
+    // customer this is failing for.
+    reportClientEvent('pay-summary-empty', {
+      accountNo,
+      success: String(response.data?.success),
+      hasData: String(!!response.data?.data),
+    });
+
     return null;
   } catch (error: any) {
     // Swallowed for the caller's sake — the dashboard falls back to the fuller
@@ -226,6 +236,17 @@ export const getCustomerPaySummary = async (
       accountNo,
       timeoutMs,
       status: error?.response?.status ?? null,
+      message: error?.response?.data?.message || error?.message || 'unknown',
+    });
+
+    // `code` matters as much as `status` here: axios reports a timeout as
+    // ECONNABORTED with no status at all, which is precisely the case that
+    // cannot be told apart from a network drop without it.
+    reportClientEvent('pay-summary-failed', {
+      accountNo,
+      timeoutMs,
+      status: error?.response?.status ?? 'none',
+      code: error?.code ?? 'none',
       message: error?.response?.data?.message || error?.message || 'unknown',
     });
 

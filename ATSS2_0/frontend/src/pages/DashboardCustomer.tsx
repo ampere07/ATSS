@@ -7,6 +7,7 @@ import { paymentService, PendingPayment } from '../services/paymentService'; // 
 import { useCustomerDashboardStore } from '../store/customerDashboardStore';
 import { settingsColorPaletteService, getCachedActivePalette, ColorPalette } from '../services/settingsColorPaletteService';
 import pusher from '../services/pusherService';
+import { reportClientEvent } from '../services/clientLogService';
 
 // Interfaces for data types
 interface Payment {
@@ -234,6 +235,31 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     // offer the retry instead of animating for ever.
     const balanceRequestsSettled = !isPaySummaryLoading && !isDetailLoading;
     const loadFailedOutright = !balanceKnown && (balanceRequestsSettled || !!loadError);
+
+    // Report the outcome the customer actually sees.
+    //
+    // The service reports why each individual request failed; this reports that
+    // the card gave up, which is the thing being complained about and is not the
+    // same fact — the balance can also go missing with every request apparently
+    // fine, and only this would catch that. Once per session per account, so a
+    // re-render cannot turn it into a stream.
+    // The account is derived here rather than reusing the `accountNo` further
+    // down: that one is declared below this point, and the page's hooks have to
+    // stay above the loading early-return to keep their order fixed.
+    useEffect(() => {
+        if (loadFailedOutright) {
+            reportClientEvent('balance-unavailable', {
+                accountNo: paySummary?.accountNo
+                    || customerDetail?.billingAccount?.accountNo
+                    || user?.username
+                    || 'unknown',
+                hadDetail: String(!!customerDetail),
+                hadPaySummary: String(!!paySummary),
+                fromCache: String(isFromCache),
+                error: loadError || 'none',
+            });
+        }
+    }, [loadFailedOutright, customerDetail, paySummary, isFromCache, loadError, user]);
 
     // The summary's flag is what labels the button on load; the fuller pendingPayment
     // object only exists once Pay Now has been clicked and fetched the payment URL.

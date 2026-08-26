@@ -63,6 +63,25 @@ return [
             'level' => env('LOG_LEVEL', 'debug'),
         ],
 
+        /*
+        | What went wrong on the customer's device.
+        |
+        | The dashboard's balance card fails in the browser, where nothing on
+        | this server can see it — the request the customer's phone could not
+        | complete never arrives to be logged. A fault nobody can reproduce is
+        | then invisible: the endpoint answers correctly for everyone who tries
+        | it, and the customer is left looking at "Balance unavailable".
+        |
+        | Kept in its own file rather than laravel.log so it can be read on its
+        | own, and rotated because it is written by clients rather than by us.
+        */
+        'client' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/customer-dashboard.log'),
+            'level' => 'debug',
+            'days' => 14,
+        ],
+
         'daily' => [
             'driver' => 'daily',
             'path' => storage_path('logs/laravel.log'),

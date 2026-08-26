@@ -13,9 +13,11 @@ use App\Models\AgentBalance;
 use App\Models\BillingConfig;
 use App\Models\User;
 use App\Models\AuditTrailLog;
+use App\Support\Permissions;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\Rule;
 use Carbon\Carbon;
 
 class CommissionController extends Controller
@@ -35,7 +37,7 @@ class CommissionController extends Controller
             $userRole = strtolower($user->role->role_name ?? '');
 
             // Non-admins can only see their own history
-            if (!in_array($userRole, ['admin', 'billing', 'superadmin'])) {
+            if (!in_array($userRole, self::ADMIN_ROLES, true)) {
                 $agentId = $user->id;
             }
 
@@ -79,23 +81,42 @@ class CommissionController extends Controller
                     'customer' => $item->agent ? ($item->agent->full_name ?? ($item->agent->first_name . ' ' . $item->agent->last_name)) : 'Unknown',
                     'service' => 'Payout (Ref: ' . $item->ref_number . ')',
                     'date' => $item->created_at ? date('M d, Y', strtotime($item->created_at)) : null,
-                    'status' => 'Paid',
+                    // The record's real approval state. This was hardcoded to
+                    // 'Paid', so a Pending payout — one that has moved no money
+                    // at all — was reported to the client as settled. Rows
+                    // written before approvals existed are already applied,
+                    // hence the Approved default, matching getHistory().
+                    'status' => $item->status ?? self::STATUS_APPROVED,
                     'amount' => '₱' . number_format($item->total_amount, 2),
                     'commission_id_list' => $item->commission_id_list,
                     'type' => $item->type
                 ];
             });
 
-            // Calculate totals
-            $totalCommission = $history->sum('total_amount');
-            $thisMonthCommission = $history->whereBetween('created_at', [now()->startOfMonth(), now()->endOfMonth()])->sum('total_amount');
+            // Calculate totals.
+            //
+            // "total" counts only what has actually been approved, and "pending"
+            // is the figure still awaiting sign-off. `pending` used to be a
+            // hardcoded zero and `total` counted rejected and pending records
+            // alike, so the two tiles could not be reconciled with the list
+            // beneath them.
+            $isApproved = fn ($item) => ($item->status ?? self::STATUS_APPROVED) === self::STATUS_APPROVED;
+            $isPending  = fn ($item) => ($item->status ?? self::STATUS_APPROVED) === self::STATUS_PENDING;
+
+            $approved = $history->filter($isApproved);
+
+            $totalCommission = $approved->sum('total_amount');
+            $pendingCommission = $history->filter($isPending)->sum('total_amount');
+            $thisMonthCommission = $approved
+                ->whereBetween('created_at', [now()->startOfMonth(), now()->endOfMonth()])
+                ->sum('total_amount');
 
             return response()->json([
                 'success' => true,
                 'data' => $data,
                 'stats' => [
                     'total' => '₱' . number_format($totalCommission, 2),
-                    'pending' => '₱' . number_format(0, 2),
+                    'pending' => '₱' . number_format($pendingCommission, 2),
                     'thisMonth' => '₱' . number_format($thisMonthCommission, 2),
                     'totalCount' => $total,
                     'user_name' => $user->full_name ?? ($user->first_name . ' ' . $user->last_name),
@@ -124,7 +145,7 @@ class CommissionController extends Controller
             $userRole = strtolower($user->role->role_name ?? '');
 
             // Non-admins can only see their own history
-            if (!in_array($userRole, ['admin', 'billing', 'superadmin'])) {
+            if (!in_array($userRole, self::ADMIN_ROLES, true)) {
                 $agentId = $user->id;
             }
 
@@ -240,7 +261,11 @@ class CommissionController extends Controller
                 'proof_of_payment' => $optional . '|string',
                 'job_order_ids' => 'nullable|array',
                 'job_order_ids.*' => 'integer',
-                'type'          => 'nullable|string|max:50',
+                // Refused rather than guessed at. applyCommissionMovement()
+                // falls through to a COMMISSION debit for anything it does not
+                // recognise, so a typo used to take money out of the wrong
+                // bucket silently and irreversibly.
+                'type'          => ['nullable', 'string', 'max:50', Rule::in(self::PAYOUT_TYPES)],
                 'from_invoice'  => 'nullable|boolean',
             ]);
 
@@ -341,7 +366,7 @@ class CommissionController extends Controller
             $userRole = strtolower($user->role->role_name ?? '');
 
             // Non-admins can only see their own history
-            if (!in_array($userRole, ['admin', 'billing', 'superadmin'])) {
+            if (!in_array($userRole, self::ADMIN_ROLES, true)) {
                 $agentId = $user->id;
             }
 
@@ -701,7 +726,7 @@ class CommissionController extends Controller
             $userRole  = strtolower($user->role->role_name ?? '');
 
             // Non-admins can only see their own incentive history.
-            if (!in_array($userRole, ['admin', 'billing', 'superadmin'])) {
+            if (!in_array($userRole, self::ADMIN_ROLES, true)) {
                 $agentId = $user->id;
             }
 
@@ -812,6 +837,28 @@ class CommissionController extends Controller
     public const STATUS_APPROVED = 'Approved';
     public const STATUS_REJECTED = 'Rejected';
 
+    /**
+     * Every movement `applyCommissionMovement()` knows how to apply.
+     *
+     * Anything outside this list is refused at validation. The method's final
+     * `else` treats an unrecognised type as a commission debit, which is a
+     * sensible default for a legacy row but a silent, unrecoverable mistake for
+     * a request that simply misspelled one.
+     *
+     * 'achievement' is written by storeAchievement(), never posted by a client,
+     * but is listed so a record of that type can still be re-stated at approval.
+     */
+    public const PAYOUT_TYPES = [
+        'commission',
+        'incentives',
+        'incentives_payout',
+        'Bonus',
+        'Bonus_payout',
+        'balance',
+        'all',
+        'achievement',
+    ];
+
     /** Message shown when a payout has been recorded and is awaiting approval. */
     private function pendingMessageFor(?string $type): string
     {
@@ -845,6 +892,36 @@ class CommissionController extends Controller
         }
 
         return $recordOrganizationId === null || (int) $recordOrganizationId === (int) $organizationId;
+    }
+
+    /**
+     * Refuse a caller who may not sign payouts off, or null when they may.
+     *
+     * Defence in depth. ApiAccessControl already demands `agent-payout.approve`
+     * for these routes, but the four approve/reject methods carried no role
+     * check of their own — only an ORGANISATION check — so the middleware table
+     * was the single thing standing between an agent and approving their own
+     * payout. A route registered without the middleware, or a rule lost from
+     * the map, would have been enough.
+     *
+     * Asks the permission layer rather than matching a role name, so a custom
+     * role holding the key is accepted exactly as the middleware accepts it.
+     */
+    private function denyUnlessMayApprove($user)
+    {
+        if (Permissions::allows($user, 'agent-payout.approve')) {
+            return null;
+        }
+
+        Log::warning('[Agent Payout] Approval refused for a caller without agent-payout.approve', [
+            'user_id' => $user->id ?? null,
+            'role_id' => $user->role_id ?? null,
+        ]);
+
+        return response()->json([
+            'success' => false,
+            'message' => 'You do not have permission to approve or reject a payout.',
+        ], 403);
     }
 
     /** The identity recorded against an approval or rejection. */
@@ -1073,6 +1150,10 @@ class CommissionController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
+            if ($denied = $this->denyUnlessMayApprove($user)) {
+                return $denied;
+            }
+
             DB::beginTransaction();
 
             $history = AgentCommissionHistory::find($id);
@@ -1201,6 +1282,10 @@ class CommissionController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
+            if ($denied = $this->denyUnlessMayApprove($user)) {
+                return $denied;
+            }
+
             $history = AgentCommissionHistory::find($id);
             if (!$history) {
                 return response()->json(['success' => false, 'message' => 'Payout record not found'], 404);
@@ -1264,6 +1349,10 @@ class CommissionController extends Controller
             $user = auth()->user();
             if (!$user) {
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            if ($denied = $this->denyUnlessMayApprove($user)) {
+                return $denied;
             }
 
             DB::beginTransaction();
@@ -1349,6 +1438,10 @@ class CommissionController extends Controller
                 return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
             }
 
+            if ($denied = $this->denyUnlessMayApprove($user)) {
+                return $denied;
+            }
+
             $history = AgentBonusHistory::find($id);
             if (!$history) {
                 return response()->json(['success' => false, 'message' => 'Bonus record not found'], 404);
@@ -1403,28 +1496,83 @@ class CommissionController extends Controller
         }
     }
 
-    /** Roles that may read or act on another agent's records. */
-    private const ADMIN_ROLES = ['admin', 'billing', 'superadmin'];
+    /**
+     * Roles that may read or act on another agent's records.
+     *
+     * 'administrator' is the name the seeded role actually carries
+     * (Role::LOCKED_ROLE_NAMES), and it MUST stay in this list: without it an
+     * Administrator was silently rescoped to their own rows on every read
+     * endpoint here, so Agent Payout and Bonus History came back empty for
+     * every role-1 account while working for a SuperAdmin. 'admin' is kept
+     * beside it for deployments whose role row is named that way.
+     *
+     * Matches AgentInvoiceController::ADMIN_ROLES; the two must not drift.
+     */
+    private const ADMIN_ROLES = ['admin', 'administrator', 'billing', 'superadmin'];
 
     private function isAdminUser($user): bool
     {
         return in_array(strtolower($user->role->role_name ?? ''), self::ADMIN_ROLES, true);
     }
 
+    /**
+     * Fail-safe for deployed servers that predate the achievement migrations.
+     *
+     * It has to build the table storeAchievement() actually writes, not the one
+     * the first migration created. The repeating weekly/monthly tiers added
+     * period_type, period_key, cycle_start, cycle_end and job_order_ids
+     * (migrations 2026_08_11_000002 and 2026_08_12_000003); a table created
+     * without them accepted no claim at all — every Get Reward returned a 500.
+     *
+     * The columns are also added to a table that already exists but is missing
+     * them, which is the state a server left on the original migration is in.
+     */
     private function ensureAchievementClaimsTable(): void
     {
-        // Fail-safe for deployed servers that predate the migration.
-        if (\Illuminate\Support\Facades\Schema::hasTable('agent_achievement_claims')) {
+        $schema = \Illuminate\Support\Facades\Schema::class;
+
+        if (!$schema::hasTable('agent_achievement_claims')) {
+            $schema::create('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) {
+                $table->id();
+                $table->foreignId('agent_id')->constrained('users')->onDelete('cascade');
+                $table->integer('milestone');
+                $table->decimal('amount', 10, 2)->default(1500.00);
+                // The cycle a claim belongs to. Without these a claim cannot be
+                // written at all, and the tier could never be claimed twice in
+                // two different weeks even if it could.
+                $table->string('period_type', 20)->nullable();
+                $table->string('period_key', 20)->nullable();
+                $table->timestamp('cycle_start')->nullable();
+                $table->timestamp('cycle_end')->nullable();
+                // Exactly which referrals earned this claim, so none of them can
+                // earn the same tier again.
+                $table->text('job_order_ids')->nullable();
+                $table->timestamps();
+            });
+
             return;
         }
 
-        \Illuminate\Support\Facades\Schema::create('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) {
-            $table->id();
-            $table->foreignId('agent_id')->constrained('users')->onDelete('cascade');
-            $table->integer('milestone');
-            $table->decimal('amount', 10, 2)->default(1500.00);
-            $table->timestamps();
+        // Present but built by the older definition: add what is missing.
+        $missing = array_filter(
+            ['period_type', 'period_key', 'cycle_start', 'cycle_end', 'job_order_ids'],
+            fn ($column) => !$schema::hasColumn('agent_achievement_claims', $column)
+        );
+
+        if ($missing === []) {
+            return;
+        }
+
+        $schema::table('agent_achievement_claims', function (\Illuminate\Database\Schema\Blueprint $table) use ($missing) {
+            if (in_array('period_type', $missing, true))   $table->string('period_type', 20)->nullable();
+            if (in_array('period_key', $missing, true))    $table->string('period_key', 20)->nullable();
+            if (in_array('cycle_start', $missing, true))   $table->timestamp('cycle_start')->nullable();
+            if (in_array('cycle_end', $missing, true))     $table->timestamp('cycle_end')->nullable();
+            if (in_array('job_order_ids', $missing, true)) $table->text('job_order_ids')->nullable();
         });
+
+        Log::warning('[Achievements] Added missing columns to agent_achievement_claims: '
+            . implode(', ', $missing));
     }
 
     /**
@@ -1997,12 +2145,23 @@ class CommissionController extends Controller
         // falling back to when the job order was raised where it is not set, so
         // a completed referral is never silently uncounted.
         if ($from !== null && $to !== null) {
-            // Bounded to the second, not to the day. A cycle that begins when a
-            // reward is claimed starts partway through a day, and the referrals
-            // that earned the claim must not be counted again in the cycle that
-            // follows it. Calendar cycles are unaffected: they already begin at
-            // 00:00:00 and end at 23:59:59.
-            $query->whereRaw("{$completedAt} >= ?", [$from->format('Y-m-d H:i:s')])
+            // The lower bound is taken at DAY resolution, the upper bound to the
+            // second.
+            //
+            // A cycle that begins when a reward is claimed starts partway
+            // through a day — say 10:25 — but `job_orders.date_installed` is a
+            // DATE, so every referral installed that day carries 00:00:00.
+            // Bounding the start to the second therefore excluded every
+            // same-day referral from the new cycle, and since each later cycle
+            // starts later still, nothing could ever count them again: an agent
+            // who claimed early silently lost that day's remaining work.
+            //
+            // Counting the claim's own referrals twice is prevented by
+            // claimedJobOrderIds(), which is passed in as $exclude and skips
+            // them whatever their date says — so the date no longer has to do
+            // that job as well. Calendar cycles are unaffected: they already
+            // begin at 00:00:00.
+            $query->whereRaw("{$completedAt} >= ?", [$from->copy()->startOfDay()->format('Y-m-d H:i:s')])
                   ->whereRaw("{$completedAt} <= ?", [$to->format('Y-m-d H:i:s')]);
         }
 

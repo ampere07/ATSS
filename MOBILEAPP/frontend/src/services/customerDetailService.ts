@@ -1,4 +1,5 @@
 import apiClient from '../config/api';
+import { reportClientEvent } from './clientLogService';
 
 export interface CustomerDetailData {
   id: number;
@@ -144,13 +145,34 @@ export const getCustomerPaySummary = async (
       hasData: !!response.data?.data,
     });
 
+    // Reported as well as logged. A console line on a phone is readable by
+    // nobody — least of all the customer it is failing for.
+    reportClientEvent('pay-summary-empty', {
+      accountNo,
+      success: String(response.data?.success),
+      hasData: String(!!response.data?.data),
+    });
+
     return null;
   } catch (error: any) {
     console.error('[PaySummary] Request failed', {
       accountNo,
+      timeoutMs,
       status: error?.response?.status ?? null,
       message: error?.response?.data?.message || error?.message || 'unknown',
     });
+
+    // `code` matters as much as `status`: axios reports a timeout as
+    // ECONNABORTED with no status at all, which is exactly the case that cannot
+    // be told apart from a dropped connection without it.
+    reportClientEvent('pay-summary-failed', {
+      accountNo,
+      timeoutMs,
+      status: error?.response?.status ?? 'none',
+      code: error?.code ?? 'none',
+      message: error?.response?.data?.message || error?.message || 'unknown',
+    });
+
     return null;
   }
 };
@@ -196,6 +218,11 @@ export const getCustomerDetail = async (accountNo: string): Promise<CustomerDeta
       await new Promise((resolve) => setTimeout(resolve, 800));
     }
   }
+
+  // Both attempts gone. Reported once here rather than inside the loop, so the
+  // log records a customer who ended up without their details — not every
+  // individual retry along the way.
+  reportClientEvent('customer-detail-failed', { accountNo, attempts: 2 });
 
   return null;
 };

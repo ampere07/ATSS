@@ -8,6 +8,7 @@ apps change.
 | SYNC User Guide — every screen, every role | `../SYNC_User_Guide.pdf` | `manual.js` |
 | SYNC Agent Module User Manual — the Agent role only | `../../SYNC_Agent_Module_User_Manual.pdf` | `agent_manual.js` |
 | SYNC Reporting Module User Manual — scheduled reports | `../../SYNC_Reporting_Module_User_Manual.pdf` | `reporting_manual.js` |
+| SYNC Agent Module User Manual (complete) — the Agent Module across both clients | `../SYNC_Agent_Module_Complete_User_Manual.pdf` | `agent_module_manual.js` |
 
 Both are written for the people who use SYNC, not for developers. They contain no
 architecture, no internal names and no notes about how they were produced — just how to work
@@ -30,6 +31,30 @@ node agent_manual.js ../../SYNC_Agent_Module_User_Manual.pdf "8 August 2026" 1.0
 
 `agent_manual.js` is hand-written narrative — it documents only what an Agent account can
 reach, so it is not regenerated from the extracts. When the Agent screens change, edit it.
+
+## Regenerate the complete Agent Module manual
+
+```sh
+cd docs/manual-generator
+node agent_module_manual.js               # writes ../SYNC_Agent_Module_Complete_User_Manual.pdf
+```
+
+Takes the same optional arguments as the others: output path, date, version, prepared-by,
+organization.
+
+Hand-written, and deliberately wider than `agent_manual.js`: it documents the Agent Module as it
+is implemented across `MOBILEAPP/frontend`, `ATSS2_0/frontend` and `ATSS2_0/backend` together —
+agent and team creation, permissions, the mobile screens, the referral and job order flow,
+commission, quota incentives, achievements, balances, the weekly referral invoices, payout
+approval, the scheduled jobs, and a mobile-versus-portal comparison.
+
+Two rules when editing it:
+
+- **Latin-1 only in rendered strings.** jsPDF renders the standard fonts in WinAnsi; a string
+  carrying anything outside it (₱, →) is emitted as UTF-16 and prints as garbage. Write `PHP`
+  for amounts and `>` for menu paths. Em dashes, curly quotes and `·` are fine.
+- **Every claim comes off the source.** If a screen changes, read the screen and edit the chapter;
+  do not describe behaviour the code does not have.
 
 ## Regenerate the Reporting Module manual
 
@@ -77,6 +102,7 @@ in the page footer.
 | `manual.js` | The full User Guide — narrative content plus everything built from the two JSON extracts. |
 | `agent_manual.js` | The Agent Module User Manual. Hand-written, covering only the screens and controls an Agent account can reach. |
 | `reporting_manual.js` | The Reporting Module User Manual. Hand-written, covering scheduled reports for Administrators and Super Administrators. |
+| `agent_module_manual.js` | The complete SYNC Agent Module User Manual. Hand-written, covering the whole Agent Module across the Mobile Application, the Web Application and the shared backend. |
 
 ## When the apps change
 

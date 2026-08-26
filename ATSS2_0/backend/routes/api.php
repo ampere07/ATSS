@@ -2347,6 +2347,14 @@ Route::prefix('service_orders')->group(function () {
 // Customer Detail Management - Dedicated endpoint for customer details view
 Route::get('/customer-detail/{accountNo}', [\App\Http\Controllers\CustomerDetailController::class , 'show']);
 
+// Where the customer's browser reports a failure this server never saw. The
+// dashboard fetches its balance client side, so a request that never completes
+// leaves no trace here — see ClientLogController for why that matters and why
+// this is kept as narrow as it is. Throttled: it writes to disk and needs no
+// authentication, matching the dashboard endpoints it reports on.
+Route::post('/client-log', [\App\Http\Controllers\ClientLogController::class , 'store'])
+    ->middleware('throttle:30,1');
+
 // Just the amount due, its due date and whether a payment is already in progress - the
 // three things the customer dashboard's balance card and Pay Now button wait on. Split
 // out from the endpoint above because that one loads four relations and computes two

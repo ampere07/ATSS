@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { paymentService, PendingPayment } from '../services/paymentService';
 import { useCustomerDataContext } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { reportClientEvent } from '../services/clientLogService';
 
 /**
  * A pulsing placeholder block.
@@ -71,7 +72,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     const isMobile = width < 768;
     const isShort = height < 700;
     // paySummary and its own flag rather than contextLoading: the amount due comes from a
-    // dedicated one-row request, so it must not wait on the five list calls this card does
+    // dedicated one-row request, so it must not wait on the list calls this card does
     // not render.
     const {
         customerDetail,
@@ -244,6 +245,30 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     // animation that will never resolve.
     const balanceRequestsSettled = !isPaySummaryLoading && !contextLoading;
     const balanceUnavailable = !balanceKnown && balanceRequestsSettled;
+
+    // Report the outcome the customer actually sees.
+    //
+    // The service reports why each individual request failed; this reports that
+    // the card gave up, which is the thing being complained about and is not the
+    // same fact — the balance can also go missing with every request apparently
+    // fine, and only this would catch that. Once per session per account, so a
+    // re-render cannot turn it into a stream.
+    useEffect(() => {
+        if (balanceUnavailable) {
+            reportClientEvent('balance-unavailable', {
+                accountNo: paySummary?.accountNo
+                    || customerDetail?.billingAccount?.accountNo
+                    || user?.username
+                    || 'unknown',
+                hadDetail: String(!!customerDetail),
+                hadPaySummary: String(!!paySummary),
+                fromCache: String(isFromCache),
+                rawBalance: rawBalance === null || rawBalance === undefined
+                    ? 'missing'
+                    : String(rawBalance),
+            });
+        }
+    }, [balanceUnavailable, customerDetail, paySummary, isFromCache, rawBalance, user]);
 
     // The summary's flag is what labels the button on load; the fuller pendingPayment
     // object only exists once Pay Now has been tapped and fetched the payment URL.

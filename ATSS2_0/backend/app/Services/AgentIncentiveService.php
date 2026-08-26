@@ -30,11 +30,16 @@ use Throwable;
  *
  * WHAT COUNTS AS A REFERRAL
  * ---------------------------------------------------------------------------
- * A Job Order counts when EITHER its onsite status is "Done" OR its
- * `pre_installed` column carries the pre-install marker. The second lets a
- * referral earn quota progress once the site has been pre-installed, without
- * waiting for the technician to close the install — the agent's part is done
- * either way.
+ * A Job Order counts when EITHER its onsite status is "Done" or "Completed", OR
+ * its `pre_installed` column carries the pre-install marker AND it has not since
+ * been abandoned. The second lets a referral earn quota progress once the site
+ * has been pre-installed, without waiting for the technician to close the
+ * install — the agent's part is done either way.
+ *
+ * The abandoned qualifier is what stops it paying for work that never landed: a
+ * site pre-installed and then Failed or Cancelled counts for nothing, which is
+ * how the rest of the scheme already treats it (commission needs the job order
+ * approved; achievements and invoice lines need Done or Completed).
  *
  * Counting early does not risk counting twice: a Job Order consumed by a
  * completed quota is recorded in `agent_incentive_history`, and the
@@ -83,6 +88,28 @@ use Throwable;
 class AgentIncentiveService
 {
     private string $logName = 'Agent_Incentives';
+
+    /** The two statuses that count as a successful finish. */
+    private const SUCCESSFUL_ONSITE_STATUSES = ['done', 'completed'];
+
+    /**
+     * Onsite statuses that abandon a job order, so a pre-installation visit on
+     * it earns nothing.
+     *
+     * Derived from JobOrder's own list of statuses that finish a job order for
+     * good, less the two that finish it successfully — so adding a terminal
+     * status to the model closes this hole for that status too, without anyone
+     * having to remember this file.
+     *
+     * @return array<int, string>
+     */
+    private static function abandonedOnsiteStatuses(): array
+    {
+        return array_values(array_diff(
+            \App\Models\JobOrder::TECHNICIAN_QUEUE_CLOSED_ONSITE_STATUSES,
+            self::SUCCESSFUL_ONSITE_STATUSES
+        ));
+    }
 
     /**
      * The day the agent programme starts counting, or null to count everything.
@@ -237,10 +264,37 @@ class AgentIncentiveService
         $completedBase = DB::table('job_orders')
             ->join('applications', 'job_orders.application_id', '=', 'applications.id')
             ->where(function ($q) {
-                $q->whereRaw('LOWER(job_orders.onsite_status) = ?', ['done'])
-                  // NULL never equals the marker, so an unset column simply
-                  // fails this side of the OR and the status decides alone.
-                  ->orWhereRaw('LOWER(TRIM(job_orders.pre_installed)) = ?', ['preinstalled']);
+                // "done" AND "completed", matching achievement progress
+                // (CommissionController::onboardedReferralIds) and the weekly
+                // invoice run (AgentInvoiceService::billableCustomers). This
+                // clause used to accept "done" alone, so a job order closed as
+                // "Completed" moved an agent's achievement count and was
+                // billed, but earned no quota progress at all — three parts of
+                // one scheme disagreeing about what "onboarded" means.
+                $q->whereIn(DB::raw('LOWER(TRIM(job_orders.onsite_status))'), self::SUCCESSFUL_ONSITE_STATUSES)
+                  // The pre-installation marker, which lets a referral earn
+                  // quota progress before the technician closes the install —
+                  // the agent's part is done once the site has been prepared.
+                  //
+                  // ...unless the job order has since been abandoned. The marker
+                  // used to be an unqualified OR, so a site that was
+                  // pre-installed and then FAILED still completed a quota and
+                  // paid the incentive. Every other part of the scheme pays
+                  // nothing for a failed job — commission needs approval,
+                  // achievements and invoice lines need Done — so this was the
+                  // one path that paid for a customer who never arrived.
+                  //
+                  // The abandoned list is derived from the model's own
+                  // "finished for good" statuses so the two cannot drift.
+                  ->orWhere(function ($p) {
+                      $p->whereRaw('LOWER(TRIM(job_orders.pre_installed)) = ?', ['preinstalled'])
+                        // COALESCE so a pre-installed job order with no status
+                        // yet still counts; only an explicit failure excludes it.
+                        ->whereNotIn(
+                            DB::raw("LOWER(TRIM(COALESCE(job_orders.onsite_status, '')))"),
+                            self::abandonedOnsiteStatuses()
+                        );
+                  });
             })
             ->where(function ($q) use ($nameVariants) {
                 foreach ($nameVariants as $variant) {

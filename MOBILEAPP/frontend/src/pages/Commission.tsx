@@ -51,9 +51,11 @@ const Commission: React.FC = () => {
         fetchUpdates,
     } = store;
 
-    // Incentive/bonus history & totals are not present on the reduced RN store; default to [].
-    const incentiveHistory: any[] = (store as any).incentiveHistory ?? [];
-    const bonusHistory: any[] = (store as any).bonusHistory ?? [];
+    // Both lists are loaded by the store alongside earnings and payouts. They
+    // used to be absent from it entirely and were read through a cast that fell
+    // back to [], so these two tabs showed nothing whatever the agent earned.
+    const incentiveHistory = store.incentiveHistory;
+    const bonusHistory = store.bonusHistory;
 
     const { width } = useWindowDimensions();
     const isTablet = width >= 768;
