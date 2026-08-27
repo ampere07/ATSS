@@ -384,6 +384,9 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
   const [userEmail, setUserEmail] = useState<string>('');
   const [userRoleId, setUserRoleId] = useState<number | null>(null);
   const [userFullName, setUserFullName] = useState<string>('');
+  // A referral made through the picker is stored as this id and holds none of
+  // the agent's name, so the id is what finds their own job orders.
+  const [userId, setUserId] = useState<number | null>(null);
   /**
    * True once the signed-in user has been read from storage.
    *
@@ -436,6 +439,7 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
           const rId = userData.role_id ? Number(userData.role_id) : null;
           setUserRoleId(rId);
           setUserFullName(userData.full_name || '');
+          setUserId(userData.id ?? userData.user_id ?? null);
 
           // Check time in status for technicians
           const isTech = rId === 2 || rName.toLowerCase() === 'technician';
@@ -538,9 +542,9 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
 
         // An agent with neither name nor email must see nothing, never
         // everyone's job orders.
-        if (!userFullName && !userEmail) return false;
+        if (!userFullName && !userEmail && userId === null) return false;
 
-        if (!agentOwnsReferral(referredBy, userFullName, userEmail)) return false;
+        if (!agentOwnsReferral(referredBy, userFullName, userEmail, userId)) return false;
 
         // Done and completed belong to Agent History.
         if (isDoneOnsiteStatus(getOnsiteStatus(jobOrder))) return false;

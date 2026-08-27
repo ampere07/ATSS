@@ -1883,7 +1883,12 @@ Route::get('/plans/{id}/related', function ($id) {
                             $jo->city = $jo->city ?? ($app ? $app->city : '');
                             $jo->region = $jo->region ?? ($app ? $app->region : '');
                             $jo->desired_plan = $jo->desired_plan ?? ($app ? $app->desired_plan : '');
-                            $jo->referred_by = $jo->referred_by ?? ($app ? $app->referred_by : '');
+                            // Shown as a name, with the id kept beside it so the
+                            // mobile forms write the same referral back rather
+                            // than turning it into a name again.
+                            $rawReferral = $jo->referred_by ?? ($app ? $app->referred_by : '');
+                            $jo->referred_by = \App\Support\AgentReferral::displayName($rawReferral);
+                            $jo->referred_by_agent_id = \App\Support\AgentReferral::agentId($rawReferral);
                             $jo->applying_for = $jo->applying_for ?? ($app ? $app->promo : '');
                             $jo->terms_agreed = $jo->terms_agreed ?? ($app ? $app->terms_agreed : '');
 

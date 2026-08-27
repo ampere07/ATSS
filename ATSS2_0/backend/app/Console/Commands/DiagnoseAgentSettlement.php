@@ -144,7 +144,8 @@ class DiagnoseAgentSettlement extends Command
             $isMatch = AgentProgramme::referralBelongsToAgent(
                 $referredBy,
                 $fullName,
-                trim((string) ($candidate->email_address ?? ''))
+                trim((string) ($candidate->email_address ?? '')),
+                $candidate->id
             );
 
             if ($isMatch && $matched === null) {

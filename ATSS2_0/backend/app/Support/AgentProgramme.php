@@ -60,11 +60,24 @@ class AgentProgramme
     /**
      * Does this "Referred By" value belong to the given agent?
      *
-     * Job orders are tied to an agent through the application's free-text
-     * `referred_by` field, so the match has to be tolerant: every word of the
-     * agent's name must appear in the referral, which accepts "John Rusell
-     * Ampere" for an account named "John Ampere" while still rejecting an
-     * unrelated name. An exact email match is accepted too.
+     * A referral made through the agent picker holds the agent's user id, and
+     * that settles it outright: an id names exactly one account, so it is
+     * checked first and nothing else is consulted. Passing $agentId is what
+     * lets a caller take that path — without it a numeric referral can only
+     * ever be rejected, because it carries none of the agent's name.
+     *
+     * Older referrals are free text, so that match has to stay tolerant: every
+     * word of the agent's name must appear in the referral, which accepts
+     * "John Rusell Ampere" for an account named "John Ampere" while still
+     * rejecting an unrelated name. An exact email match is accepted too.
+     *
+     * A NUMERIC referral never falls back to the name match, even when it is
+     * not this agent's id — a number is not a name, and letting it reach the
+     * tolerant branch could only ever produce a wrong answer. The "is it really
+     * an agent" test AgentReferral applies for display is implicit here: every
+     * caller takes $agentId off an agent roster, so an id that equals it is an
+     * agent's by construction and a legacy number that matches no agent's id
+     * falls out as unmatched — which is what it was before.
      *
      * Lives here because incentives, achievements and invoices all have to
      * agree about whose referral a customer is — a team invoice attributing a
@@ -73,8 +86,16 @@ class AgentProgramme
      * The web and mobile apps carry the same rule in agentReferral.ts, and a
      * simulation checks all three still agree.
      */
-    public static function referralBelongsToAgent(?string $referredBy, string $fullName, string $email): bool
+    public static function referralBelongsToAgent(?string $referredBy, string $fullName, string $email, $agentId = null): bool
     {
+        // A numeric referral is decided here and goes no further.
+        $referralId = AgentReferral::agentId($referredBy);
+        if ($referralId !== null) {
+            return $agentId !== null
+                && is_numeric($agentId)
+                && (int) $agentId === $referralId;
+        }
+
         $normalize = function ($value): string {
             $value = mb_strtolower((string) $value);
             $value = str_replace(['.', ','], ' ', $value);

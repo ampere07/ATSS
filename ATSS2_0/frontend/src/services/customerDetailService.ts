@@ -19,6 +19,7 @@ export interface CustomerDetailData {
   addressCoordinates?: string;
   housingStatus?: string;
   referredBy?: string;
+  referredByAgentId?: number | null;
   desiredPlan?: string;
   houseFrontPictureUrl?: string;
   proofOfBillingUrl?: string;
@@ -316,6 +317,7 @@ export const convertCustomerDataToBillingDetail = (customerData: CustomerDetailD
 
     usageType: customerData.technicalDetails?.usageType || '',
     referredBy: customerData.referredBy || '',
+    referredByAgentId: customerData.referredByAgentId ?? null,
     referralContactNo: '',
     groupName: customerData.groupName || '',
     mikrotikId: '',

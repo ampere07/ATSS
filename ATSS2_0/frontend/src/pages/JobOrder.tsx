@@ -122,8 +122,8 @@ const AGENT_COLUMNS = [
  * the very first paint. Returns blanks when nothing is stored, which reads as
  * "not an agent" and leaves the unfiltered behaviour other roles rely on.
  */
-const storedAuth = (): { role: string; roleId: string | number | null; fullName: string; email: string } => {
-  const empty = { role: '', roleId: null, fullName: '', email: '' };
+const storedAuth = (): { role: string; roleId: string | number | null; id: number | null; fullName: string; email: string } => {
+  const empty = { role: '', roleId: null, id: null, fullName: '', email: '' };
 
   try {
     const raw = localStorage.getItem('authData');
@@ -146,6 +146,8 @@ const storedAuth = (): { role: string; roleId: string | number | null; fullName:
     return {
       role: userData.role || '',
       roleId: userData.role_id || null,
+      // Referrals made through the picker are stored as this id, not a name.
+      id: userData.id ?? userData.user_id ?? null,
       fullName,
       email: userData.email || userData.email_address || '',
     };
@@ -256,7 +258,7 @@ const JobOrderPage: React.FC = () => {
   //
   // Held as constants rather than state: who is signed in cannot change while
   // the page is mounted, so there is nothing to set and no re-render to cause.
-  const { role: userRole, roleId, fullName: agentName, email: agentEmail } = useMemo(storedAuth, []);
+  const { role: userRole, roleId, id: agentUserId, fullName: agentName, email: agentEmail } = useMemo(storedAuth, []);
   const [users, setUsers] = useState<User[]>([]);
   const [isLoadingUsers, setIsLoadingUsers] = useState<boolean>(true);
   const [displayMode, setDisplayMode] = useState<DisplayMode>('table');
@@ -790,18 +792,18 @@ const JobOrderPage: React.FC = () => {
     // rather than guarding it: an agent whose name and email are somehow both
     // missing must see nothing, never everyone's job orders.
     if (isAgentUser(userRole, roleId)) {
-      if (!agentName && !agentEmail) return [];
+      if (!agentName && !agentEmail && agentUserId === null) return [];
 
       return filtered.filter((jo: JobOrder) => {
         const referredBy = jo.Referred_By || jo.referred_by || '';
-        if (!agentOwnsReferral(referredBy, agentName, agentEmail)) return false;
+        if (!agentOwnsReferral(referredBy, agentName, agentEmail, agentUserId)) return false;
 
         // Done and completed are history rather than work still to come.
         return !isDoneOnsiteStatus(getOnsiteStatus(jo));
       });
     }
     return filtered;
-  }, [jobOrders, userRole, roleId, agentName, agentEmail, currentUserOrgId]);
+  }, [jobOrders, userRole, roleId, agentUserId, agentName, agentEmail, currentUserOrgId]);
 
   // Update selectedJobOrder with fresh data after refresh
   useEffect(() => {

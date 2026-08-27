@@ -16,7 +16,10 @@ export interface CustomerDetailData {
   region?: string;
   addressCoordinates?: string;
   housingStatus?: string;
+  // The agent id behind referredBy, when the referral names one. Carried so an
+  // edit form writes the same referral back instead of the resolved name.
   referredBy?: string;
+  referredByAgentId?: number | null;
   desiredPlan?: string;
   houseFrontPictureUrl?: string;
   proof_of_billing_url?: string;

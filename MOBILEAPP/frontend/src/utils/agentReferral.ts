@@ -6,12 +6,140 @@
 export const normalizeName = (s?: string | null): string =>
   (s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
 
+// -- Referrals that name an agent by id --------------------------------------
+//
+// The "Referred By" pickers store the agent's user id rather than their name, so
+// a referral made through the UI points at exactly one account. It is stored
+// plain — "37" — in the same column the free text has always lived in.
+//
+// A NUMBER IS NOT ENOUGH TO MAKE IT AN ID. referred_by already holds free text
+// that is entirely digits: mobile numbers typed into the box, account numbers
+// like "20220006245", and bare numbers such as "1840" that sit in user-id range.
+// So a number only counts as a referral once it resolves against the loaded
+// agent roster — see findAgentById, which searches only agents. A number that
+// resolves to nobody is displayed exactly as stored.
+//
+// Everything non-numeric is free text and still goes through the tolerant name
+// match below, exactly as it always did.
+//
+// Mirrors the backend's App\Support\AgentReferral.
+
+/** The stored form of a referral to this agent, or null when the id is unusable. */
+export const encodeAgentReferral = (agentId: number | string | null | undefined): string | null => {
+  if (agentId === null || agentId === undefined || agentId === '') return null;
+  const id = Number(agentId);
+  return Number.isInteger(id) && id > 0 ? String(id) : null;
+};
+
+/**
+ * The user id this value COULD name, or null when it is plainly not one.
+ *
+ * The cheap syntactic half: it says nothing about whether the id belongs to an
+ * agent. Use findAgentById / resolveReferralLabel where that matters.
+ */
+export const agentReferralId = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+
+  const trimmed = String(value).trim();
+
+  // Digits only, so "1e3" and "4.5" read as free text rather than silently
+  // becoming ids 1000 and 4. A leading "+" or "-" is refused for the same reason.
+  if (!/^\d+$/.test(trimmed)) return null;
+
+  // Leading zeros mean this was never an id: "000201" is a code somebody typed,
+  // and ids are not written that way.
+  if (trimmed.length > 1 && trimmed[0] === '0') return null;
+
+  const id = Number(trimmed);
+  return id > 0 ? id : null;
+};
+
+/**
+ * Does this referral name an agent on the given roster?
+ *
+ * Needs the roster because a number on its own proves nothing — that is the
+ * whole point of the guard above.
+ */
+export const isAgentReferral = (value: unknown, agents: any[]): boolean =>
+  findAgentById(value, agents) !== null;
+
+// The label the agent pickers render for one agent.
+//
+// Every picker and every id-to-name lookup goes through this, so the value shown
+// for a resolved referral is character-for-character the option in the dropdown —
+// which is what lets the selected row highlight and what keeps a legacy referral
+// written by the old picker equal to the label shown for the new one.
+export const agentDisplayName = (agent: any): string =>
+  `${agent?.first_name || ''} ${agent?.middle_initial || ''} ${agent?.last_name || ''}`
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * The agent an id-form referral points at, from an already-loaded agent list.
+ *
+ * Null for free text, and null for an id no longer on the list — a referral
+ * pointing at a deleted account has no name to show.
+ */
+export const findAgentById = (value: unknown, agents: any[]): any | null => {
+  const id = agentReferralId(value);
+  if (id === null) return null;
+  return (agents || []).find(a => Number(a?.id) === id) || null;
+};
+
+/**
+ * The one agent whose name is exactly this label, or null.
+ *
+ * Used to recover the id behind a legacy referral that was stored as a name, so
+ * re-saving an untouched record upgrades it to an id instead of writing the name
+ * back. Deliberately refuses when two agents share a name: guessing between them
+ * is how the name matching paid the wrong person in the first place.
+ */
+export const findAgentByName = (label: string, agents: any[]): any | null => {
+  const wanted = normalizeName(label);
+  if (!wanted) return null;
+
+  const matches = (agents || []).filter(a => normalizeName(agentDisplayName(a)) === wanted);
+  return matches.length === 1 ? matches[0] : null;
+};
+
+/**
+ * A referral as it should be shown to a person.
+ *
+ * An id becomes the agent's name; free text is returned untouched. An id that
+ * matches no loaded agent falls back to the stored value rather than blanking the
+ * field — a referral pointing at a deleted account should look wrong, not empty.
+ */
+export const resolveReferralLabel = (value: unknown, agents: any[]): string => {
+  const raw = value === null || value === undefined ? '' : String(value);
+  const agent = findAgentById(raw, agents);
+  return agent ? agentDisplayName(agent) : raw;
+};
+
 // A job order is owned by the agent whose account name matches the Referred By value.
-// Matching is tolerant of middle names / extra words: every word of the agent's
-// "first_name + last_name" must appear (as a whole word) in Referred By. This covers
-// values like "John Rusell Ampere" for an account named "John Ampere", while still
-// rejecting unrelated names. Email exact-match is also accepted.
-export const agentOwnsReferral = (referredByRaw: string, fullName: string, email: string): boolean => {
+//
+// A referral made through the picker holds the agent's user id, and that settles
+// it outright: an id names exactly one account, so it is checked first and nothing
+// else is consulted. Passing agentId is what lets that happen — without it an
+// id-form referral can only ever be rejected, because it carries none of the name.
+//
+// Older referrals are free text, so that match stays tolerant of middle names /
+// extra words: every word of the agent's "first_name + last_name" must appear (as
+// a whole word) in Referred By. This covers values like "John Rusell Ampere" for
+// an account named "John Ampere", while still rejecting unrelated names. Email
+// exact-match is also accepted.
+export const agentOwnsReferral = (
+  referredByRaw: string,
+  fullName: string,
+  email: string,
+  agentId?: number | string | null
+): boolean => {
+  // An id-form referral is decided here and goes no further: "agent:37" is not a
+  // name, and letting it reach the tolerant branch could only ever be wrong.
+  const referralId = agentReferralId(referredByRaw);
+  if (referralId !== null) {
+    return agentId !== null && agentId !== undefined && Number(agentId) === referralId;
+  }
+
   const ref = normalizeName(referredByRaw);
   if (!ref) return false;
 

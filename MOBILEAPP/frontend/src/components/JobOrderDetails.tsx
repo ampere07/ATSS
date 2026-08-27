@@ -18,6 +18,7 @@ import { getApplication } from '../services/applicationService';
 import { Application } from '../types/application';
 import { getJobOrderItems, JobOrderItem } from '../services/jobOrderItemService';
 import { useJobOrderContext } from '../contexts/JobOrderContext';
+import { referredByEcho } from '../utils/referredByField';
 import { usePermissions } from '../hooks/usePermissions';
 import { useServiceOrderContext } from '../contexts/ServiceOrderContext';
 import { useWorkOrderStore } from '../store/workOrderStore';
@@ -532,7 +533,8 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
       }
 
       await updateJobOrder(jobOrder.id, {
-        Referred_By: formData.referredBy,
+        // The id the record carries, unless somebody typed over the name.
+        Referred_By: referredByEcho(jobOrder, formData.referredBy),
         Date_Installed: formData.dateInstalled,
         Usage_Type: formData.usageType,
         First_Name: formData.firstName,

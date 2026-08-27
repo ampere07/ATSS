@@ -12,6 +12,7 @@ import {
   isTechnicianUser,
   sortServiceOrdersForTechnician
 } from '../utils/technicianServiceOrderAccess';
+import { agentOwnsReferral } from '../utils/agentReferral';
 
 // Location grouping removed as per user request
 
@@ -270,6 +271,9 @@ const ServiceOrderPage: React.FC = () => {
   const [userRoleId, setUserRoleId] = useState<number | null>(null);
   const [userEmail, setUserEmail] = useState<string>('');
   const [userFullName, setUserFullName] = useState<string>('');
+  // A referral made through the picker is stored as this id and holds none of
+  // the agent's name, so the id is what finds their own service orders.
+  const [userId, setUserId] = useState<number | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [mobileView, setMobileView] = useState<MobileView>('orders');
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(() => settingsColorPaletteService.getActiveSync());
@@ -307,6 +311,7 @@ const ServiceOrderPage: React.FC = () => {
           setUserRoleId(roleId);
           setUserEmail(userData.email || '');
           setUserFullName(userData.full_name || '');
+          setUserId(userData.id ?? userData.user_id ?? null);
 
           if (role.toLowerCase() === 'technician' || roleId === 2 || role.toLowerCase() === 'agent' || roleId === 4) {
             // MobileView enforces 'orders' by default
@@ -398,10 +403,15 @@ const ServiceOrderPage: React.FC = () => {
 
         // Role-based filtering: Agents (role_id 4) only see their own referrals
         if (!isSuperUser && (userRole.toLowerCase() === 'agent' || userRoleId === 4)) {
-          const referredBy = (serviceOrder.referredBy || '').toLowerCase();
-          const matchesAgent =
-            (userFullName && referredBy.includes(userFullName.toLowerCase())) ||
-            (userEmail && referredBy.includes(userEmail.toLowerCase()));
+          // The shared rule, not a substring test of its own: a referral is now
+          // stored as the agent's user id, which contains none of their name, and
+          // `includes` would also have counted "Ana" as a match for "Joana".
+          const matchesAgent = agentOwnsReferral(
+            (serviceOrder as any).referredBy || '',
+            userFullName,
+            userEmail,
+            userId
+          );
 
           if (!matchesAgent) return false;
         }

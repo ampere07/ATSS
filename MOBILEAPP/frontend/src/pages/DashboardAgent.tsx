@@ -216,14 +216,14 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
     const agentName = user?.full_name || '';
 
     const { referredCount, successfulInstalledCount, failedInstalledCount, rescheduleCount } = useMemo(() => {
-        if (!agentEmail && !agentName) return { referredCount: 0, successfulInstalledCount: 0, failedInstalledCount: 0, rescheduleCount: 0 };
+        if (!agentEmail && !agentName && !user?.id) return { referredCount: 0, successfulInstalledCount: 0, failedInstalledCount: 0, rescheduleCount: 0 };
 
         // Scoped to the programme start date, exactly as the Job Order page is.
         // Without this the tiles would count an agent's whole history while the
         // list below shows only what the programme covers, and neither those
         // figures nor the achievement count would reconcile with the other.
         const filtered = jobOrders.filter(jo =>
-            agentOwnsReferral(jo.Referred_By || jo.referred_by || '', agentName, agentEmail)
+            agentOwnsReferral(jo.Referred_By || jo.referred_by || '', agentName, agentEmail, user?.id ?? null)
             && isOnOrAfterAgentStartDate(jo)
         );
 
@@ -253,7 +253,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
             failedInstalledCount: failed,
             rescheduleCount: reschedule
         };
-    }, [jobOrders, agentEmail, agentName]);
+    }, [jobOrders, user?.id, agentEmail, agentName]);
 
     // ---- Achievements (weekly and monthly onboarding tiers) ----
     const agentId = user?.id || 0;

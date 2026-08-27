@@ -83,7 +83,7 @@ class CustomerDetailUpdateController extends Controller
                 'location' => $customer->location,
                 'address_coordinates' => $customer->address_coordinates,
                 'housing_status' => $customer->housing_status,
-                'referred_by' => $customer->referred_by,
+                'referred_by' => \App\Support\AgentReferral::displayName($customer->referred_by),
                 'group_name' => $customer->group_name,
                 'house_front_picture_url' => $customer->house_front_picture_url,
             ];
@@ -169,7 +169,7 @@ class CustomerDetailUpdateController extends Controller
                 'location' => $customer->location,
                 'address_coordinates' => $customer->address_coordinates,
                 'housing_status' => $customer->housing_status,
-                'referred_by' => $customer->referred_by,
+                'referred_by' => \App\Support\AgentReferral::displayName($customer->referred_by),
                 'group_name' => $customer->group_name,
                 'house_front_picture_url' => $customer->house_front_picture_url,
             ];

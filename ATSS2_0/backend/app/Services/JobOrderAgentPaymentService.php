@@ -157,6 +157,12 @@ class JobOrderAgentPaymentService
      * Matched through the application's `referred_by` with the shared rule, so
      * this cannot disagree with the incentive cron, the achievements or the
      * weekly invoices about who referred a customer.
+     *
+     * A referral made through the "Referred By" picker holds the agent's user
+     * id, so it matches exactly one candidate below and the ambiguity warning
+     * further down cannot arise for it. Older free-text referrals still go
+     * through the tolerant name match, and can still be ambiguous — writing the
+     * referral through the picker is what resolves that for good.
      */
     public function referringAgent(JobOrder $jobOrder): ?User
     {
@@ -193,7 +199,7 @@ class JobOrderAgentPaymentService
             )));
             $email = trim((string) ($candidate->email_address ?? ''));
 
-            if (!AgentProgramme::referralBelongsToAgent($referredBy, $fullName, $email)) {
+            if (!AgentProgramme::referralBelongsToAgent($referredBy, $fullName, $email, $candidate->id)) {
                 continue;
             }
 

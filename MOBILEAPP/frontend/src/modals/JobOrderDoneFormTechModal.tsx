@@ -47,6 +47,7 @@ const CACHE_EXPIRY = 5 * 60 * 1000; // 5 minutes cache expiry
 import { UserData } from '../types/api';
 import { updateJobOrder } from '../services/jobOrderService';
 import { userService } from '../services/userService';
+import { referredByEcho } from '../utils/referredByField';
 import { technicianService, Technician } from '../services/technicianService';
 import { planService, Plan } from '../services/planService';
 import { getAllLCPNAPs, LCPNAP, getMostUsedLCPNAPs } from '../services/lcpnapService';
@@ -1573,7 +1574,12 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
           const emailAddress = jobOrderData?.Email_Address || jobOrderData?.email_address || '';
           const installationAddress = jobOrderData?.Installation_Address || jobOrderData?.installation_address || '';
           const landmark = jobOrderData?.Landmark || jobOrderData?.landmark || '';
-          const referredBy = jobOrderData?.Referred_By || jobOrderData?.referred_by || '';
+          // Passed straight through, so the id the record carries is what goes
+          // out. The name beside it would lose which agent it was.
+          const referredBy = referredByEcho(
+            jobOrderData,
+            jobOrderData?.Referred_By || jobOrderData?.referred_by || ''
+          );
           const promo = jobOrderData?.Promo || jobOrderData?.promo || '';
 
           const applicationUpdateData: any = {

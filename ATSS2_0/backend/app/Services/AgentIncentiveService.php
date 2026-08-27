@@ -77,13 +77,18 @@ use Throwable;
  *
  * Job Order ↔ Agent association follows the project's existing convention
  * (see CommissionController): Job Orders are linked to an agent through the
- * related application's `referred_by` full-name field. There is no agent_id on
- * job_orders today — see the note in the class docblock recommending one.
+ * related application's `referred_by` field.
  *
- * NOTE (future improvement, intentionally NOT applied here): matching by
- * full name via `referred_by LIKE '%name%'` is inherently fragile (name
- * collisions, renames, partial matches). Adding an explicit `agent_id` column
- * to job_orders/applications and matching on it would be far more reliable.
+ * That field now holds the agent's user id for any referral made through the
+ * "Referred By" picker — stored tagged, as `agent:37`, see App\Support\
+ * AgentReferral. An id names exactly one account, so those referrals are immune
+ * to the name collisions, renames and partial matches that the full-name
+ * matching below could never resolve. No new column was needed: the same
+ * varchar carries both forms.
+ *
+ * Older referrals are still free text — agent names, team names, and values
+ * like "Walk in" — and are still matched by name, so both forms are queried
+ * here and neither has to be migrated before the other works.
  */
 class AgentIncentiveService
 {
@@ -233,16 +238,26 @@ class AgentIncentiveService
         }
 
         $nameVariants = $this->nameVariants($user);
-        if (empty($nameVariants)) {
+
+        // Referrals made through the agent picker are stored as the agent's user
+        // id rather than their name, so the id is matched alongside the name
+        // variants. Without it every referral made since the picker started
+        // writing ids would earn this agent no quota progress at all — the value
+        // holds none of the words the LIKEs below look for.
+        $taggedId = \App\Support\AgentReferral::encode($user->id ?? null);
+
+        if (empty($nameVariants) && $taggedId === null) {
             $summary['skipped']++;
             $this->writeLog("  [SKIP] Unable to build a name to match job orders");
             $this->writeLog("[{$counter}/{$total}] ⊘ SKIPPED");
             return;
         }
-        $this->writeLog("  [MATCH] Matching job orders via referred_by: " . implode(' | ', $nameVariants));
+        $this->writeLog("  [MATCH] Matching job orders via referred_by: "
+            . implode(' | ', array_filter(array_merge($nameVariants, [$taggedId]))));
 
         // Base query for this agent's countable job orders, matched by the
-        // related application's referred_by full name (project convention).
+        // related application's referred_by — the agent's id where the referral
+        // was made through the picker, their name where it is older free text.
         //
         // A job order counts when EITHER is true:
         //
@@ -296,7 +311,12 @@ class AgentIncentiveService
                         );
                   });
             })
-            ->where(function ($q) use ($nameVariants) {
+            ->where(function ($q) use ($nameVariants, $taggedId) {
+                // Matched as a whole value, not a fragment: an id is exact, and
+                // a LIKE on it would let "agent:3" also match "agent:37".
+                if ($taggedId !== null) {
+                    $q->orWhere('applications.referred_by', $taggedId);
+                }
                 foreach ($nameVariants as $variant) {
                     $q->orWhereRaw('LOWER(applications.referred_by) LIKE ?', ['%' . $variant . '%']);
                 }

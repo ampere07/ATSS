@@ -58,6 +58,7 @@ const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): B
     region: customerData.region || '',
     usageType: customerData.technicalDetails?.usageTypeId ? `Type ${customerData.technicalDetails.usageTypeId}` : '',
     referredBy: customerData.referredBy || '',
+    referredByAgentId: customerData.referredByAgentId ?? null,
     referralContactNo: '',
     groupName: customerData.groupName || '',
     mikrotikId: '',

@@ -147,7 +147,10 @@ class ApplicationController extends Controller
                         'desired_plan' => $app->desired_plan,
                         'promo' => $app->promo,
                         'referrer_account_id' => $app->referrer_account_id,
-                        'referred_by' => $app->referred_by,
+                        // Shown as a name; the id travels beside it so an edit form can
+                        // write the same referral back instead of turning it into a name.
+                        'referred_by' => \App\Support\AgentReferral::displayName($app->referred_by),
+                        'referred_by_agent_id' => \App\Support\AgentReferral::agentId($app->referred_by),
                         'proof_of_billing_url' => $app->proof_of_billing_url,
                         'government_valid_id_url' => $app->government_valid_id_url,
                         'secondary_government_valid_id_url' => $app->secondary_government_valid_id_url,
@@ -333,7 +336,10 @@ class ApplicationController extends Controller
                 'barangay' => $application->barangay,
                 'desired_plan' => $application->desired_plan,
                 'promo' => $application->promo,
-                'referred_by' => $application->referred_by,
+                // Shown as a name; the id travels beside it so an edit form can
+                // write the same referral back instead of turning it into a name.
+                'referred_by' => \App\Support\AgentReferral::displayName($application->referred_by),
+                'referred_by_agent_id' => \App\Support\AgentReferral::agentId($application->referred_by),
                 'proof_of_billing_url' => $application->proof_of_billing_url,
                 'government_valid_id_url' => $application->government_valid_id_url,
                 'secondary_government_valid_id_url' => $application->secondary_government_valid_id_url,
@@ -411,7 +417,10 @@ class ApplicationController extends Controller
                 'desired_plan' => $application->desired_plan,
                 'promo' => $application->promo,
                 'referrer_account_id' => $application->referrer_account_id,
-                'referred_by' => $application->referred_by,
+                // Shown as a name; the id travels beside it so an edit form can
+                // write the same referral back instead of turning it into a name.
+                'referred_by' => \App\Support\AgentReferral::displayName($application->referred_by),
+                'referred_by_agent_id' => \App\Support\AgentReferral::agentId($application->referred_by),
                 'proof_of_billing_url' => $application->proof_of_billing_url,
                 'government_valid_id_url' => $application->government_valid_id_url,
                 'secondary_government_valid_id_url' => $application->secondary_government_valid_id_url,

@@ -981,7 +981,7 @@ class AgentInvoiceService
     private function memberWhoReferred(array $members, string $referredBy): ?array
     {
         foreach ($members as $member) {
-            if (AgentProgramme::referralBelongsToAgent($referredBy, $member['name'], $member['email'])) {
+            if (AgentProgramme::referralBelongsToAgent($referredBy, $member['name'], $member['email'], $member['user_id'] ?? null)) {
                 return $member;
             }
         }

@@ -379,7 +379,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         // list below shows only what the programme covers, and neither those
         // figures nor the achievement count would reconcile with the other.
         const mine = jobOrders.filter((jo: any) =>
-            agentOwnsReferral(jo.Referred_By || jo.referred_by || '', identity.fullName, identity.email)
+            agentOwnsReferral(jo.Referred_By || jo.referred_by || '', identity.fullName, identity.email, identity.id)
             && isOnOrAfterAgentStartDate(jo)
         );
 
@@ -392,7 +392,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
             failedCount: countBy(isFailedOnsiteStatus),
             rescheduleCount: countBy(isRescheduleOnsiteStatus)
         };
-    }, [jobOrders, identity.fullName, identity.email]);
+    }, [jobOrders, identity.id, identity.fullName, identity.email]);
 
     // The tiers on offer. The server is the authority on targets and rewards, so
     // its figures win; the shared defaults cover the moment before they arrive.

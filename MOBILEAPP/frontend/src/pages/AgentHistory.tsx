@@ -121,6 +121,9 @@ const AgentHistory: React.FC = () => {
 
   const { jobOrders, refreshJobOrders } = useJobOrderContext();
   const [userFullName, setUserFullName] = useState<string>('');
+  // A referral made through the picker is stored as this id and holds none of
+  // the agent's name, so the id is what finds their own history.
+  const [userId, setUserId] = useState<number | null>(null);
   const [userEmail, setUserEmail] = useState<string>('');
 
   useEffect(() => {
@@ -129,6 +132,7 @@ const AgentHistory: React.FC = () => {
         try {
           const ud = JSON.parse(data);
           setUserFullName(ud.full_name || '');
+          setUserId(ud.id ?? ud.user_id ?? null);
           setUserEmail(ud.email || '');
         } catch (e) { }
       }
@@ -138,7 +142,7 @@ const AgentHistory: React.FC = () => {
   const agentJobOrders = useMemo(() => {
     return jobOrders.filter(jo => {
       const referredBy = jo.Referred_By || jo.referred_by || '';
-      if (!agentOwnsReferral(referredBy, userFullName, userEmail)) return false;
+      if (!agentOwnsReferral(referredBy, userFullName, userEmail, userId)) return false;
 
       // Only completed ("done") job orders belong in Agent History.
       if (!isDoneOnsiteStatus(getOnsiteStatus(jo))) return false;
@@ -158,7 +162,7 @@ const AgentHistory: React.FC = () => {
       }
       return true;
     }).sort((a, b) => (parseInt(String(b.id)) || 0) - (parseInt(String(a.id)) || 0));
-  }, [jobOrders, userFullName, userEmail, filterType, dateFrom, dateTo]);
+  }, [jobOrders, userId, userFullName, userEmail, filterType, dateFrom, dateTo]);
 
   const incentivesBatches = useMemo(() => {
     // Group by processed_at

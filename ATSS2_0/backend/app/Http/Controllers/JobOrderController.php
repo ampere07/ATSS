@@ -87,34 +87,27 @@ class JobOrderController extends Controller
             // that window — the reason done work appeared to be missing while
             // work in progress showed up fine.
             //
-            // referred_by is free text, so this narrows rather than decides: it
-            // returns a superset, and the exact tolerant match in
-            // AgentProgramme::referralBelongsToAgent — which the clients carry as
-            // agentReferral.ts — still settles which rows are the agent's.
+            // referred_by holds either the agent's id or older free text, so this
+            // narrows rather than decides: it returns a superset, and the exact
+            // match in AgentProgramme::referralBelongsToAgent — which the clients
+            // carry as agentReferral.ts — still settles which rows are the
+            // agent's. Both forms are covered by AgentReferral::narrow.
             if ($currentUser && $this->isAgentUser($currentUser)) {
                 $first = trim((string) ($currentUser->first_name ?? ''));
                 $last  = trim((string) ($currentUser->last_name ?? ''));
                 $email = trim((string) ($currentUser->email_address ?? $currentUser->email ?? ''));
 
-                $referralMatch = function ($q) use ($first, $last, $email) {
-                    $q->where(function ($inner) use ($first, $last, $email) {
-                        if ($email !== '') {
-                            $inner->orWhere('referred_by', $email);
-                        }
-                        if ($first !== '' || $last !== '') {
-                            $inner->orWhere(function ($name) use ($first, $last) {
-                                if ($first !== '') {
-                                    $name->where('referred_by', 'like', '%' . $first . '%');
-                                }
-                                if ($last !== '') {
-                                    $name->where('referred_by', 'like', '%' . $last . '%');
-                                }
-                            });
-                        }
-                    });
+                // A referral made through the picker is stored as this agent's
+                // user id, so the id is part of the narrowing too — it carries
+                // none of their name, and the LIKEs alone would hide every
+                // referral they have made since the picker started writing ids.
+                $agentId = $currentUser->id ?? null;
+
+                $referralMatch = function ($q) use ($agentId, $first, $last, $email) {
+                    \App\Support\AgentReferral::narrow($q, 'referred_by', $agentId, $first, $last, $email);
                 };
 
-                if ($first !== '' || $last !== '' || $email !== '') {
+                if ($first !== '' || $last !== '' || $email !== '' || $agentId !== null) {
                     // Both sources: a job order carries its referral on the
                     // application, or on the billing account's customer where
                     // there is no application behind it.
@@ -217,6 +210,17 @@ class JobOrderController extends Controller
             }
 
             // Normal mode: Return full data
+            //
+            // Resolve every referral on the page in one query rather than one
+            // per row: a referral made through the agent picker holds the
+            // agent's user id, and the list shows their name.
+            \App\Support\AgentReferral::prime(
+                $jobOrders->flatMap(fn ($jo) => [
+                    optional($jo->application)->referred_by,
+                    optional(optional($jo->billingAccount)->customer)->referred_by,
+                ])
+            );
+
             $formattedJobOrders = $jobOrders->map(function ($jobOrder) {
                 $application = $jobOrder->application;
                 $customer = $jobOrder->billingAccount ? $jobOrder->billingAccount->customer : null;
@@ -313,7 +317,18 @@ class JobOrderController extends Controller
                     'Mobile_Number' => $application ? $application->mobile_number : ($customer ? $customer->contact_number_primary : null),
                     'Secondary_Mobile_Number' => $application ? $application->secondary_mobile_number : ($customer ? $customer->contact_number_secondary : null),
                     'Desired_Plan' => $application ? $application->desired_plan : ($customer ? $customer->desired_plan : null),
-                    'Referred_By' => $application ? $application->referred_by : ($customer ? $customer->referred_by : null),
+                    // The stored value and how to show it, side by side. Every
+                    // list, export and detail pane reads Referred_By and keeps
+                    // showing a name; the edit forms read the id so that saving
+                    // an untouched record writes the same referral back rather
+                    // than turning it into a name again.
+                    'Referred_By' => \App\Support\AgentReferral::displayName(
+                        $application ? $application->referred_by : ($customer ? $customer->referred_by : null)
+                    ),
+                    'Referred_By_Raw' => $application ? $application->referred_by : ($customer ? $customer->referred_by : null),
+                    'Referred_By_Agent_ID' => \App\Support\AgentReferral::agentId(
+                        $application ? $application->referred_by : ($customer ? $customer->referred_by : null)
+                    ),
                     'Billing_Status' => $jobOrder->billing_status,
                     'commission_status' => $jobOrder->commission_status,
                     'job_order_items' => $jobOrder->items,
@@ -1659,7 +1674,11 @@ class JobOrderController extends Controller
                 \Log::warning('Job Order Approval - referral recorded but agent NOT settled', [
                     'job_order_id' => $id,
                     'reason'       => $agentPayment['reason'],
-                    'referred_by'  => $agentPayment['referred_by'] ?? null,
+                    // Both forms: the stored value is what to go and fix, and the
+                    // name is what makes the line readable when the referral is an
+                    // agent id rather than the text somebody typed.
+                    'referred_by'  => \App\Support\AgentReferral::displayName($agentPayment['referred_by'] ?? null),
+                    'referred_by_stored' => $agentPayment['referred_by'] ?? null,
                     'agent_id'     => $agentPayment['agent_id'],
                     'effect'       => 'commission_status/commission_value/incentive_value/agent_paid_at/agent_paid_to left NULL on this job order',
                 ]);

@@ -96,7 +96,10 @@ class CustomerController extends Controller
                         'region' => $customer->region,
                         'address_coordinates' => $customer->address_coordinates,
                         'housing_status' => $customer->housing_status,
-                        'referred_by' => $customer->referred_by,
+                        // Shown as a name; the id travels beside it so an edit form can
+                        // write the same referral back instead of turning it into a name.
+                        'referred_by' => \App\Support\AgentReferral::displayName($customer->referred_by),
+                        'referred_by_agent_id' => \App\Support\AgentReferral::agentId($customer->referred_by),
                         'desired_plan' => $customer->desired_plan,
                         'house_front_picture_url' => $customer->house_front_picture_url,
                         'group_id' => $customer->group_id,
@@ -148,7 +151,10 @@ class CustomerController extends Controller
                 'region' => $customer->region,
                 'address_coordinates' => $customer->address_coordinates,
                 'housing_status' => $customer->housing_status,
-                'referred_by' => $customer->referred_by,
+                // Shown as a name; the id travels beside it so an edit form can
+                // write the same referral back instead of turning it into a name.
+                'referred_by' => \App\Support\AgentReferral::displayName($customer->referred_by),
+                'referred_by_agent_id' => \App\Support\AgentReferral::agentId($customer->referred_by),
                 'desired_plan' => $customer->desired_plan,
                 'house_front_picture_url' => $customer->house_front_picture_url,
                 'group_id' => $customer->group_id,

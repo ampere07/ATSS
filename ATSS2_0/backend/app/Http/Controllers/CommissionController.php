@@ -520,10 +520,19 @@ class CommissionController extends Controller
                 $fn2 = strtolower(trim($user->full_name));
                 $email = strtolower(trim($user->email_address ?? ''));
 
-                $q->where(function($sq) use ($fn1, $fn2, $email) {
+                // The id form is an exact value, not a fragment of a name, so it
+                // is matched as one — a referral made through the picker holds
+                // "agent:37" and contains none of the words the LIKEs look for.
+                $tagged = \App\Support\AgentReferral::encode($user->id ?? null);
+
+                $q->where(function($sq) use ($fn1, $fn2, $email, $tagged) {
                     $sq->where(DB::raw('LOWER(referred_by)'), 'LIKE', '%' . $fn1 . '%')
                        ->orWhere(DB::raw('LOWER(referred_by)'), 'LIKE', '%' . $fn2 . '%');
-                    
+
+                    if ($tagged !== null) {
+                        $sq->orWhere('referred_by', $tagged);
+                    }
+
                     if ($email) {
                         $sq->orWhere(DB::raw('LOWER(referred_by)'), 'LIKE', '%' . $email . '%');
                     }
@@ -643,7 +652,12 @@ class CommissionController extends Controller
             }
             $nameVariants = array_unique(array_filter($nameVariants));
 
-            if (empty($nameVariants)) {
+            // Referrals made through the picker are stored as the agent's user
+            // id, so this request can settle them even when it was given only an
+            // id and no name at all.
+            $tagged = \App\Support\AgentReferral::encode($agentId);
+
+            if (empty($nameVariants) && $tagged === null) {
                 return response()->json([
                     'success' => true,
                     'data' => ['job_order_ids' => [], 'commission_rate' => $commissionRate, 'total_amount' => 0]
@@ -651,8 +665,11 @@ class CommissionController extends Controller
             }
 
             // Query job orders via application's referred_by
-            $query = JobOrder::whereHas('application', function ($q) use ($nameVariants) {
-                $q->where(function ($sq) use ($nameVariants) {
+            $query = JobOrder::whereHas('application', function ($q) use ($nameVariants, $tagged) {
+                $q->where(function ($sq) use ($nameVariants, $tagged) {
+                    if ($tagged !== null) {
+                        $sq->orWhere('referred_by', $tagged);
+                    }
                     foreach ($nameVariants as $name) {
                         $sq->orWhere(DB::raw('LOWER(referred_by)'), 'LIKE', '%' . $name . '%');
                     }
@@ -1579,11 +1596,12 @@ class CommissionController extends Controller
      * Same tolerant "Referred By" match the web and mobile clients use: an exact email
      * match, or every word of the agent's name appearing in the referral value.
      */
-    private function referralBelongsToAgent(?string $referredBy, string $fullName, string $email): bool
+    private function referralBelongsToAgent(?string $referredBy, string $fullName, string $email, $agentId = null): bool
     {
         // Delegated to the shared rule so incentives, achievements and the
         // weekly invoices can never disagree about whose referral a customer is.
-        return \App\Support\AgentProgramme::referralBelongsToAgent($referredBy, $fullName, $email);
+        // $agentId is what lets an id-form referral ("agent:37") match at all.
+        return \App\Support\AgentProgramme::referralBelongsToAgent($referredBy, $fullName, $email, $agentId);
     }
 
     /**
@@ -2112,7 +2130,12 @@ class CommissionController extends Controller
         $email = trim((string) ($agent->email_address ?? ''));
         $fullName = trim($first . ' ' . $last);
 
-        if ($fullName === '' && $email === '') {
+        // Referrals made through the picker are stored as the agent's user id,
+        // which is how they are found and matched — an account with neither a
+        // name nor an email on file can still be paid for them.
+        $agentId = $agent->id ?? null;
+
+        if ($fullName === '' && $email === '' && $agentId === null) {
             return [];
         }
 
@@ -2165,22 +2188,12 @@ class CommissionController extends Controller
                   ->whereRaw("{$completedAt} <= ?", [$to->format('Y-m-d H:i:s')]);
         }
 
+        // Narrowed with the shared clause, which adds the id form to the name
+        // and email ones — a referral stored as "agent:37" carries none of the
+        // agent's name, so the LIKE clauses alone would never return it.
+        \App\Support\AgentReferral::narrow($query, 'a.referred_by', $agentId, $first, $last, $email);
+
         $rows = $query
-            ->where(function ($q) use ($first, $last, $email) {
-                if ($email !== '') {
-                    $q->orWhere('a.referred_by', $email);
-                }
-                if ($first !== '' || $last !== '') {
-                    $q->orWhere(function ($inner) use ($first, $last) {
-                        if ($first !== '') {
-                            $inner->where('a.referred_by', 'like', '%' . $first . '%');
-                        }
-                        if ($last !== '') {
-                            $inner->where('a.referred_by', 'like', '%' . $last . '%');
-                        }
-                    });
-                }
-            })
             ->select('jo.id as job_order_id', 'a.referred_by as referred_by')
             ->get();
 
@@ -2194,7 +2207,7 @@ class CommissionController extends Controller
             }
 
             $referredBy = is_array($row) ? ($row['referred_by'] ?? null) : ($row->referred_by ?? null);
-            if ($this->referralBelongsToAgent($referredBy, $fullName, $email)) {
+            if ($this->referralBelongsToAgent($referredBy, $fullName, $email, $agentId)) {
                 $ids[] = $jobOrderId;
             }
         }

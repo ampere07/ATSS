@@ -13,7 +13,7 @@ import {
     Borough
 } from '../services/cityService';
 import { planService, Plan } from '../services/planService';
-import { getStoredAgentIdentity } from '../utils/agentReferral';
+import { encodeAgentReferral, getStoredAgentIdentity } from '../utils/agentReferral';
 
 interface ApplicationFormProps {
     onClose?: () => void;
@@ -419,7 +419,12 @@ const ApplicationForm: React.FC<ApplicationFormProps> = ({ onClose, onSubmitted 
                 last_name: formData.last_name.trim(),
                 mobile_number: formData.mobile_number.trim(),
                 installation_address: formData.installation_address.trim(),
-                referred_by: identity.fullName || formData.referred_by
+                // The field above shows the agent their own name; what is stored
+                // is their user id, so the referral names one account rather than
+                // a string that has to be matched back to one. Falls back to the
+                // name when there is no id on the session, which is what this
+                // wrote before ids existed.
+                referred_by: encodeAgentReferral(identity.id) || identity.fullName || formData.referred_by
             } as any);
 
             // 2. Upload whatever documents were attached.

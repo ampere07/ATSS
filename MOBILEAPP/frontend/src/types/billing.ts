@@ -45,7 +45,10 @@ export interface BillingRecord {
 }
 
 export interface BillingDetailRecord extends BillingRecord {
+  // referredBy is the agent NAME, for display. referredByAgentId is who the
+  // referral actually points at, and is what gets written back.
   referredBy?: string;
+  referredByAgentId?: number | null;
   referralContactNo?: string;
   groupName?: string;
   mikrotikId?: string;
