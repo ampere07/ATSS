@@ -22,8 +22,8 @@ class LcpNapLocationController extends Controller
     public function index(Request $request)
     {
         try {
-            $page = (int) $request->get('page', 1);
-            $limit = min((int) $request->get('limit', 1000), 1000);
+            $rawLimit = $request->get('limit');
+            $noLimit = $rawLimit === '0' || $rawLimit === 0 || $rawLimit === -1 || $rawLimit === '-1' || $rawLimit === 'all' || $request->boolean('no_limit') || $request->boolean('all');
             $search = $request->get('search', '');
             
             $query = LCPNAPLocation::query();
@@ -48,6 +48,25 @@ class LcpNapLocationController extends Controller
             }
             
             $totalItems = $query->count();
+
+            if ($noLimit) {
+                $lcpnapItems = $query->orderBy('lcpnap_name', 'asc')->get();
+                return response()->json([
+                    'success' => true,
+                    'data' => $lcpnapItems,
+                    'pagination' => [
+                        'current_page' => 1,
+                        'total_pages' => 1,
+                        'total_items' => $totalItems,
+                        'items_per_page' => $totalItems,
+                        'has_next' => false,
+                        'has_prev' => false
+                    ]
+                ]);
+            }
+            
+            $page = (int) $request->get('page', 1);
+            $limit = min((int) ($rawLimit ?: 1000), 1000);
             $totalPages = $limit > 0 ? ceil($totalItems / $limit) : 1;
             
             $lcpnapItems = $query->orderBy('id', 'desc')

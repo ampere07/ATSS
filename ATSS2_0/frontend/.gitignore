@@ -25,3 +25,7 @@ yarn-error.log*
 # pnpm
 pnpm-lock.yaml
 .pnpm-debug.log*
+
+# local debug artifacts
+response.bin
+response_headers.txt

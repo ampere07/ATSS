@@ -545,6 +545,7 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                                             <div className="max-h-60 overflow-y-auto custom-scrollbar">
                                                 {lcpnapList
                                                     .filter(item => item.lcpnap_name.toLowerCase().includes(lcpnapSearch.toLowerCase()))
+                                                    .sort((a, b) => a.lcpnap_name.localeCompare(b.lcpnap_name, undefined, { numeric: true, sensitivity: 'base' }))
                                                     .map((item) => (
                                                         <div
                                                             key={item.id}
@@ -616,6 +617,7 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                                             <div className="max-h-60 overflow-y-auto custom-scrollbar">
                                                 {lcpList
                                                     .filter(item => item.lcp_name.toLowerCase().includes(lcpSearch.toLowerCase()))
+                                                    .sort((a, b) => a.lcp_name.localeCompare(b.lcp_name, undefined, { numeric: true, sensitivity: 'base' }))
                                                     .map((item) => (
                                                         <div
                                                             key={item.id}
@@ -687,6 +689,7 @@ const AddSMSBlastModal: React.FC<AddSMSBlastModalProps> = ({
                                             <div className="max-h-60 overflow-y-auto custom-scrollbar">
                                                 {barangayList
                                                     .filter(item => item.barangay.toLowerCase().includes(barangaySearch.toLowerCase()))
+                                                    .sort((a, b) => a.barangay.localeCompare(b.barangay, undefined, { numeric: true, sensitivity: 'base' }))
                                                     .map((item) => (
                                                         <div
                                                             key={item.id}

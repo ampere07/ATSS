@@ -43,7 +43,15 @@ export const getLCPs = async (
 };
 
 export const getAllLCPs = async (): Promise<LcpApiResponse<LCP[]>> => {
-  return getLCPs(1, 1000);
+  try {
+    const response = await apiClient.get<LcpApiResponse<LCP[]>>('/lcp', {
+      params: { all: true, no_limit: true }
+    });
+    return response.data;
+  } catch (error: any) {
+    console.error('Error fetching LCP records:', error);
+    throw error;
+  }
 };
 
 export const getLCPById = async (id: number): Promise<LcpApiResponse<LCP>> => {

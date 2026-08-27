@@ -87,8 +87,8 @@ export const initializeCsrf = async (): Promise<void> => {
       });
       csrfInitialized = true;
     } catch (error) {
-      console.error('CSRF Initialization failed:', error);
-      throw error;
+      console.warn('CSRF cookie endpoint unavailable, proceeding with Authorization token:', error);
+      csrfInitialized = true;
     } finally {
       csrfInitializationPromise = null;
     }

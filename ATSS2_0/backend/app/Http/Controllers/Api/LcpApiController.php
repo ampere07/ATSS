@@ -68,8 +68,8 @@ class LcpApiController extends Controller
     public function index(Request $request)
     {
         try {
-            $page = (int) $request->get('page', 1);
-            $limit = min((int) $request->get('limit', 10), 1000);
+            $rawLimit = $request->get('limit');
+            $noLimit = $rawLimit === '0' || $rawLimit === 0 || $rawLimit === -1 || $rawLimit === '-1' || $rawLimit === 'all' || $request->boolean('no_limit') || $request->boolean('all');
             $search = $request->get('search', '');
             
             $query = LCP::query();
@@ -92,6 +92,25 @@ class LcpApiController extends Controller
             }
             
             $totalItems = $query->count();
+
+            if ($noLimit) {
+                $lcpItems = $query->orderBy('lcp_name', 'asc')->get();
+                return response()->json([
+                    'success' => true,
+                    'data' => $lcpItems,
+                    'pagination' => [
+                        'current_page' => 1,
+                        'total_pages' => 1,
+                        'total_items' => $totalItems,
+                        'items_per_page' => $totalItems,
+                        'has_next' => false,
+                        'has_prev' => false
+                    ]
+                ]);
+            }
+
+            $page = (int) $request->get('page', 1);
+            $limit = min((int) ($rawLimit ?: 10), 1000);
             $totalPages = ceil($totalItems / $limit);
             
             $lcpItems = $query->orderBy('lcp_name')
