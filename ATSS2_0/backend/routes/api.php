@@ -1800,6 +1800,10 @@ Route::get('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class , 
 Route::put('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class , 'update']);
 Route::delete('/plans/{id}', [\App\Http\Controllers\Api\PlanApiController::class , 'destroy']);
 
+// User Manager groups read live off the MikroTik router — backs the plan form so an
+// operator picks a group the router will actually authenticate against.
+Route::get('/radius/user-groups', [\App\Http\Controllers\Api\PlanApiController::class , 'getMikrotikGroups']);
+
 // Plan Related Data - fetch applications, job orders, customers by plan name
 Route::get('/plans/{id}/related', function ($id) {
     try {
