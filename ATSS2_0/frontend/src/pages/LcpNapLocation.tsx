@@ -741,9 +741,13 @@ const LcpNapLocation: React.FC = () => {
   return (
     <div className={`${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'
       } h-full flex overflow-hidden`}>
+      {/* flex-col on both branches. It used to be on the desktop one only, so
+          on a phone this panel was a bare `flex` — the header and the list sat
+          side by side and the list was squeezed to a sliver, truncating every
+          label to "L...". */}
       <div className={`${
         isMobile
-          ? mobileViewMode === 'sidebar' ? 'flex w-full' : 'hidden'
+          ? mobileViewMode === 'sidebar' ? 'flex w-full flex-col' : 'hidden'
           : 'flex-shrink-0 flex flex-col border-r relative'
       } ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
         }`} style={!isMobile ? { width: `${sidebarWidth}px` } : undefined}>
@@ -777,10 +781,10 @@ const LcpNapLocation: React.FC = () => {
               color: colorPalette?.primary || '#7c3aed'
             } : {}}
           >
-            <div className="flex items-center">
-              <span>All Locations</span>
+            <div className="flex items-center min-w-0">
+              <span className="truncate">All Locations</span>
             </div>
-            <span className={`px-2 py-1 rounded-full text-xs ${selectedLcpNapId === 'all'
+            <span className={`flex-shrink-0 ml-2 px-2 py-1 rounded-full text-xs ${selectedLcpNapId === 'all'
               ? 'text-white'
               : isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-700'
               }`}
@@ -806,10 +810,12 @@ const LcpNapLocation: React.FC = () => {
                   color: colorPalette?.primary || '#7c3aed'
                 } : {}}
               >
-                <div className="flex items-center overflow-hidden">
-                  <div 
+                <div className="flex items-center min-w-0 flex-1 overflow-hidden">
+                  <div
                     onClick={(e) => toggleGroup(group.lcp_name, e)}
-                    className={`mr-2 p-1 rounded hover:bg-black/10 transition-colors`}
+                    role="button"
+                    aria-label={expandedGroups.has(group.lcp_name) ? 'Collapse' : 'Expand'}
+                    className={`mr-1.5 -ml-1 p-1.5 rounded flex-shrink-0 hover:bg-black/10 transition-colors`}
                   >
                     {expandedGroups.has(group.lcp_name) ? (
                       <ChevronDown className="h-4 w-4" />
@@ -820,7 +826,7 @@ const LcpNapLocation: React.FC = () => {
                   <MapPin className="h-4 w-4 mr-2 flex-shrink-0" />
                   <span className="truncate">{group.lcp_name}</span>
                 </div>
-                <span className={`px-2 py-1 rounded-full text-xs ${selectedLcpNapId === group.lcp_name
+                <span className={`flex-shrink-0 ml-2 px-2 py-1 rounded-full text-xs ${selectedLcpNapId === group.lcp_name
                   ? 'text-white'
                   : isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-200 text-gray-700'
                   }`}
@@ -844,15 +850,15 @@ const LcpNapLocation: React.FC = () => {
                           setMobileViewMode('map');
                         }
                       }}
-                      className={`w-full flex items-center justify-between pl-12 pr-4 py-2 text-xs transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-200 text-gray-600 hover:text-gray-900'
+                      className={`w-full flex items-center justify-between gap-2 pl-10 sm:pl-12 pr-4 py-2.5 sm:py-2 text-xs transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-200 text-gray-600 hover:text-gray-900'
                         } ${selectedLocation?.id === loc.id ? 'font-bold bg-black/5' : ''}`}
                       style={selectedLocation?.id === loc.id ? {
                         color: colorPalette?.primary || '#7c3aed'
                       } : {}}
                     >
-                      <span className="truncate">{loc.lcpnap_name}</span>
+                      <span className="truncate min-w-0">{loc.lcpnap_name}</span>
                       {loc.total_technical_details !== undefined && (
-                        <span className="opacity-60">
+                        <span className="opacity-60 flex-shrink-0 whitespace-nowrap">
                            {loc.total_technical_details}/{loc.port_total}
                         </span>
                       )}
@@ -864,6 +870,11 @@ const LcpNapLocation: React.FC = () => {
           ))}
         </div>
 
+        {/* Drag-to-resize is a pointer affordance, and on a phone the panel is
+            full width with nothing to resize against — so it is not rendered
+            there at all. It also had no positioned ancestor on that branch,
+            which is what put the stray bar at the screen edge. */}
+        {!isMobile && (
         <div
           className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize transition-colors z-10"
           style={{
@@ -877,6 +888,7 @@ const LcpNapLocation: React.FC = () => {
           }}
           onMouseDown={handleMouseDownSidebarResize}
         />
+        )}
       </div>
 
       <div className={`${

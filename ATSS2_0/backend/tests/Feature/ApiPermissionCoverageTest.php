@@ -217,12 +217,17 @@ class ApiPermissionCoverageTest extends TestCase
                     ['GET', 'api/inventory'],
                     ['POST', 'api/inventory'],
                     ['GET', 'api/inventory-categories'],
+                    // An inventory log records who took an item out and who
+                    // brought it back, so the log form has to offer the account
+                    // list. Reading it only; the writes below stay denied.
+                    ['GET', 'api/users'],
                 ],
                 'deny' => [
                     ['GET', 'api/job-orders'],
                     ['GET', 'api/transactions'],
                     ['GET', 'api/customers'],
-                    ['GET', 'api/users'],
+                    ['POST', 'api/users'],
+                    ['DELETE', 'api/users/7'],
                     ['POST', 'api/sms-blast'],
                 ],
             ],

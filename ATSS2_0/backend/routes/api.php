@@ -3796,6 +3796,20 @@ Route::post('/soa/{id}/generate-pdf', function ($id) {
             ], 404);
         }
 
+        // A customer generates this for their own statement from the portal's
+        // Bills page. The id in the URL is not an authorization boundary, so a
+        // portal caller is pinned to their own account here — otherwise walking
+        // the ids would hand out a print link to anyone's statement. Staff
+        // holding the SOA page are not confined.
+        $customerAccountNo = \App\Support\CustomerScope::accountNo('soa');
+
+        if ($customerAccountNo !== null && $account->account_no !== $customerAccountNo) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Statement of Account not found'
+            ], 404);
+        }
+
         $pdfService = app(\App\Services\GoogleDrivePdfGenerationService::class);
 
         // Debug: Log the SOA data before PDF generation

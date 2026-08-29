@@ -114,6 +114,10 @@ final class ApiPermissionMap
         ['user',                         null, null],
         ['logout',                       null, null],
         ['me/permissions',               null, null],
+        // The browser reporting its own JavaScript errors. Any signed-in client
+        // may file one about itself; the route is rate limited rather than
+        // gated, since the caller is whoever hit the bug.
+        ['client-log',                   null, null],
         ['user-preferences/*',           null, null],
         ['user-settings/*',              null, null],
         ['broadcasting/auth',            null, null],
@@ -169,6 +173,14 @@ final class ApiPermissionMap
         ['custom-account-number*',       null, ['customer.details-edit', 'user-management']],
         ['settings-color-palette*',      null, 'settings'],
         ['settings-image-size*',         null, 'settings'],
+        // The same rows as settings-image-size above, under the second path the
+        // upload forms actually call. This is the compression ratio the browser
+        // applies to a photo before posting it, so it is read by every
+        // attachment form in the app — job order, service order, customer,
+        // application, inventory, transaction, LCP/NAP — and by the mobile app.
+        // Reading it is not an act of configuration; writing it is, and
+        // settings-image-size owns that side.
+        ['settings/image-size',          null, 'settings'],
         ['settings/*',                   'settings', 'settings'],
         ['system-config/*',              null, 'settings'],
         ['app-version/*',                null, 'settings'],
@@ -196,9 +208,13 @@ final class ApiPermissionMap
         // "signed in is enough" and has to sit above the users* rule that would
         // otherwise demand a staff page key from a technician or a customer.
         ['users/push-token',             null, null],
+        // 'inventory' is here because an inventory log records who took an item
+        // out and who brought it back, so the log form has to offer the account
+        // list — the same reason a job order has to offer technicians.
         ['users*', [
             'user-management', 'tech-users', 'agent-management', 'team-agent',
             'job-order', 'service-order', 'work-order', 'application-management',
+            'inventory',
         ], ['user-management', 'tech-users', 'agent-management']],
         ['technicians*', [
             'tech-users', 'user-management',
@@ -223,6 +239,15 @@ final class ApiPermissionMap
         // agent on a custom role that had not been ticked for that page was
         // refused their own total.
         ['applications/my-count',        null, null],
+        // One application, as opposed to the list of them. A job order *is* an
+        // application that was scheduled, and both the job order pane and the
+        // technician's Done form read the original submission back, so the read
+        // side names those pages too.
+        //
+        // The collection below stays the Application Management page's own:
+        // holding Job Order is a reason to see the application behind the order
+        // in front of you, not to enumerate every application ever submitted.
+        ['applications/*',               ['application-management', 'job-order', 'service-order'], ['application-management', 'agent-application']],
         ['applications*',                'application-management', ['application-management', 'agent-application']],
         ['application-visits*',          'application-management', 'application-management'],
 
@@ -294,6 +319,11 @@ final class ApiPermissionMap
         // is a different job: holding it should not carry the right to rewrite
         // a subscriber's record.
         ], 'customer.details-edit'],
+        // The Billing Reconcile tool — first in this block because the `billing*`
+        // rule at the end of it would otherwise claim it. Its three sibling
+        // tools live in the reconciliation section further down; this one is
+        // separated only by that prefix collision.
+        ['billing-reconciliation/*',     'billing-reconcile-tool', 'billing-reconcile-tool'],
         ['billing-generation/invoices',  ['invoice', 'soa', 'customer', 'customer-bills', 'customer-dashboard'], 'billing-config'],
         ['billing-generation/statements', ['invoice', 'soa', 'customer', 'customer-bills', 'customer-dashboard'], 'billing-config'],
         ['billing-generation/*',         ['customer', 'billing-config'], ['customer', 'billing-config']],
@@ -301,6 +331,16 @@ final class ApiPermissionMap
         ['billing-config*',              'billing-config', 'billing-config'],
         ['billing-details*',             ['customer', 'customer-bills', 'customer-dashboard'], 'customer.details-edit'],
         ['billing_details*',             ['customer', 'customer-bills', 'customer-dashboard'], 'customer.details-edit'],
+        // One account's billing record, read from the service order edit form to
+        // show the balance the order is being raised against.
+        //
+        // The two helpers are listed first, unchanged, so that widening applies
+        // to billing/{accountNo} alone: `*` spans slashes, and a technician has
+        // no reason to page the active-account list or the whole billing table
+        // through the bare collection two rules down.
+        ['billing/accounts/*',           ['customer', 'soa', 'invoice', 'overdue', 'customer-bills', 'customer-dashboard'], ['customer.transact', 'billing-config']],
+        ['billing/check-updates',        ['customer', 'soa', 'invoice', 'overdue', 'customer-bills', 'customer-dashboard'], ['customer.transact', 'billing-config']],
+        ['billing/*',                    ['customer', 'soa', 'invoice', 'overdue', 'customer-bills', 'customer-dashboard', 'service-order'], ['customer.transact', 'billing-config']],
         ['billing*',                     ['customer', 'soa', 'invoice', 'overdue', 'customer-bills', 'customer-dashboard'], ['customer.transact', 'billing-config']],
         ['cron-test/*',                  ['customer', 'settings'], ['customer', 'settings']],
 
@@ -319,7 +359,12 @@ final class ApiPermissionMap
 
         ['statement-of-accounts*',       ['soa', 'customer', 'customer-bills', 'customer-dashboard'], 'soa'],
         ['soa-records',                  ['soa', 'customer', 'customer-bills', 'customer-dashboard'], ['soa', 'soa-generation.manage']],
-        ['soa/*',                        ['soa', 'customer', 'customer-bills', 'customer-dashboard'], 'soa'],
+        // soa/{id}/generate-pdf is the only route here, and it is a POST that a
+        // customer makes for their own statement from the portal's Bills page —
+        // so the portal's keys are on the write side, not just the read one.
+        // The route itself confines a portal caller to their own account; see
+        // routes/api.php, where CustomerScope guards it.
+        ['soa/*',                        ['soa', 'customer', 'customer-bills', 'customer-dashboard'], ['soa', 'customer-bills', 'customer-dashboard']],
         ['invoice-records',              ['invoice', 'customer', 'customer-bills', 'customer-dashboard'], 'invoice'],
         ['invoices/*',                   ['invoice', 'customer', 'customer-bills', 'customer-dashboard'], 'invoice'],
         ['overdues*',                    ['overdue', 'customer', 'customer-bills', 'customer-dashboard'], 'overdue'],
@@ -344,8 +389,32 @@ final class ApiPermissionMap
         // ── Network operations ───────────────────────────────────────────────
         ['smart-olt/validate-sn',        null, null],
         ['smart-olt*',                   ['smart-olt', 'job-order'], ['smart-olt', 'job-order.admin-edit', 'job-order.approve']],
+        // ── Reconciliation tools ─────────────────────────────────────────────
+        // Each of these compares what the system believes against what a
+        // downstream actually holds, and writes the difference back: RADIUS
+        // accounts and passwords, SmartOLT ONU profiles, settled Xendit
+        // payments, the billing run's coverage. They arrived after this table
+        // was written, matched no rule, and so fell through to
+        // DEFAULT_REQUIREMENT — any signed-in user, a customer included, could
+        // POST radius-reconciliation/delete-user.
+        //
+        // Listed above radius-config* and before the billing* family so the
+        // prefixes there do not swallow them.
+        ['radius-reconciliation/*',      'mikrotik-radius-tool', 'mikrotik-radius-tool'],
+        ['smartolt-reconciliation/*',    'smartolt-tool', 'smartolt-tool'],
+        ['xendit-reconciliation/*',      'xendit-reconcile-tool', 'xendit-reconcile-tool'],
+        // Billing Reconcile is not here with its three siblings: `billing*`,
+        // further up in the billing section, would match it first. It is listed
+        // there instead, at the top of that block.
+
         ['radius-config*',               'radius-config', 'radius-config'],
         ['radius/*',                     ['radius-config', 'job-order', 'customer'], ['radius-config', 'customer.details-edit', 'job-order.admin-edit', 'job-order.approve']],
+        // The technician's Done form reads the username and password patterns to
+        // build the PPPoE credentials it is about to save, so the read side names
+        // Job Order alongside the page that defines them. Defining a pattern is
+        // still PPPoE Setup's alone, as are the two maintenance endpoints that
+        // fall through to the rule below.
+        ['pppoe/patterns*',              ['pppoe-setup', 'job-order'], 'pppoe-setup'],
         ['pppoe/*',                      'pppoe-setup', 'pppoe-setup'],
 
         // ── Inventory ────────────────────────────────────────────────────────

@@ -133,6 +133,18 @@ final class Permissions
         'radius-queue',
         'system-logs',
 
+        // Tools. Each reconciles what the system believes against what a
+        // downstream actually holds — SmartOLT's ONUs, the RADIUS server's
+        // accounts, Xendit's settled payments, the billing run's coverage — and
+        // each can write the difference back. They had sidebar entries and
+        // front-end keys but no entry here, which left their endpoints falling
+        // through to "any signed-in user" and made the keys unavailable to a
+        // custom role, since RoleController validates against this list.
+        'smartolt-tool',
+        'mikrotik-radius-tool',
+        'xendit-reconcile-tool',
+        'billing-reconcile-tool',
+
         'soa-generation',
         'settings',
     ];
@@ -306,6 +318,14 @@ final class Permissions
             // rather than a configuration one, so it sits with the roles that
             // chase failed disconnects rather than with Settings.
             'radius-queue',
+            // Tools suite. Every one of these mutates live state — subscriber
+            // ONUs, RADIUS accounts, posted payments — so they are granted
+            // deliberately rather than inherited from a group. Billing
+            // Reconcile is not here: it decides whether a subscriber is
+            // invoiced at all, and stays with SuperAdmin.
+            'smartolt-tool',
+            'mikrotik-radius-tool',
+            'xendit-reconcile-tool',
         ],
 
         // Field technician: their own job orders and service orders, plus the
@@ -379,6 +399,12 @@ final class Permissions
             'location-list',
             'lcp',
             'nap',
+            // The two network tools. Xendit Reconciliation is deliberately NOT
+            // here: it settles real money against real accounts, which is an
+            // Administrator and SuperAdmin concern rather than a
+            // field-operations one.
+            'smartolt-tool',
+            'mikrotik-radius-tool',
         ],
     ];
 

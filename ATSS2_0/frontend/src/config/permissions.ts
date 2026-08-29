@@ -148,6 +148,15 @@ export const PAGES = [
   'radius-queue',
   'system-logs',
 
+  // Tools. Each reconciles what the system believes against what a downstream
+  // actually holds, and can write the difference back. They had sidebar entries
+  // and role grants but were missing from this list, so the Role modal could
+  // never offer them to a custom role.
+  'smartolt-tool',
+  'mikrotik-radius-tool',
+  'xendit-reconcile-tool',
+  'billing-reconcile-tool',
+
   'soa-generation',
   'settings',
 ] as const;
@@ -291,6 +300,10 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'radius-logs': 'Radius Logs',
   'radius-queue': 'Radius Queue',
   'system-logs': 'System Logs',
+  'smartolt-tool': 'SmartOLT Tool',
+  'mikrotik-radius-tool': 'Mikrotik Radius Tool',
+  'xendit-reconcile-tool': 'Xendit Reconciliation',
+  'billing-reconcile-tool': 'Billing Reconcile',
   'soa-generation': 'SOA Generation',
   'settings': 'Settings',
 
@@ -359,6 +372,15 @@ export const PERMISSION_GROUPS: Array<{ label: string; pages: string[] }> = [
     pages: ['bonus-history', 'agent-invoices', 'agent-payout', 'agent-management', 'team-agent'],
   },
   { label: 'Inventory', pages: ['inventory', 'inventory-category-list'] },
+  {
+    // Grouped apart from Configurations because these do not describe the
+    // system, they act on it — each writes corrections into a live downstream.
+    label: 'Tools',
+    pages: [
+      'smartolt-tool', 'mikrotik-radius-tool',
+      'xendit-reconcile-tool', 'billing-reconcile-tool',
+    ],
+  },
   {
     label: 'Configurations',
     pages: [

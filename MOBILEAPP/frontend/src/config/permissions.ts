@@ -154,6 +154,14 @@ export const PAGES = [
   'radius-queue',
   'system-logs',
 
+  // Tools. Web-only screens, but the keys live here too: this catalog has to
+  // stay identical to the server's and the web client's, and a role's key list
+  // is compared across all three.
+  'smartolt-tool',
+  'mikrotik-radius-tool',
+  'xendit-reconcile-tool',
+  'billing-reconcile-tool',
+
   'soa-generation',
   'settings',
 ] as const;
@@ -295,6 +303,10 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'radius-logs': 'Radius Logs',
   'radius-queue': 'Radius Queue',
   'system-logs': 'System Logs',
+  'smartolt-tool': 'SmartOLT Tool',
+  'mikrotik-radius-tool': 'Mikrotik Radius Tool',
+  'xendit-reconcile-tool': 'Xendit Reconciliation',
+  'billing-reconcile-tool': 'Billing Reconcile',
   'soa-generation': 'SOA Generation',
   'settings': 'Settings',
 
@@ -457,12 +469,25 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     // The RADIUS retry queue. Read-only, and an operational screen rather than
     // a configuration one.
     'radius-queue',
+    // Tools suite. Every one of these mutates live state — subscriber ONUs,
+    // RADIUS accounts, posted payments — so they are granted deliberately
+    // rather than inherited from a group. Billing Reconcile is not here: it
+    // decides whether a subscriber is invoiced at all, and stays with
+    // SuperAdmin.
+    'smartolt-tool',
+    'mikrotik-radius-tool',
+    'xendit-reconcile-tool',
   ],
 
   [ROLE.TECHNICIAN]: [
     'job-order',
     'job-order.tech-edit',
     'job-order.attachment',
+    // The pre-installation visit is site work, and the server has always
+    // granted it. This catalog did not, so the mobile app hid a button the
+    // technician was entitled to — the drift ran the safe way, but it still
+    // withheld the control.
+    'job-order.pre-install',
     'service-order',
     'service-order.tech-edit',
     // Work orders are a technician's work too. The web sidebar never listed the
@@ -512,6 +537,11 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'location-list',
     'lcp',
     'nap',
+    // The two network tools. Xendit Reconciliation is deliberately NOT here:
+    // it settles real money against real accounts, which is an Administrator
+    // and SuperAdmin concern rather than a field-operations one.
+    'smartolt-tool',
+    'mikrotik-radius-tool',
   ],
 };
 
