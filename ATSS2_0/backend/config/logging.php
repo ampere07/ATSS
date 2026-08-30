@@ -140,7 +140,17 @@ return [
         'billing' => [
             'driver' => 'daily',
             'path' => storage_path('logs/billinggeneration.log'),
-            'level' => env('LOG_LEVEL', 'debug'),
+            /*
+             * Explicit, not LOG_LEVEL.
+             *
+             * Its only writer is EnhancedBillingGenerationServiceWithNotifications, which
+             * now decides for itself what is worth recording (App\Support\CronLog) and
+             * drops the narration before it ever reaches here. Leaving this on LOG_LEVEL
+             * — `error` in this deployment — would additionally discard the per-run
+             * account summaries, which are not errors and are the whole point of the
+             * change.
+             */
+            'level' => 'debug',
             'days' => 30,
         ],
 

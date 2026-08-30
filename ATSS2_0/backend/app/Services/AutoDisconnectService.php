@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Invoice;
+use App\Support\CronLog;
 use App\Models\BillingAccount;
 use App\Models\ServiceOrder;
 use App\Models\BillingConfig;
@@ -18,6 +19,17 @@ use Exception;
 class AutoDisconnectService
 {
     private $logName = 'Auto_DC';
+
+    /**
+     * Accounts touched by the current run, bucketed by outcome.
+     *
+     * The per-account narration this service used to write is filtered out now, so the
+     * record of which accounts were actually handled has to survive somewhere. It is
+     * emitted once at the end of the run as a quoted, comma-separated list per outcome —
+     * short enough to read at a glance, and in a form that pastes into a query when a
+     * specific account has to be chased.
+     */
+    private CronLog $runLog;
     private $radiusService;
     private $smsService;
     private $emailQueueService;
@@ -63,6 +75,7 @@ class AutoDisconnectService
         $this->radiusService = $radiusService;
         $this->smsService = $smsService;
         $this->emailQueueService = $emailQueueService;
+        $this->runLog = new CronLog();
     }
 
     /**
@@ -167,6 +180,7 @@ class AutoDisconnectService
                     $result = $this->processDisconnection($invoice, $dcActualOffset);
                 } catch (Throwable $e) {
                     $skippedCount++;
+                    $this->runLog->failed($invoice->account_no);
                     $errors[] = "Account {$invoice->account_no}: " . $e->getMessage();
                     $this->writeLog("[{$counter}/{$totalCount}] ✗ ERROR (isolated, continuing): " . $e->getMessage());
                     \Log::channel('radiusrelated')->error('[AUTO DC LOOP EXCEPTION] Account: ' . $invoice->account_no . ' - ' . $e->getMessage());
@@ -175,12 +189,15 @@ class AutoDisconnectService
 
                 if ($result['success']) {
                     $processedCount++;
+                    $this->runLog->processed($invoice->account_no);
                     $this->writeLog("[{$counter}/{$totalCount}] ✓ SUCCESS - Transaction Committed");
                 } elseif (!empty($result['queued'])) {
                     $queuedCount++;
+                    $this->runLog->queued($invoice->account_no);
                     $this->writeLog("[{$counter}/{$totalCount}] ⧗ QUEUED for retry: " . ($result['reason'] ?? 'RADIUS unavailable'));
                 } else {
                     $skippedCount++;
+                    $this->runLog->skipped($invoice->account_no);
                     $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED: {$result['reason']}");
                     if (isset($result['reason'])) {
                         $errors[] = "Account {$invoice->account_no}: {$result['reason']}";
@@ -212,6 +229,8 @@ class AutoDisconnectService
                 }
                 $this->writeLog("");
             }
+
+            $this->writeRunSummary();
 
             $this->releaseLock();
             return [
@@ -1010,8 +1029,32 @@ class AutoDisconnectService
     /**
      * Write to log file
      */
+    /**
+     * Emit the run's account lists, then clear them.
+     *
+     * Written through writeLog() like everything else — the summary marker is what carries
+     * these lines past the error filter, so they stay in the file when the narration does
+     * not. Cleared afterwards so a second run on the same instance cannot inherit the
+     * first one's accounts.
+     */
+    private function writeRunSummary(): void
+    {
+        foreach ($this->runLog->summaryLines() as $line) {
+            $this->writeLog($line);
+        }
+
+        $this->runLog->reset();
+    }
+
     private function writeLog(string $message): void
     {
+        // Errors and run summaries only - see App\Support\CronLog. This is a raw
+        // file write, so LOG_LEVEL never reached it and the narration accumulated
+        // no matter how the channels were configured.
+        if (!CronLog::shouldWrite($message)) {
+            return;
+        }
+
         $timestamp = Carbon::now()->format('Y-m-d H:i:s');
         $logMessage = "[{$timestamp}] [{$this->logName}] {$message}";
         
@@ -1028,7 +1071,12 @@ class AutoDisconnectService
         file_put_contents($logFile, $logMessage . PHP_EOL, FILE_APPEND);
         
         // Also log to Laravel default log
-        Log::channel('single')->info("[{$this->logName}] {$message}");
+        // Only faults are mirrored, and as ->error(). Every line used to be
+        // duplicated into laravel.log at info level, which doubled the volume
+        // and misreported the severity of all of it.
+        if (CronLog::isError($message)) {
+            Log::channel('single')->error("[{$this->logName}] {$message}");
+        }
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\DB;
+use App\Support\CronLog;
 use Illuminate\Support\Facades\Log;
 use App\Services\ManualRadiusOperationsService;
 use App\Services\RouterosApiService;
@@ -23,6 +24,13 @@ use Carbon\Carbon;
 class RadiusQueueService
 {
     private $logName = 'Radius_Queue';
+
+    /**
+     * Queue items handled by the current run, bucketed by outcome and keyed on the
+     * account the operation belongs to. Emitted once at the end of processQueue() as a
+     * quoted list per outcome, since the per-item narration is filtered out now.
+     */
+    private CronLog $runLog;
 
     /** Statuses that mean a queued operation is still on its way through. */
     private const ACTIVE_STATUSES = ['pending', 'processing'];
@@ -154,6 +162,8 @@ class RadiusQueueService
      */
     public function processQueue(?int $batchSize = null): array
     {
+        $this->runLog = new CronLog();
+
         $batchSize = $batchSize ?? RadiusRetryPolicy::batchSize();
 
         $results = [
@@ -252,16 +262,19 @@ class RadiusQueueService
                         ]);
 
                     $results['succeeded']++;
+                    $this->runLog->processed($item->account_no ?? ('job#' . $item->id));
                     $this->writeLog("  [RESULT] ✓ SUCCESS on attempt {$thisAttempt}/{$itemMax} — no further retries");
                 } else {
                     $errorMsg = $errorMessage ?? 'Operation returned failure status';
                     $this->markRetryOrFailed($item, $errorMsg);
                     $results['failed']++;
+                    $this->runLog->failed($item->account_no ?? ('job#' . $item->id));
                     $this->writeLog("  [RESULT] ✗ FAILED - " . $errorMsg);
                 }
             } catch (\Exception $e) {
                 $this->markRetryOrFailed($item, $e->getMessage());
                 $results['failed']++;
+                $this->runLog->failed($item->account_no ?? ('job#' . $item->id));
                 $this->writeLog("  [RESULT] ✗ EXCEPTION - " . $e->getMessage());
             }
 
@@ -283,6 +296,11 @@ class RadiusQueueService
         $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
         $this->writeLog("");
         $this->writeLog("");
+
+        foreach ($this->runLog->summaryLines() as $line) {
+            $this->writeLog($line);
+        }
+        $this->runLog->reset();
 
         return $results;
     }
@@ -563,6 +581,13 @@ class RadiusQueueService
      */
     private function writeLog(string $message): void
     {
+        // Errors and run summaries only - see App\Support\CronLog. This is a raw
+        // file write, so LOG_LEVEL never reached it and the narration accumulated
+        // no matter how the channels were configured.
+        if (!CronLog::shouldWrite($message)) {
+            return;
+        }
+
         $timestamp = Carbon::now()->format('Y-m-d H:i:s');
         $logMessage = "[{$timestamp}] [{$this->logName}] {$message}";
 
@@ -579,6 +604,11 @@ class RadiusQueueService
         file_put_contents($logFile, $logMessage . PHP_EOL, FILE_APPEND);
 
         // Also log to Laravel default log
-        Log::channel('single')->info("[{$this->logName}] {$message}");
+        // Only faults are mirrored, and as ->error(). Every line used to be
+        // duplicated into laravel.log at info level, which doubled the volume
+        // and misreported the severity of all of it.
+        if (CronLog::isError($message)) {
+            Log::channel('single')->error("[{$this->logName}] {$message}");
+        }
     }
 }

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\RadiusConfig;
+use App\Support\RadiusCircuitBreaker;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Throwable;
@@ -68,6 +69,13 @@ class RouterosApiService
     private ?string $current = null;
 
     private string $lastError = '';
+
+    /**
+     * True when the last failed connect found every endpoint for the config in
+     * cool-off, so only a single probe was spent rather than a full walk.
+     * Lets a caller abandon this config immediately instead of retrying it.
+     */
+    private bool $lastConnectAllEndpointsDown = false;
 
     // =========================================================================
     // Connection lifecycle
@@ -135,6 +143,48 @@ class RouterosApiService
     public function getLastError(): string
     {
         return $this->lastError;
+    }
+
+    /**
+     * Did the last failed connect() find every transport for that config already
+     * marked down? A caller looping over configs should move to the next one
+     * rather than spending its retry budget on this one.
+     */
+    public function lastConnectAllEndpointsDown(): bool
+    {
+        return $this->lastConnectAllEndpointsDown;
+    }
+
+    /**
+     * The endpoint the current connection is using, e.g. `tcp://10.0.0.1:8728`.
+     * Empty when nothing is connected.
+     */
+    public function activeEndpoint(): string
+    {
+        return $this->currentEndpoint();
+    }
+
+    /**
+     * Per-transport reachability for a config, for logs and diagnostics.
+     *
+     * @param RadiusConfig|array<string, mixed> $config
+     * @return array<string, string> endpoint => 'up'|'down'
+     */
+    public function endpointStates($config): array
+    {
+        $credentials = $this->resolveCredentials($config, null, null, null, null, self::DEFAULT_CONNECT_TIMEOUT);
+
+        if ($credentials === null) {
+            return [];
+        }
+
+        $states = [];
+        foreach ($this->candidateEndpoints($credentials) as $endpoint) {
+            $label = $this->endpointLabel($credentials, $endpoint);
+            $states[$label] = RadiusCircuitBreaker::state($label);
+        }
+
+        return $states;
     }
 
     /**
@@ -853,10 +903,27 @@ class RouterosApiService
      */
     private function establish(array $credentials): bool
     {
+        $this->lastConnectAllEndpointsDown = false;
+
+        $preferred = $this->candidateEndpoints($credentials);
+        $plan      = $this->plannedEndpoints($credentials, $preferred, $allDown);
+
+        $this->lastConnectAllEndpointsDown = $allDown;
+
         $errors = [];
 
-        foreach ($this->candidateEndpoints($credentials) as $endpoint) {
+        foreach ($plan as $endpoint) {
             $error  = '';
+            $label  = $this->endpointLabel($credentials, $endpoint);
+            $role   = $endpoint === $preferred[0] ? 'saved' : 'alternate';
+
+            $this->log('info', 'Trying RADIUS transport.', [
+                'radius_config_id' => $credentials['id'] ?? null,
+                'endpoint'         => $label,
+                'transport_role'   => $role,
+                'breaker'          => RadiusCircuitBreaker::state($label),
+            ]);
+
             $socket = $this->openSocket(
                 (string) $credentials['host'],
                 $endpoint['transport'],
@@ -865,16 +932,16 @@ class RouterosApiService
                 $error
             );
 
-            $label = $endpoint['transport'] . '://' . $credentials['host'] . ':' . $endpoint['port'];
-
             if ($socket === null) {
                 $errors[] = $label . ': ' . $error;
+                RadiusCircuitBreaker::recordFailure($label);
                 continue;
             }
 
             if (!$this->login($socket, (string) $credentials['username'], (string) $credentials['password'])) {
                 $errors[] = $label . ': ' . ($this->lastError !== '' ? $this->lastError : 'login rejected');
                 $this->closeSocket($socket);
+                RadiusCircuitBreaker::recordFailure($label);
                 continue;
             }
 
@@ -894,9 +961,14 @@ class RouterosApiService
             $this->current   = $key;
             $this->lastError = '';
 
+            // The device answered, so this transport is proven good: clear any
+            // failures standing against it and put it back at the front.
+            RadiusCircuitBreaker::recordSuccess($label);
+
             $this->log('info', 'Connected to RouterOS API.', [
                 'radius_config_id' => $credentials['id'] ?? null,
                 'endpoint'         => $label,
+                'transport_role'   => $role,
                 'routeros_version' => $version ?: 'unknown',
                 'um_prefix'        => $prefix,
             ]);
@@ -909,13 +981,71 @@ class RouterosApiService
             ? 'No RouterOS API endpoint responded.'
             : implode(' | ', $errors);
 
-        $this->log('error', 'RouterOS API device unreachable.', [
-            'radius_config_id' => $credentials['id'] ?? null,
-            'host'             => $credentials['host'],
-            'error'            => $this->lastError,
+        $this->log('error', 'RADIUS device unreachable on every transport.', [
+            'radius_config_id'  => $credentials['id'] ?? null,
+            'host'              => $credentials['host'],
+            'transports_tried'  => array_map(fn (array $e): string => $this->endpointLabel($credentials, $e), $plan),
+            'all_marked_down'   => $allDown,
+            'error'             => $this->lastError,
         ]);
 
         return false;
+    }
+
+    /**
+     * Narrow the preference-ordered endpoints down to the ones worth a socket.
+     *
+     * An endpoint in cool-off is skipped outright — no socket, no connect
+     * timeout — so a config whose saved transport is down reaches its alternate
+     * immediately instead of paying the dead one's timeout on every call.
+     *
+     * If BOTH transports are in cool-off the config is not abandoned: the most
+     * preferred one is returned alone as a half-open probe. That bounds the cost
+     * of a total outage to a single attempt while still letting the endpoint
+     * prove it has recovered, so the system can never wedge itself shut.
+     *
+     * @param array<string, mixed> $credentials
+     * @param array<int, array{transport: string, port: int}> $preferred
+     * @param bool|null $allDown Set to true when every endpoint was in cool-off.
+     * @return array<int, array{transport: string, port: int}>
+     */
+    private function plannedEndpoints(array $credentials, array $preferred, ?bool &$allDown = null): array
+    {
+        $allDown = false;
+
+        if ($preferred === [] || !RadiusCircuitBreaker::enabled()) {
+            return $preferred;
+        }
+
+        $healthy = array_values(array_filter(
+            $preferred,
+            fn (array $endpoint): bool => !RadiusCircuitBreaker::isOpen($this->endpointLabel($credentials, $endpoint))
+        ));
+
+        if ($healthy !== []) {
+            return $healthy;
+        }
+
+        $allDown = true;
+
+        $this->log('warning', 'Every RADIUS transport for this config is in cool-off; sending one probe.', [
+            'radius_config_id' => $credentials['id'] ?? null,
+            'probe'            => $this->endpointLabel($credentials, $preferred[0]),
+        ]);
+
+        return [$preferred[0]];
+    }
+
+    /**
+     * Canonical endpoint name, e.g. `tcp://10.0.0.1:8728`. This is the circuit
+     * breaker key, so it must stay stable and carry the transport.
+     *
+     * @param array<string, mixed> $credentials
+     * @param array{transport: string, port: int} $endpoint
+     */
+    private function endpointLabel(array $credentials, array $endpoint): string
+    {
+        return $endpoint['transport'] . '://' . $credentials['host'] . ':' . $endpoint['port'];
     }
 
     /**

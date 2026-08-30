@@ -8,6 +8,7 @@ import { useCustomerDashboardStore } from '../store/customerDashboardStore';
 import { settingsColorPaletteService, getCachedActivePalette, ColorPalette } from '../services/settingsColorPaletteService';
 import pusher from '../services/pusherService';
 import { reportClientEvent } from '../services/clientLogService';
+import SessionExpiredModal from '../components/SessionExpiredModal';
 
 // Interfaces for data types
 interface Payment {
@@ -41,6 +42,38 @@ interface DashboardCustomerProps {
 const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoOpenPayModal }) => {
     const [user, setUser] = useState<any>(null);
     const [error, setError] = useState('');
+    // Has the stored auth been read yet? Distinguishes "no account to load for"
+    // from "have not looked yet" — see balanceRequestsSettled below.
+    const [authChecked, setAuthChecked] = useState(false);
+
+    // An expired session is not a balance failure.
+    //
+    // Customers routinely stay signed in between visits rather than logging out, so
+    // arriving with a stale token is an ordinary state here, not an edge case. The 401
+    // interceptor in config/api.ts already clears the credential and raises
+    // `auth:session-expired` — every staff page listens for it and shows the re-login
+    // modal, but this page, the only customer-facing one, did not. A customer whose
+    // token had lapsed was therefore left on a dashboard whose balance read UNAVAILABLE
+    // and whose Pay Now button could never work, with nothing telling them to sign in
+    // again, while every visit filed a balance-unavailable report against a fault that
+    // was really authentication.
+    //
+    // The ref exists as well as the state because the suppression must not depend on
+    // render timing: the interceptor dispatches this synchronously as the 401 arrives,
+    // which is before the rejection reaches the store and clears its loading flags, so
+    // a ref read inside the reporting effect is already correct whether or not React
+    // batched the two updates into one render.
+    const [sessionExpired, setSessionExpired] = useState(false);
+    const sessionExpiredRef = React.useRef(false);
+    useEffect(() => {
+        const handleExpired = () => {
+            sessionExpiredRef.current = true;
+            setSessionExpired(true);
+        };
+
+        window.addEventListener('auth:session-expired', handleExpired);
+        return () => window.removeEventListener('auth:session-expired', handleExpired);
+    }, []);
 
     // isDetailLoading rather than isLoading: everything this page shows above the
     // payments list comes from the one customer-detail response, so it must not wait on
@@ -56,6 +89,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         isInvoicesLoading,
         isFromCache,
         error: loadError,
+        requestedAccountNo,
         fetchCustomerData,
         refreshCustomerData,
     } = useCustomerDashboardStore();
@@ -98,6 +132,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
         } catch (err) {
             console.error('Error reading stored auth data:', err);
             setError('Failed to load dashboard data');
+        } finally {
+            // Every path, including the early return and the throw: the balance card
+            // has to be able to tell "there is no account here" from "not looked yet".
+            setAuthChecked(true);
         }
     }, [fetchCustomerData]);
 
@@ -233,7 +271,24 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     // indefinitely on a fast connection with both requests long finished. Whatever the
     // cause, once nothing is in flight and no figure arrived, none is coming: say so and
     // offer the retry instead of animating for ever.
-    const balanceRequestsSettled = !isPaySummaryLoading && !isDetailLoading;
+    //
+    // "Settled" has to mean the requests RAN and finished, not merely that none is in
+    // flight. The store's loading flags both default to false, so on the very first
+    // render — before the mount effect above has read localStorage and called
+    // fetchCustomerData — nothing was loading, nothing had loaded, and this read as a
+    // failed load on every single visit. The card flashed UNAVAILABLE before it had
+    // asked for anything, and the telemetry below reported balance-unavailable with
+    // accountNo 'unknown' and error 'none' once per session for every customer who
+    // opened the page. requestedAccountNo is set by fetchCustomerData as it starts, so
+    // it is the signal that a request actually exists to be settled.
+    //
+    // authChecked covers the other side: if there is no stored account to load for, no
+    // request will ever be made and waiting for one would leave the card shimmering for
+    // good. That is a genuine settled failure, so it still counts.
+    const loadAttempted = !!requestedAccountNo;
+    const nothingToLoad = authChecked && !user?.username;
+    const balanceRequestsSettled = (loadAttempted || nothingToLoad)
+        && !isPaySummaryLoading && !isDetailLoading;
     const loadFailedOutright = !balanceKnown && (balanceRequestsSettled || !!loadError);
 
     // Report the outcome the customer actually sees.
@@ -247,7 +302,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     // down: that one is declared below this point, and the page's hooks have to
     // stay above the loading early-return to keep their order fixed.
     useEffect(() => {
-        if (loadFailedOutright) {
+        // Not when the session is what failed: the modal above is the right handling,
+        // and filing it here would put an auth event in customer-dashboard.log under a
+        // billing heading — the exact noise this report exists to cut through.
+        if (loadFailedOutright && !sessionExpiredRef.current) {
             reportClientEvent('balance-unavailable', {
                 accountNo: paySummary?.accountNo
                     || customerDetail?.billingAccount?.accountNo
@@ -295,7 +353,9 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
     // something to recover and detaches the moment a figure arrives — it cannot
     // turn into a refresh on every tab switch.
     useEffect(() => {
-        if (!loadFailedOutright) return;
+        // A retry carrying a credential the server has already rejected just earns
+        // another 401, so nothing is bound while the session is the thing that is gone.
+        if (!loadFailedOutright || sessionExpired) return;
 
         const retryIfVisible = () => {
             if (document.visibilityState === 'visible') {
@@ -310,7 +370,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
             document.removeEventListener('visibilitychange', retryIfVisible);
             window.removeEventListener('pageshow', retryIfVisible);
         };
-    }, [loadFailedOutright, refreshCustomerData]);
+    }, [loadFailedOutright, sessionExpired, refreshCustomerData]);
 
     // Nothing to show at all — neither response has landed and there is no snapshot from
     // a previous visit. Mirrors the real grid below (greeting, profile card left, balance
@@ -971,6 +1031,17 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate, autoO
                     </div>
                 )
             }
+            <SessionExpiredModal
+                isOpen={sessionExpired}
+                colorPalette={colorPalette}
+                onConfirm={() => {
+                    setSessionExpired(false);
+                    // Same handling every staff page uses: drop the stale credential and
+                    // reload, which lands the customer on the login screen.
+                    localStorage.removeItem('authData');
+                    window.location.reload();
+                }}
+            />
         </div >
     );
 };

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\DB;
+use App\Support\CronLog;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
@@ -678,6 +679,13 @@ class SchemaSyncService
      */
     private function writeLog(string $message): void
     {
+        // Errors and run summaries only - see App\Support\CronLog. This is a raw
+        // file write, so LOG_LEVEL never reached it and the narration accumulated
+        // no matter how the channels were configured.
+        if (!CronLog::shouldWrite($message)) {
+            return;
+        }
+
         $this->lines[] = $message;
 
         $timestamp = Carbon::now()->format('Y-m-d H:i:s');
@@ -690,6 +698,11 @@ class SchemaSyncService
         }
         file_put_contents($logFile, $logMessage . PHP_EOL, FILE_APPEND);
 
-        Log::channel('single')->info("[{$this->logName}] {$message}");
+        // Only faults are mirrored, and as ->error(). Every line used to be
+        // duplicated into laravel.log at info level, which doubled the volume
+        // and misreported the severity of all of it.
+        if (CronLog::isError($message)) {
+            Log::channel('single')->error("[{$this->logName}] {$message}");
+        }
     }
 }

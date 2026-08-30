@@ -9,6 +9,7 @@ import { paymentService, PendingPayment } from '../services/paymentService';
 import { useCustomerDataContext } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { reportClientEvent } from '../services/clientLogService';
+import SessionExpiredModal from '../components/SessionExpiredModal';
 
 /**
  * A pulsing placeholder block.
@@ -82,9 +83,27 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         payments,
         invoiceRecords,
         isLoading: contextLoading,
+        hasAttemptedLoad,
+        error: contextError,
         silentRefresh,
     } = useCustomerDataContext();
     const [user, setUser] = useState<any>(null);
+
+    // An expired session is not a balance failure.
+    //
+    // Customers routinely stay signed in between visits rather than logging out, so a
+    // stale token is an ordinary state here. Every staff page in this app already
+    // watches the fetch error for an auth failure and offers a re-login; this page,
+    // the only customer-facing one, did not — so a customer whose token had lapsed sat
+    // on a dashboard reading unavailable, with a Pay Now that could never work and
+    // nothing telling them to sign in again, while each visit filed a
+    // balance-unavailable report against what was really an authentication fault.
+    const [showSessionExpired, setShowSessionExpired] = useState(false);
+    useEffect(() => {
+        if (contextError && (contextError.includes('401') || contextError.toLowerCase().includes('unauthorized'))) {
+            setShowSessionExpired(true);
+        }
+    }, [contextError]);
 
     const [isPaymentProcessing, setIsPaymentProcessing] = useState<boolean>(false);
     const [showPaymentVerifyModal, setShowPaymentVerifyModal] = useState<boolean>(false);
@@ -243,7 +262,15 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     // connection with every request long finished. Once nothing is loading, none is
     // coming: say so, and let the customer pull to refresh rather than watch an
     // animation that will never resolve.
-    const balanceRequestsSettled = !isPaySummaryLoading && !contextLoading;
+    //
+    // Gated on hasAttemptedLoad as well, because "settled" has to mean the requests RAN
+    // and finished — not merely that none is in flight. Both loading flags read false
+    // before the first fetch is issued too, so without this the card reports a failed
+    // load on its first render, before it has asked for anything. That the pay-summary
+    // flag happens to start true is what has been hiding it here; the web dashboard,
+    // whose store starts both flags false, logged balance-unavailable with accountNo
+    // 'unknown' and error 'none' on every single visit. Not worth leaving to chance.
+    const balanceRequestsSettled = hasAttemptedLoad && !isPaySummaryLoading && !contextLoading;
     const balanceUnavailable = !balanceKnown && balanceRequestsSettled;
 
     // Report the outcome the customer actually sees.
@@ -254,7 +281,10 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     // fine, and only this would catch that. Once per session per account, so a
     // re-render cannot turn it into a stream.
     useEffect(() => {
-        if (balanceUnavailable) {
+        // Not when the session is what failed: the modal is the right handling, and
+        // filing it here would put an auth event in customer-dashboard.log under a
+        // billing heading — the exact noise this report exists to cut through.
+        if (balanceUnavailable && !showSessionExpired) {
             reportClientEvent('balance-unavailable', {
                 accountNo: paySummary?.accountNo
                     || customerDetail?.billingAccount?.accountNo
@@ -268,7 +298,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                     : String(rawBalance),
             });
         }
-    }, [balanceUnavailable, customerDetail, paySummary, isFromCache, rawBalance, user]);
+    }, [balanceUnavailable, showSessionExpired, customerDetail, paySummary, isFromCache, rawBalance, user]);
 
     // The summary's flag is what labels the button on load; the fuller pendingPayment
     // object only exists once Pay Now has been tapped and fetched the payment URL.
@@ -1200,6 +1230,16 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                     </Animated.View>
                 </View>
             </Modal>
+            <SessionExpiredModal
+                isOpen={showSessionExpired}
+                colorPalette={colorPalette}
+                onConfirm={() => {
+                    setShowSessionExpired(false);
+                    // Same handling the other pages use: drop the stale credential so the
+                    // app falls back to the login screen.
+                    AsyncStorage.removeItem('authData').catch(() => { });
+                }}
+            />
         </View>
     );
 };

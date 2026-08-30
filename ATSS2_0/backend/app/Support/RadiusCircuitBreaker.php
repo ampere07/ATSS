@@ -24,14 +24,19 @@ use Illuminate\Support\Facades\Log;
  * down again.
  *
  * What counts as a failure is deliberately narrow. Only connection-level errors
- * do — timeouts, refused connections. Any HTTP response, even a 404 or a 500,
- * means the endpoint accepted a connection and answered, so it clears the count.
- * This tracks reachability, not whether the request did what was wanted.
+ * do — a refused or timed-out socket, a TLS handshake that fails, a rejected
+ * login. A device that answers the API at all, even to refuse the command, has
+ * proved the endpoint is alive and clears the count. This tracks reachability,
+ * not whether the request did what was wanted.
  *
- * Keys are per base URL (scheme + host + port), so http:// and https:// on the
- * same box are judged separately. A wrong ssl_type in radius_config therefore
- * costs a few failures once, rather than a wasted connect timeout on every call
- * for as long as it stays wrong.
+ * Keys are per endpoint (transport + host + port), so tcp://host:8728 and
+ * ssl://host:8729 on the same box are judged separately, as are two
+ * radius_config rows that happen to share a host. A wrong ssl_type in
+ * radius_config therefore costs a few failures once, rather than a wasted
+ * connect timeout on every call for as long as it stays wrong.
+ *
+ * Callers that need a different threshold for one endpoint pass it to
+ * recordFailure(); everything else uses radius.circuit_breaker.failure_threshold.
  */
 class RadiusCircuitBreaker
 {
@@ -72,19 +77,25 @@ class RadiusCircuitBreaker
      * Call this only for connection-level failures. An HTTP error response is
      * not one — the endpoint answered.
      */
-    public static function recordFailure(string $url): void
+    public static function recordFailure(string $url, ?int $threshold = null): int
     {
         if (!self::enabled()) {
-            return;
+            return 0;
         }
 
         $base      = self::baseUrl($url);
-        $threshold = self::threshold();
+        $threshold = ($threshold !== null && $threshold > 0) ? $threshold : self::threshold();
         $failures  = ((int) Cache::get(self::failureKey($base), 0)) + 1;
 
         if ($failures < $threshold) {
             Cache::put(self::failureKey($base), $failures, self::window());
-            return;
+
+            Log::channel('radiusrelated')->info('[RADIUS BREAKER] Endpoint failed; still preferred', [
+                'endpoint'  => $base,
+                'failures'  => $failures . '/' . $threshold,
+            ]);
+
+            return $failures;
         }
 
         $cooldown = self::cooldown();
@@ -92,11 +103,13 @@ class RadiusCircuitBreaker
         Cache::put(self::openKey($base), true, $cooldown);
         Cache::forget(self::failureKey($base));
 
-        Log::channel('radiusrelated')->warning('[RADIUS BREAKER] Endpoint marked down; calls will skip it', [
+        Log::channel('radiusrelated')->warning('[RADIUS BREAKER] Endpoint marked down; calls will use the alternate transport', [
             'endpoint'         => $base,
-            'failures'         => $failures,
+            'failures'         => $failures . '/' . $threshold,
             'cooldown_seconds' => $cooldown,
         ]);
+
+        return $failures;
     }
 
     /**
@@ -121,6 +134,26 @@ class RadiusCircuitBreaker
         Cache::forget(self::failureKey($base));
     }
 
+    /**
+     * Consecutive failures recorded against this endpoint so far.
+     *
+     * Zero once the threshold has been reached — at that point the count is
+     * replaced by the open marker, which isOpen() reports instead.
+     */
+    public static function failureCount(string $url): int
+    {
+        return (int) Cache::get(self::failureKey(self::baseUrl($url)), 0);
+    }
+
+    /**
+     * 'down' while the endpoint is in cool-off, otherwise 'up'. Purely for logs,
+     * so an operator can read which transport a call chose and why.
+     */
+    public static function state(string $url): string
+    {
+        return self::isOpen($url) ? 'down' : 'up';
+    }
+
     /** Clear every recorded state. For diagnostics and tests. */
     public static function reset(string $url): void
     {
@@ -130,10 +163,11 @@ class RadiusCircuitBreaker
     }
 
     /**
-     * scheme://host:port, with any path and query removed.
+     * transport://host:port, with any path and query removed.
      *
-     * Callers pass full request URLs; judging an endpoint by its path would give
-     * every account its own private circuit and defeat the whole mechanism.
+     * Endpoints arrive already in this shape from RouterosApiService; the
+     * normalisation is kept so a caller that passes a fuller URL still lands on
+     * the same key, rather than giving every path its own private circuit.
      */
     public static function baseUrl(string $url): string
     {

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\DB;
+use App\Support\CronLog;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 use Exception;
@@ -1042,6 +1043,42 @@ class ManualRadiusOperationsService
     }
 
     /**
+     * Can any configured RADIUS server actually be worked with right now?
+     *
+     * AutoDisconnectService has always called this to decide whether to apply a
+     * restriction immediately or defer it to the retry queue — but the method did not
+     * exist. PHP raised `Error: Call to undefined method`, which implements Throwable and
+     * so was swallowed by that caller's `catch (Throwable)`, and the probe therefore
+     * answered "unreachable" on every single run. Nothing was ever restricted at the
+     * decision point; every disconnection silently took the queued path and logged
+     * "RADIUS server unreachable during auto-disconnect" even while RADIUS was healthy.
+     *
+     * "Reachable" deliberately means a completed API login, not an open socket. The
+     * RouterOS API port accepts a TCP connection and then answers nothing a non-API
+     * client can use, so a socket test reports success against a device that cannot be
+     * worked with — the exact false signal that made this fault so hard to see.
+     *
+     * Goes through the shared connection layer like every other RADIUS call, so it picks
+     * up the saved-then-alternate transport order and the circuit breaker: a server
+     * already known to be down costs no socket and no timeout here either, and the
+     * connection this opens is pooled for the operation that follows it.
+     */
+    public function isRadiusReachable(): bool
+    {
+        $api = app(RouterosApiService::class);
+
+        foreach (RadiusConfig::orderBy('id')->get() as $config) {
+            if ($api->ping($config)) {
+                return true;
+            }
+
+            $this->writeLog("[REACHABILITY] {$config->ip} did not answer: " . $api->getLastError());
+        }
+
+        return false;
+    }
+
+    /**
      * Get RADIUS endpoint configurations.
      *
      * Each entry carries the RadiusConfig record the native RouterOS API client operates
@@ -1105,6 +1142,13 @@ class ManualRadiusOperationsService
      */
     private function writeLog(string $message): void
     {
+        // Errors and run summaries only - see App\Support\CronLog. This is a raw
+        // file write, so LOG_LEVEL never reached it and the narration accumulated
+        // no matter how the channels were configured.
+        if (!CronLog::shouldWrite($message)) {
+            return;
+        }
+
         $timestamp = now()->format('Y-m-d H:i:s');
         $logMessage = "[{$timestamp}] [{$this->logName}] {$message}";
         
@@ -1120,7 +1164,12 @@ class ManualRadiusOperationsService
         }
         
         // Also log to Laravel default log
-        Log::channel('single')->info("[{$this->logName}] {$message}");
+        // Only faults are mirrored, and as ->error(). Every line used to be
+        // duplicated into laravel.log at info level, which doubled the volume
+        // and misreported the severity of all of it.
+        if (CronLog::isError($message)) {
+            Log::channel('single')->error("[{$this->logName}] {$message}");
+        }
     }
 
     /**

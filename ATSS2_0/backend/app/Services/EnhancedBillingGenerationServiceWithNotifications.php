@@ -18,6 +18,7 @@ use App\Models\Overdue;
 use App\Models\DCNotice;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use App\Support\CronLog;
 use Carbon\Carbon;
 
 class EnhancedBillingGenerationServiceWithNotifications
@@ -29,14 +30,56 @@ class EnhancedBillingGenerationServiceWithNotifications
     protected const DAYS_UNTIL_DC_NOTICE = 4;
     protected const END_OF_MONTH_BILLING = 0;
 
+    /**
+     * Accounts touched by the current generation run, bucketed by outcome.
+     *
+     * The per-account narration is filtered out now, so the record of which accounts were
+     * billed has to survive somewhere. It is emitted once per run as a quoted,
+     * comma-separated list per outcome, in a form that pastes into a query when one
+     * account has to be chased.
+     */
+    protected CronLog $runLog;
+
     public function __construct(BillingNotificationService $notificationService)
     {
         $this->notificationService = $notificationService;
+        $this->runLog = new CronLog();
     }
-    
+
+    /**
+     * Faults and run summaries only.
+     *
+     * The `billing` channel used to inherit LOG_LEVEL, which is `error` here, so the
+     * info-level narration was already being discarded — but silently, and the run
+     * summaries below would have been discarded with it. The channel now records what it
+     * is given and this decides what to give it, which is the same arrangement the
+     * writeLog()-based services use and keeps every cron log filtered the one way.
+     */
     protected function log($level, $message, $context = [])
     {
+        $level = (string) $level;
+
+        $isFault = in_array($level, ['error', 'critical', 'alert', 'emergency'], true)
+            || ($level === 'warning' && CronLog::includeWarnings());
+
+        if (CronLog::errorsOnly() && !$isFault && !CronLog::isSummary((string) $message)) {
+            return;
+        }
+
         Log::channel('billing')->{$level}($message, $context);
+    }
+
+    /**
+     * Emit the run's account lists, then clear them so a second run on the same instance
+     * cannot inherit the first one's accounts.
+     */
+    protected function writeRunSummary(string $stage): void
+    {
+        foreach ($this->runLog->summaryLines($stage) as $line) {
+            $this->log('info', $line);
+        }
+
+        $this->runLog->reset();
     }
 
     public function generateSOAForBillingDay(int $billingDay, Carbon $generationDate, int $userId): array
@@ -59,6 +102,7 @@ class EnhancedBillingGenerationServiceWithNotifications
                     // account was already billed for the current cycle.
                     if ($this->statementAlreadyGeneratedForCycle($account, $generationDate)) {
                         $results['skipped']++;
+                        $this->runLog->skipped($account->account_no);
                         $this->log('info', 'Skipped SOA generation — statement already exists for this billing cycle', [
                             'account_no' => $account->account_no,
                             'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
@@ -69,6 +113,7 @@ class EnhancedBillingGenerationServiceWithNotifications
                     $statement = $this->createEnhancedStatement($account, $generationDate, $userId);
                     $results['statements'][] = $statement;
                     $results['success']++;
+                    $this->runLog->processed($account->account_no);
 
                     $notificationResult = $this->queueNotification($account, null, $statement);
                     $results['notifications'][] = $notificationResult;
@@ -80,9 +125,12 @@ class EnhancedBillingGenerationServiceWithNotifications
                         'account_no' => $account->account_no,
                         'error' => $e->getMessage()
                     ];
+                    $this->runLog->failed($account->account_no);
                     $this->log('error', "Failed to generate SOA for account {$account->account_no}: " . $e->getMessage());
                 }
             }
+
+            $this->writeRunSummary('SOA');
 
             return $results;
         } catch (\Exception $e) {
@@ -111,6 +159,7 @@ class EnhancedBillingGenerationServiceWithNotifications
                     // account was already billed for the current cycle.
                     if ($this->invoiceAlreadyGeneratedForCycle($account, $generationDate)) {
                         $results['skipped']++;
+                        $this->runLog->skipped($account->account_no);
                         $this->log('info', 'Skipped invoice generation — invoice already exists for this billing cycle', [
                             'account_no' => $account->account_no,
                             'billing_period' => $generationDate->copy()->setTimezone('Asia/Manila')->format('Y-m')
@@ -121,6 +170,7 @@ class EnhancedBillingGenerationServiceWithNotifications
                     $invoice = $this->createEnhancedInvoice($account, $generationDate, $userId);
                     $results['invoices'][] = $invoice;
                     $results['success']++;
+                    $this->runLog->processed($account->account_no);
 
                     $notificationResult = $this->queueNotification($account, $invoice, null);
                     $results['notifications'][] = $notificationResult;
@@ -132,9 +182,12 @@ class EnhancedBillingGenerationServiceWithNotifications
                         'account_no' => $account->account_no,
                         'error' => $e->getMessage()
                     ];
+                    $this->runLog->failed($account->account_no);
                     $this->log('error', "Failed to generate invoice for account {$account->account_no}: " . $e->getMessage());
                 }
             }
+
+            $this->writeRunSummary('INVOICE');
 
             return $results;
         } catch (\Exception $e) {

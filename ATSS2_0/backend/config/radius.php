@@ -183,54 +183,68 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | RADIUS circuit breaker
+    | RADIUS connection fallback (circuit breaker)
     |--------------------------------------------------------------------------
     |
-    | Stops the app from queueing up connection attempts against a RADIUS server
-    | that is not answering.
+    | Decides which TRANSPORT a radius_config is reached over, and when to stop
+    | using one that is not answering.
     |
-    | Without this, every operation independently rediscovers that a server is
-    | down, and pays a full connect timeout to find out. One queue run of 20
-    | items, each trying two servers over two protocols, spends several minutes
-    | opening sockets that were never going to connect — which is exactly what
-    | keeps a struggling RouterOS too busy to accept the connections that would
-    | have worked.
+    | Every radius_config has two ways in: the transport it was SAVED with
+    | (ssl_type + port, e.g. tcp://host:8728) and the ALTERNATE one on the other
+    | standard API port (ssl://host:8729). The saved transport is always tried
+    | first while it is healthy. Once it has failed `failure_threshold` times in
+    | a row, it is marked down and later calls go straight to the alternate — no
+    | socket, no connect timeout — until the cool-off expires and one call is let
+    | through to see whether it recovered.
     |
-    | With it, the first few failures are enough: the endpoint is marked down and
-    | every later call skips it outright, with no socket and no timeout, until the
-    | cool-off expires and one call is allowed through to see if it is back.
+    | Without this, every operation independently rediscovers that a transport is
+    | down and pays a full connect timeout to find out. One queue run of 20 items,
+    | each trying two configs over two transports, spends minutes opening sockets
+    | that were never going to connect — which is exactly what keeps a struggling
+    | RouterOS too busy to accept the connections that would have worked.
     |
-    | Tracking is per BASE URL (scheme + host + port), so http://x and https://x
-    | are judged separately. That also means a wrong ssl_type in radius_config
-    | costs a couple of failures once, instead of a wasted connect timeout on
-    | every single call forever.
+    | Tracking is per ENDPOINT (transport + host + port), so tcp://host:8728 and
+    | ssl://host:8729 are judged separately, and so are two radius_config rows
+    | that happen to share a host. A wrong ssl_type in radius_config therefore
+    | costs a few failures once, instead of a wasted connect timeout on every
+    | call for as long as it stays wrong.
+    |
+    | Config-level fallback (#1 -> #2) sits on top of this: a config is only
+    | abandoned once BOTH of its transports have failed, and the next config then
+    | runs the same logic over its own two transports.
     |
     */
     'circuit_breaker' => [
 
         /*
-        | Master switch. Turn off to restore the old behaviour of always
-        | attempting every endpoint.
+        | Master switch. Turn off to restore the old behaviour of always trying
+        | every endpoint in its saved order, paying every timeout.
         */
         'enabled' => (bool) env('RADIUS_CIRCUIT_BREAKER_ENABLED', true),
 
         /*
-        | Connection failures against one endpoint, within failure_window_seconds,
-        | before it is treated as down. Only connection-level failures count —
-        | timeouts and refused connections. Any HTTP answer at all, even a 404,
-        | proves the endpoint is alive and clears the count.
+        | CONSECUTIVE connection failures against one endpoint before calls stop
+        | preferring it and switch to the other transport for that config.
+        |
+        | Only connection-level failures count: a refused or timed-out socket, a
+        | TLS handshake that fails, or a rejected login. A device that answers the
+        | API — even to refuse the command — has proved the endpoint is alive and
+        | resets the count to zero.
         */
-        'failure_threshold' => (int) env('RADIUS_CIRCUIT_BREAKER_THRESHOLD', 5),
+        'failure_threshold' => (int) env('RADIUS_CIRCUIT_BREAKER_THRESHOLD', 3),
 
         /*
         | How long failures are remembered while counting toward the threshold.
-        | Occasional failures spread wider apart than this never trip it.
+        | Failures spread wider apart than this never accumulate into a switch,
+        | so an occasional blip cannot mark a healthy endpoint down.
         */
         'failure_window_seconds' => (int) env('RADIUS_CIRCUIT_BREAKER_WINDOW', 120),
 
         /*
-        | How long an endpoint stays skipped once it has been marked down. Keep
-        | it short: this is how long a recovered server waits to be noticed.
+        | How long an endpoint stays skipped once marked down. This is also how
+        | long a recovered endpoint waits to be noticed, so keep it short: when it
+        | expires the next call goes through as the half-open probe, and a success
+        | there clears the count completely.
         */
         'cooldown_seconds' => (int) env('RADIUS_CIRCUIT_BREAKER_COOLDOWN', 60),
     ],

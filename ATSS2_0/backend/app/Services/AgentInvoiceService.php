@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\IncentiveAlreadyBilled;
+use App\Support\CronLog;
 use App\Models\AgentInvoice;
 use App\Models\AgentInvoiceCustomer;
 use App\Models\User;
@@ -1067,6 +1068,13 @@ class AgentInvoiceService
      */
     private function writeLog(string $message): void
     {
+        // Errors and run summaries only - see App\Support\CronLog. This is a raw
+        // file write, so LOG_LEVEL never reached it and the narration accumulated
+        // no matter how the channels were configured.
+        if (!CronLog::shouldWrite($message)) {
+            return;
+        }
+
         $line = '[' . Carbon::now()->format('Y-m-d H:i:s') . "] [{$this->logName}] {$message}";
 
         try {
@@ -1082,7 +1090,12 @@ class AgentInvoiceService
         }
 
         try {
-            Log::channel('single')->info("[{$this->logName}] {$message}");
+            // Only faults are mirrored, and as ->error(). Every line used to be
+            // duplicated into laravel.log at info level, which doubled the volume
+            // and misreported the severity of all of it.
+            if (CronLog::isError($message)) {
+                Log::channel('single')->error("[{$this->logName}] {$message}");
+            }
         } catch (Throwable $e) {
             // As above.
         }

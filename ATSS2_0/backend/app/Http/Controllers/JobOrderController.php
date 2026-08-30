@@ -28,6 +28,7 @@ use Illuminate\Support\Facades\Hash;
 use App\Services\GoogleDriveService;
 use App\Services\PppoeUsernameService;
 use App\Services\RadiusServerResolver;
+use App\Services\RouterosApiService;
 use App\Models\RadiusConfig;
 use App\Models\ActivityLog;
 use App\Events\JobOrderViewingUpdate;
@@ -2288,14 +2289,11 @@ class JobOrderController extends Controller
             // never after the last one.
             //
             // The whole loop has to finish inside the request, so the budget is
-            // bounded: 5 attempts x 3s connect + 10s of waiting is ~25s per config,
-            // ~50s if both are tried. The explicit timeouts matter here — the
-            // framework defaults (10s connect, 30s total) would make the same loop
-            // take minutes and blow past PHP's max_execution_time.
+            // bounded: 5 attempts x 4s connect + 10s of waiting is ~30s per config,
+            // ~60s if both are tried. RouterosApiService applies its own connect and
+            // read timeouts, so the loop cannot inherit an unbounded socket wait.
             $maxAttemptsPerConfig = 5;
             $retryWaitSeconds = [1, 2, 3, 4];
-            $connectTimeout = 3;
-            $requestTimeout = 8;
             $positionsToTry = [1];
             if ($configs->count() >= 2) {
                 $positionsToTry[] = 2;
@@ -2308,10 +2306,6 @@ class JobOrderController extends Controller
                 if (!$radiusConfig) {
                     continue;
                 }
-
-                $radiusUrl = $radiusConfig->ssl_type . '://' . $radiusConfig->ip . ':' . $radiusConfig->port . '/rest/user-manage/user';
-                $radiusUsername = $radiusConfig->username;
-                $radiusPassword = $radiusConfig->password;
 
                 \Log::channel('radiusrelated')->info('RADIUS server selected for JobOrder account creation', [
                     'job_order_id'     => $id,
@@ -2334,27 +2328,63 @@ class JobOrderController extends Controller
                     }
 
                     try {
-                        $response = Http::withOptions([
-                            'verify' => false
-                        ])
-                        ->withBasicAuth($radiusUsername, $radiusPassword)
-                        ->connectTimeout($connectTimeout)
-                        ->timeout($requestTimeout)
-                        ->put($radiusUrl, $payload);
+                        $api = app(RouterosApiService::class);
 
-                        $statusCode = $response->status();
+                        // Connect first so an unreachable device is told apart from a
+                        // device that answered and refused the account. connect()
+                        // walks both transports for this config — the saved one, then
+                        // the alternate — so reaching here means neither answered.
+                        if (!$api->connect($radiusConfig)) {
+                            $radiusError = $api->getLastError() !== ''
+                                ? $api->getLastError()
+                                : 'No RADIUS endpoint responded.';
+                            $lastFailureWasConnection = true;
+                            \Log::channel('radiusrelated')->error('RADIUS Connection Exception for JobOrder: ' . $id, [
+                                'error' => $radiusError,
+                                'position' => $position,
+                                'attempt' => $attempt . '/' . $maxAttemptsPerConfig,
+                                'radius_config_id' => $radiusConfig->id,
+                                'radius_ip' => $radiusConfig->ip,
+                                'transports' => $api->endpointStates($radiusConfig),
+                            ]);
 
-                        if ($statusCode === 204 || $response->successful()) {
+                            // Both transports are already in cool-off: retrying here
+                            // only sleeps. Hand over to the next config now.
+                            if ($api->lastConnectAllEndpointsDown()) {
+                                \Log::channel('radiusrelated')->warning('Every transport for this RADIUS config is down; moving to the next config', [
+                                    'job_order_id'     => $id,
+                                    'position'         => $position,
+                                    'radius_config_id' => $radiusConfig->id,
+                                    'radius_ip'        => $radiusConfig->ip,
+                                ]);
+                                break;
+                            }
+
+                            continue;
+                        }
+
+                        \Log::channel('radiusrelated')->info('RADIUS transport in use for JobOrder: ' . $id, [
+                            'job_order_id'     => $id,
+                            'position'         => $position,
+                            'radius_config_id' => $radiusConfig->id,
+                            'endpoint'         => $api->activeEndpoint(),
+                        ]);
+
+                        // addUser() is idempotent: an account that is already on the
+                        // device is reported as success rather than duplicated, so a
+                        // retry after a half-completed attempt is safe.
+                        if ($api->addUser($radiusConfig, $payload['name'], $payload['password'], $payload['group'])) {
                             $radiusSubmitted = true;
                             $radiusError = null;
                             break;
                         }
 
-                        $radiusError = 'HTTP ' . $statusCode . ': ' . $response->body();
+                        $radiusError = $api->getLastError() !== ''
+                            ? $api->getLastError()
+                            : 'The RADIUS device rejected the account.';
                         $lastFailureWasConnection = false;
                         \Log::channel('radiusrelated')->error('RADIUS API Error for JobOrder: ' . $id, [
-                            'status' => $statusCode,
-                            'response' => $response->body(),
+                            'error' => $radiusError,
                             'payload' => $payload,
                             'position' => $position,
                             'attempt' => $attempt,
@@ -2362,11 +2392,10 @@ class JobOrderController extends Controller
                             'radius_ip' => $radiusConfig->ip,
                         ]);
 
-                        // 4xx other than a lock/conflict is a rejection of this exact
-                        // payload — the same PUT will be rejected identically.
-                        if ($statusCode >= 400 && $statusCode < 500 && $statusCode !== 409 && $statusCode !== 429) {
-                            break;
-                        }
+                        // The device answered and refused this exact sentence (unknown
+                        // group, bad value). Re-sending it produces the same !trap, so
+                        // move on to the next server instead of burning the retries.
+                        break;
                     } catch (\Exception $mikrotikException) {
                         $radiusError = $mikrotikException->getMessage();
                         $lastFailureWasConnection = true;

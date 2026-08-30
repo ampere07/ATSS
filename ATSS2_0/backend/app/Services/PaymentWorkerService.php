@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Exception;
 use App\Services\RadiusQueueService;
+use App\Support\CronLog;
 
 class PaymentWorkerService
 {
@@ -15,10 +16,21 @@ class PaymentWorkerService
     private $radiusReconnectionService;
     private $manualRadiusService;
 
+    /**
+     * Accounts settled by the current worker pass, bucketed by outcome.
+     *
+     * Built in the constructor rather than in processPayments(), because
+     * processPayment() is also reached from postPayment() — the operator-facing
+     * single-payment path — and a typed property left unset there would fatal on the
+     * first record(). That path simply never emits: only a batch pass writes a summary.
+     */
+    private CronLog $runLog;
+
     public function __construct()
     {
         $this->radiusReconnectionService = new RadiusReconnectionService();
         $this->manualRadiusService = new ManualRadiusOperationsService();
+        $this->runLog = new CronLog();
     }
 
     /**
@@ -35,6 +47,8 @@ class PaymentWorkerService
             $this->workerLog('===========================================');
             return false;
         }
+
+        $this->runLog->reset();
 
         try {
             $this->workerLog('Checking for payments to process...');
@@ -82,6 +96,12 @@ class PaymentWorkerService
             $this->workerLog('===========================================');
             $this->workerLog('Payment Worker Completed: ' . now()->format('Y-m-d H:i:s'));
             $this->workerLog('===========================================');
+
+            foreach ($this->runLog->summaryLines() as $line) {
+                $this->workerLog($line);
+            }
+            $this->runLog->reset();
+
             return true;
 
         } catch (Exception $e) {
@@ -190,6 +210,7 @@ class PaymentWorkerService
                 ->first();
 
             if (!$claimed || in_array($claimed->status, ['PROCESSING', 'PAID'], true)) {
+                $this->runLog->skipped($accountNo ?: $ref);
                 $this->workerLog("Skipped: Ref $ref already claimed or posted (status: " . ($claimed->status ?? 'missing') . ")");
                 DB::commit();
                 return;
@@ -257,6 +278,8 @@ class PaymentWorkerService
             $result = $this->updateBilling($account, $amount, $ref);
 
             if ($result['success']) {
+                $this->runLog->processed($accountNo ?: $ref);
+
                 // Mark payment as PAID
                 DB::table('pending_payments')
                     ->where('id', $id)
@@ -338,12 +361,16 @@ class PaymentWorkerService
                     ->where('id', $id)
                     ->update(['status' => 'API_RETRY', 'updated_at' => now()]);
                 
+                $this->runLog->failed($accountNo ?: $ref);
                 $this->workerLog("Billing update failed for Ref $ref: " . $result['message']);
                 DB::rollBack();
             }
 
         } catch (Exception $e) {
             DB::rollBack();
+            // $payment rather than the locals: an exception thrown while reading them
+            // would leave those unset.
+            $this->runLog->failed($payment->account_no ?: $payment->reference_no);
             $this->workerLog("Failed to process payment {$payment->reference_no}: {$e->getMessage()}");
             
             DB::table('pending_payments')
@@ -992,15 +1019,26 @@ class PaymentWorkerService
      */
     private function workerLog($message)
     {
+        // Errors and run summaries only - see App\Support\CronLog. This is a raw file
+        // write, so LOG_LEVEL never reached it and the narration accumulated no matter
+        // how the channels were configured.
+        if (!CronLog::shouldWrite((string) $message)) {
+            return;
+        }
+
         $timestamp = now()->format('Y-m-d H:i:s');
         $logMessage = "[{$timestamp}] [Payment Worker] {$message}";
         
         // Log to custom paymentworker.log file
         $logPath = storage_path('logs/paymentworker.log');
         file_put_contents($logPath, $logMessage . PHP_EOL, FILE_APPEND);
-        
-        // Also log to Laravel default log
-        Log::channel('single')->info('[Payment Worker] ' . $message);
+
+        // Only faults are mirrored, and as ->error(). Every line used to be duplicated
+        // into laravel.log at info level, which doubled the volume and misreported the
+        // severity of all of it.
+        if (CronLog::isError($message)) {
+            Log::channel('single')->error('[Payment Worker] ' . $message);
+        }
     }
 
     /**

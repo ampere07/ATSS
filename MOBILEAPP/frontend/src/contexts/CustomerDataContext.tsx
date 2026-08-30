@@ -101,6 +101,15 @@ interface CustomerDataContextType {
     refreshData: () => Promise<void>;
     silentRefresh: () => Promise<void>;
     lastUpdated: Date | null;
+    /**
+     * Has a load actually been issued yet?
+     *
+     * The loading flags say what is in flight NOW, which is also false before the
+     * first request has been made. A consumer that reads "nothing loading, nothing
+     * loaded" as a failed load reports one on its very first render, every time.
+     * This is the signal that there is a request to be settled at all.
+     */
+    hasAttemptedLoad: boolean;
 }
 
 const CustomerDataContext = createContext<CustomerDataContextType | undefined>(undefined);
@@ -128,6 +137,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+    const [hasAttemptedLoad, setHasAttemptedLoad] = useState<boolean>(false);
 
     // Use a ref for the guard check so fetchData doesn't need customerDetail as a dependency.
     // This prevents a new fetchData/silentRefresh from being created on every data update,
@@ -176,6 +186,11 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
      */
     const runFetch = useCallback(async (force = false, silent = false): Promise<boolean> => {
         if (!force && confirmedRef.current) return true;
+
+        // Marked before the bail-outs below, not after the requests: a load that
+        // stopped because there is no stored account has still been attempted, and a
+        // consumer waiting for it to settle must not wait for ever.
+        setHasAttemptedLoad(true);
 
         if (!silent) setIsLoading(true);
 
@@ -604,7 +619,8 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
                 error,
                 refreshData,
                 silentRefresh,
-                lastUpdated
+                lastUpdated,
+                hasAttemptedLoad
             }}
         >
             {children}
