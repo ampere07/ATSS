@@ -1243,7 +1243,11 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         updated_by: updatedFormData.modifiedBy,
         updated_by_user: updatedFormData.modifiedBy,
         ...remarkIfPresent('support_remarks', updatedFormData.supportRemarks),
-        service_charge: parseFloat(updatedFormData.serviceCharge),
+        // An empty field parses to NaN, which serialises as JSON null and the
+        // API reads as a ₱0 charge — backing out anything already posted.
+        service_charge: Number.isFinite(parseFloat(updatedFormData.serviceCharge))
+          ? parseFloat(updatedFormData.serviceCharge)
+          : 0,
         status: updatedFormData.status,
         ...(updatedFormData.concern === 'Upgrade/Downgrade Plan' ? { new_plan: updatedFormData.newPlan } : {}),
 

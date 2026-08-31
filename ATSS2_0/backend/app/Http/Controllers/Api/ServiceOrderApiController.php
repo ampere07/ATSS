@@ -868,31 +868,54 @@ class ServiceOrderApiController extends Controller
                 ]);
             }
 
-            $shouldAddServiceCharge = false;
-            $statusChanged = false;
+            // ── Service charge → account balance ───────────────────────────────
+            // The charge is posted once the ticket is finished (support Resolved,
+            // or the visit marked Done). It is keyed to the service order rather
+            // than to the moment the status flips, so a charge entered — or
+            // corrected — on a ticket that is *already* Resolved still reaches the
+            // balance. Only the difference between the charge now and what has
+            // already been posted for this order is applied, so re-saving the same
+            // ticket never charges it twice.
+            $effectiveSupportStatus = strtolower(trim((string) ($request->has('support_status')
+                ? $request->input('support_status')
+                : ($serviceOrder->support_status ?? ''))));
+            $effectiveVisitStatus = strtolower(trim((string) ($request->has('visit_status')
+                ? $request->input('visit_status')
+                : ($serviceOrder->visit_status ?? ''))));
 
-            if ($request->has('support_status') && $request->input('support_status') === 'Resolved' && $serviceOrder->support_status !== 'Resolved') {
-                $shouldAddServiceCharge = true;
-                $statusChanged = true;
-                Log::info('Support status changed to Resolved, will add service charge to account balance');
-            }
+            $chargeIsDue = $effectiveSupportStatus === 'resolved'
+                || in_array($effectiveVisitStatus, ['done', 'completed'], true);
 
-            if ($request->has('visit_status') && $request->input('visit_status') === 'Done' && $serviceOrder->visit_status !== 'Done') {
-                $shouldAddServiceCharge = true;
-                $statusChanged = true;
-                Log::info('Visit status changed to Done, will add service charge to account balance');
-            }
+            $serviceChargeTotal = round(floatval($request->has('service_charge')
+                ? $request->input('service_charge')
+                : ($serviceOrder->service_charge ?? 0)), 2);
 
-            if ($shouldAddServiceCharge && $statusChanged && $request->has('service_charge')) {
-                $serviceCharge = floatval($request->input('service_charge'));
-                if ($serviceCharge > 0) {
+            if ($chargeIsDue) {
+                $chargeLogs = DB::table('service_charge_logs')
+                    ->where('service_order_id', $serviceOrder->id)
+                    ->get();
+
+                // What has already been posted for this order. Charges applied
+                // before they were logged left only status = 'used' behind, so for
+                // those the stored charge stands in as the amount already posted.
+                if ($chargeLogs->isNotEmpty()) {
+                    $postedSoFar = round((float) $chargeLogs->sum('service_charge'), 2);
+                } elseif (strtolower(trim((string) ($serviceOrder->status ?? ''))) === 'used') {
+                    $postedSoFar = round(floatval($serviceOrder->service_charge ?? 0), 2);
+                } else {
+                    $postedSoFar = 0.0;
+                }
+
+                $chargeDelta = round($serviceChargeTotal - $postedSoFar, 2);
+
+                if (abs($chargeDelta) >= 0.01) {
                     $billingAccount = DB::table('billing_accounts')
                         ->where('account_no', $serviceOrder->account_no)
                         ->first();
 
                     if ($billingAccount) {
                         $currentBalance = floatval($billingAccount->account_balance);
-                        $newBalance = $currentBalance + $serviceCharge;
+                        $newBalance = round($currentBalance + $chargeDelta, 2);
 
                         DB::table('billing_accounts')
                             ->where('account_no', $serviceOrder->account_no)
@@ -900,6 +923,25 @@ class ServiceOrderApiController extends Controller
                             'account_balance' => $newBalance,
                             'balance_update_date' => now(),
                             'updated_at' => now()
+                        ]);
+
+                        // Logged as already applied ('Used'): the balance was moved
+                        // here, so billing generation — which bills 'Unused' rows —
+                        // must not charge it a second time. The row is also what the
+                        // next save reads back to work out the delta.
+                        DB::table('service_charge_logs')->insert([
+                            'organization_id'     => $serviceOrder->organization_id ?? null,
+                            'account_no'          => $serviceOrder->account_no,
+                            'service_order_id'    => $serviceOrder->id,
+                            'service_charge'      => $chargeDelta,
+                            'service_charge_type' => 'Service Order Charge',
+                            'status'              => 'Used',
+                            'date_used'           => now(),
+                            'remarks'             => "Posted to account balance from service order #{$serviceOrder->id}",
+                            'created_by'          => $updatedByUser,
+                            'updated_by'          => $updatedByUser,
+                            'created_at'          => now(),
+                            'updated_at'          => now(),
                         ]);
 
                         try {
@@ -919,9 +961,9 @@ class ServiceOrderApiController extends Controller
                             ]);
                         }
 
-                        $data['status'] = 'used';
+                        $data['status'] = $serviceChargeTotal > 0 ? 'used' : 'unused';
 
-                        Log::info("Updated account balance from {$currentBalance} to {$newBalance} (added service charge: {$serviceCharge}). Status changed to 'used'.");
+                        Log::info("Updated account balance from {$currentBalance} to {$newBalance} (service order #{$serviceOrder->id} charge: {$serviceChargeTotal}, already posted: {$postedSoFar}, applied now: {$chargeDelta}).");
                     }
                     else {
                         Log::warning('Billing account not found for account_no: ' . $serviceOrder->account_no);

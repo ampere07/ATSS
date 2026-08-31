@@ -845,7 +845,9 @@ const mapFormToApi = (f: ServiceOrderEditFormData, uploads: any, user: string, o
     updated_by_user: user,
     concern: f.concern,
     concern_remarks: f.concernRemarks,
-    service_charge: parseFloat(f.serviceCharge),
+    // An empty field parses to NaN, which serialises as JSON null and the API
+    // reads as a ₱0 charge — backing out anything already posted.
+    service_charge: Number.isFinite(parseFloat(f.serviceCharge)) ? parseFloat(f.serviceCharge) : 0,
     status: f.status,
     new_plan: f.concern === 'Upgrade/Downgrade Plan' ? f.newPlan : '',
     // Base technical info (old/current values)
