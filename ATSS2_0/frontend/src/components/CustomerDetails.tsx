@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react';
-import { ChevronDown, ChevronRight, Plus, Trash2, Paperclip, Wrench, Edit, ChevronLeft, ChevronRight as ChevronRightNav, Maximize2, X, ExternalLink, Settings, Circle, CircleArrowRight, Loader2, Download } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, Trash2, Paperclip, Wrench, Edit, ChevronLeft, ChevronRight as ChevronRightNav, Maximize2, X, ExternalLink, Settings, Circle, CircleArrowRight, Loader2, Download, MessageSquare } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -10,6 +10,7 @@ import DiscountFormModal from '../modals/DiscountFormModal';
 import SORequestFormModal from '../modals/SORequestFormModal';
 import CustomerDetailsEditModal from '../modals/CustomerDetailsEditModal';
 import CustomerAttachmentModal from '../modals/CustomerAttachmentModal';
+import SoloSMSModal from '../modals/SoloSMSModal';
 import RelatedDataTable from './RelatedDataTable';
 import { relatedDataColumns } from '../config/relatedDataColumns';
 import { BillingDetailRecord } from '../types/billing';
@@ -335,6 +336,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
   const [showSORequestFormModal, setShowSORequestFormModal] = useState(false);
   const [showDetailsEditModal, setShowDetailsEditModal] = useState(false);
   const [showAttachmentModal, setShowAttachmentModal] = useState(false);
+  const [showSoloSMSModal, setShowSoloSMSModal] = useState(false);
   const [editType, setEditType] = useState<'customer_details' | 'billing_details' | 'technical_details'>('customer_details');
   const [detailsWidth, setDetailsWidth] = useState<number>(600);
   const [isResizing, setIsResizing] = useState<boolean>(false);
@@ -1753,6 +1755,21 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
                   <Paperclip size={18} />
                 </button>
               )}
+              {/* Sending is gated on sms-blast because that is the key the API
+                  itself requires of POST /sms/send (App\Support\ApiPermissionMap),
+                  so a user without it would only get a 403 from the panel. */}
+              {hasPermission('sms-blast') && (
+                <button
+                  onClick={() => setShowSoloSMSModal(true)}
+                  className={`p-2 rounded transition-colors ${isDarkMode
+                    ? 'text-gray-400 hover:text-white hover:bg-gray-700'
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+                    }`}
+                  title="Send SMS"
+                >
+                  <MessageSquare size={18} />
+                </button>
+              )}
               {hasPermission('customer.transact') && (
                 <button
                   onClick={handleTransactClick}
@@ -2433,6 +2450,21 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
         recordData={billingRecord}
         editType={editType}
       />
+
+      {showSoloSMSModal && (
+        <SoloSMSModal
+          isOpen={showSoloSMSModal}
+          onClose={() => setShowSoloSMSModal(false)}
+          customer={{
+            accountNo: billingRecord.applicationId || billingRecord.accountNo || (billingRecord as any).account_no || '',
+            contactNumber: billingRecord.contactNumber || '',
+            customerName: billingRecord.customerName || '',
+            accountBalance: billingRecord.accountBalance ?? billingRecord.balance ?? null,
+            emailAddress: billingRecord.emailAddress || billingRecord.email || '',
+            plan: billingRecord.plan || ''
+          }}
+        />
+      )}
 
       {showAttachmentModal && (
         <CustomerAttachmentModal

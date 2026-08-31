@@ -6,6 +6,7 @@ use App\Models\SmsConfig;
 use Exception;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class ItexmoSmsService
 {
@@ -74,6 +75,8 @@ class ItexmoSmsService
                 'contact_no' => $contactNo,
                 'error' => $e->getMessage()
             ]);
+
+            $this->logSms($contactNo, $message, 'itexmo', null, $data, 'failed', $e->getMessage());
 
             return [
                 'success' => false,
@@ -152,6 +155,8 @@ class ItexmoSmsService
                 'contact_no' => $contactNo,
                 'error' => $e->getMessage()
             ]);
+
+            $this->logSms($contactNo, $message, 'semaphore', null, $data, 'failed', $e->getMessage());
 
             return [
                 'success' => false,
@@ -312,10 +317,26 @@ class ItexmoSmsService
         return $query->get();
     }
 
-    protected function logSms(string $contactNo, string $message, string $provider, $response = null, array $data = []): void
-    {
+    /**
+     * One row per send attempt, successful or not. A failed attempt is worth as
+     * much as a sent one to whoever is asked why a subscriber never got their
+     * notice, and sms_logs.status has always had a 'failed' value for it.
+     *
+     * $data may carry 'raw_message' — the message as it was composed, before
+     * variables were replaced. Only written when the column exists, so this
+     * keeps working on a database that has not run the migration that adds it.
+     */
+    protected function logSms(
+        string $contactNo,
+        string $message,
+        string $provider,
+        $response = null,
+        array $data = [],
+        string $status = 'sent',
+        ?string $error = null
+    ): void {
         try {
-            DB::table('sms_logs')->insert([
+            $row = [
                 'organization_id'    => $this->config->organization_id ?? null,
                 'account_no'         => $data['account_no'] ?? null,
                 'contact_no'         => $contactNo,
@@ -323,17 +344,28 @@ class ItexmoSmsService
                 'message_length'     => strlen($message),
                 'provider'           => $provider,
                 'sender_id'          => $this->config->sender ?? null,
-                'status'             => 'sent',
+                'status'             => $status,
                 'attempts'           => 1,
-                'error_message'      => null,
-                'provider_response'  => is_string($response) ? $response : json_encode($response),
+                'error_message'      => $error,
+                // A failed attempt has no provider response; encoding it would
+                // store the string "null" instead of leaving the column empty.
+                'provider_response'  => is_string($response)
+                    ? $response
+                    : ($response === null ? null : json_encode($response)),
                 'source'             => $data['source'] ?? null,
                 'reference_id'       => $data['reference_id'] ?? null,
-                'sent_at'            => now(),
+                'sent_at'            => $status === 'sent' ? now() : null,
                 'created_by_user_id' => auth()->id() ?? null,
                 'created_at'         => now(),
                 'updated_at'         => now(),
-            ]);
+            ];
+
+            $composed = $data['raw_message'] ?? null;
+            if (!empty($composed) && $composed !== $message && Schema::hasColumn('sms_logs', 'raw_message')) {
+                $row['raw_message'] = $composed;
+            }
+
+            DB::table('sms_logs')->insert($row);
         } catch (Exception $e) {
             Log::error('Failed to log SMS', [
                 'contact_no' => $contactNo,
