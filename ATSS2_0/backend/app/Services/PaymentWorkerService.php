@@ -76,7 +76,12 @@ class PaymentWorkerService
                                 ->orWhere('callback_payload', 'LIKE', '%PAYMENT_SUCCESS%');
                           });
                 })
-                ->limit(20)
+                // No row cap: every payment already confirmed paid by the gateway is
+                // settled on the pass that first sees it. A cap meant a backlog larger
+                // than the batch left real, paid customers waiting extra cron cycles
+                // with their connection still cut. Ordered oldest-first so the longest
+                // waiter is always served first if a pass does run long.
+                ->orderBy('id', 'asc')
                 ->get();
 
             if ($payments->isEmpty()) {

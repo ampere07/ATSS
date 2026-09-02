@@ -131,7 +131,7 @@ class HandleCorsManually
 
         $response->headers->set(
             'Access-Control-Allow-Headers',
-            $requested ?: 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-XSRF-TOKEN, X-CSRF-TOKEN, X-App-ID, X-Skip-Auth-Error'
+            $requested ?: 'Content-Type, Authorization, X-Requested-With, Accept, Origin, X-XSRF-TOKEN, X-CSRF-TOKEN, X-App-ID, X-Skip-Auth-Error, X-Auth-Token, X-Device-Id'
         );
 
         $response->headers->set('Access-Control-Max-Age', (string) config('cors.max_age', 86400));

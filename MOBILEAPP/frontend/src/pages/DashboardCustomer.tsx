@@ -9,7 +9,7 @@ import { paymentService, PendingPayment } from '../services/paymentService';
 import { useCustomerDataContext } from '../contexts/CustomerDataContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { reportClientEvent } from '../services/clientLogService';
-import SessionExpiredModal from '../components/SessionExpiredModal';
+import { SESSION_EXPIRED_EVENT } from '../config/api';
 
 /**
  * A pulsing placeholder block.
@@ -84,7 +84,6 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         invoiceRecords,
         isLoading: contextLoading,
         hasAttemptedLoad,
-        error: contextError,
         silentRefresh,
     } = useCustomerDataContext();
     const [user, setUser] = useState<any>(null);
@@ -98,12 +97,34 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
     // on a dashboard reading unavailable, with a Pay Now that could never work and
     // nothing telling them to sign in again, while each visit filed a
     // balance-unavailable report against what was really an authentication fault.
+    //
+    // Detected from SESSION_EXPIRED_EVENT rather than from contextError, because the
+    // message this used to search was never going to contain what it was looking for.
+    // getCustomerDetail and getCustomerPaySummary each swallow their own failure and
+    // return null, so a 401 never reached the context as a status — it re-threw
+    // 'Could not fetch customer details', this test for '401' failed, and a customer
+    // with an expired token got a balance card reading Unavailable with their name and
+    // account number still showing from the stale authData behind it. The interceptor
+    // is the only place that still has the status, so that is where the event is raised.
+    //
+    // The modal itself now lives in App.tsx: the credential belongs to the app, not to
+    // this screen, and the old handler here only removed authData — which left the app
+    // sitting on a dashboard it could not load until it was restarted, instead of
+    // returning to the login screen.
+    //
+    // The ref exists as well as the state because the suppression below must not depend
+    // on render timing: the interceptor emits synchronously as the 401 arrives, which is
+    // before the rejection reaches the context and clears its loading flags.
     const [showSessionExpired, setShowSessionExpired] = useState(false);
+    const sessionExpiredRef = React.useRef(false);
     useEffect(() => {
-        if (contextError && (contextError.includes('401') || contextError.toLowerCase().includes('unauthorized'))) {
+        const subscription = DeviceEventEmitter.addListener(SESSION_EXPIRED_EVENT, () => {
+            sessionExpiredRef.current = true;
             setShowSessionExpired(true);
-        }
-    }, [contextError]);
+        });
+
+        return () => subscription.remove();
+    }, []);
 
     const [isPaymentProcessing, setIsPaymentProcessing] = useState<boolean>(false);
     const [showPaymentVerifyModal, setShowPaymentVerifyModal] = useState<boolean>(false);
@@ -284,7 +305,7 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
         // Not when the session is what failed: the modal is the right handling, and
         // filing it here would put an auth event in customer-dashboard.log under a
         // billing heading — the exact noise this report exists to cut through.
-        if (balanceUnavailable && !showSessionExpired) {
+        if (balanceUnavailable && !sessionExpiredRef.current) {
             reportClientEvent('balance-unavailable', {
                 accountNo: paySummary?.accountNo
                     || customerDetail?.billingAccount?.accountNo
@@ -1230,16 +1251,6 @@ const DashboardCustomer: React.FC<DashboardCustomerProps> = ({ onNavigate }) => 
                     </Animated.View>
                 </View>
             </Modal>
-            <SessionExpiredModal
-                isOpen={showSessionExpired}
-                colorPalette={colorPalette}
-                onConfirm={() => {
-                    setShowSessionExpired(false);
-                    // Same handling the other pages use: drop the stale credential so the
-                    // app falls back to the login screen.
-                    AsyncStorage.removeItem('authData').catch(() => { });
-                }}
-            />
         </View>
     );
 };

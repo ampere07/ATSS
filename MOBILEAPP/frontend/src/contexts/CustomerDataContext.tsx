@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
-import { AppState } from 'react-native';
+import { AppState, DeviceEventEmitter } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getCustomerDetail, getCustomerPaySummary, PAY_SUMMARY_TIMEOUTS_MS, CustomerDetailData, CustomerPaySummary } from '../services/customerDetailService';
-import apiClient from '../config/api';
+import apiClient, { SESSION_EXPIRED_EVENT } from '../config/api';
 import { readDashboardCache, writeDashboardCache } from '../utils/customerDashboardCache';
 
 /**
@@ -148,6 +148,28 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
     // the "do we have something to show?" guard; this is the "has the server actually
     // answered?" one, and the retry loop needs the second.
     const confirmedRef = React.useRef<boolean>(false);
+
+    /**
+     * Set once the server has rejected the app's credential.
+     *
+     * The retry loop below is deliberately relentless — a dashboard whose first
+     * request lost the network has to recover on its own — but a 401 is the one
+     * failure retrying cannot fix. Without this it re-sent the same dead token
+     * every 30 seconds for as long as the app stayed open, and again on every
+     * return to the foreground. App.tsx is already showing the re-login modal by
+     * then, so there is nothing left here to recover.
+     *
+     * A ref rather than state: nothing renders from it, and the retry loop is bound
+     * once and must see the current value rather than the one it closed over.
+     */
+    const sessionExpiredRef = React.useRef(false);
+    useEffect(() => {
+        const subscription = DeviceEventEmitter.addListener(SESSION_EXPIRED_EVENT, () => {
+            sessionExpiredRef.current = true;
+        });
+
+        return () => subscription.remove();
+    }, []);
 
     /**
      * The account the main load resolved, so the lazy tab loaders below do not
@@ -552,10 +574,10 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
             // confirmedRef, not customerDetailRef: a restored snapshot fills the latter in,
             // and treating that as a completed load would stop the retries that are the
             // only thing recovering a launch whose network call failed.
-            if (cancelled || confirmedRef.current) return;
+            if (cancelled || confirmedRef.current || sessionExpiredRef.current) return;
 
             const done = await fetchData(true, attempt > 0);
-            if (cancelled || done) return;
+            if (cancelled || done || sessionExpiredRef.current) return;
 
             timer = setTimeout(attemptLoad, backoffMs[Math.min(attempt, backoffMs.length - 1)]);
             attempt += 1;
@@ -564,7 +586,7 @@ export const CustomerDataProvider: React.FC<{ children: ReactNode }> = ({ childr
         attemptLoad();
 
         const subscription = AppState.addEventListener('change', state => {
-            if (state === 'active' && !confirmedRef.current) {
+            if (state === 'active' && !confirmedRef.current && !sessionExpiredRef.current) {
                 if (timer) clearTimeout(timer);
                 attempt = 0;
                 attemptLoad();

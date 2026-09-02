@@ -45,6 +45,38 @@ const apiClient = axios.create({
  */
 const AUTH_TOKEN_KEY = 'authToken';
 
+/**
+ * A stable id for this browser profile, generated once and kept.
+ *
+ * The server names each personal access token after the device that asked for
+ * it, so signing in again replaces that browser's own credential rather than
+ * somebody else's. It used to name them after the User-Agent, which is not
+ * device-identifying at all — two Chrome-on-Windows machines send byte-identical
+ * strings — so a second sign-in on the same account silently revoked the first
+ * machine's token. See the login route in ATSS2_0/backend/routes/api.php.
+ *
+ * Not a secret and never used to authenticate: it only says which row to
+ * replace, and only from a caller that has just proved who it is.
+ */
+const DEVICE_ID_KEY = 'deviceId';
+
+export const getDeviceId = (): string | null => {
+  try {
+    const stored = localStorage.getItem(DEVICE_ID_KEY);
+    if (stored) return stored;
+
+    const chunk = () => Math.random().toString(36).slice(2, 10);
+    const fresh = `${chunk()}${chunk()}${chunk()}`;
+    localStorage.setItem(DEVICE_ID_KEY, fresh);
+
+    return fresh;
+  } catch {
+    // Private-mode browsers can refuse localStorage. The server then falls back
+    // to its old naming, which is no worse than before this existed.
+    return null;
+  }
+};
+
 export const setAuthToken = (token: string | null): void => {
   try {
     if (token) {
@@ -122,6 +154,21 @@ apiClient.interceptors.request.use(
     if (authToken) {
       config.headers = config.headers || {};
       config.headers['Authorization'] = `Bearer ${authToken}`;
+      // The same token under a plain header name. Authorization is the one
+      // header the chain to PHP is liable to eat — Apache withholds it from a
+      // CGI/FastCGI process unless .htaccess copies it across, and proxies strip
+      // it — and when that happens the token authenticates nobody despite being
+      // issued, stored and sent correctly. A custom header nothing treats
+      // specially survives that. Read as a fallback in AppServiceProvider::boot.
+      config.headers['X-Auth-Token'] = authToken;
+    }
+
+    // Which browser profile this is, so the server replaces this one's
+    // credential and not one belonging to another machine on the same account.
+    const deviceId = getDeviceId();
+    if (deviceId) {
+      config.headers = config.headers || {};
+      config.headers['X-Device-Id'] = deviceId;
     }
 
     return config;
@@ -197,6 +244,16 @@ export const authFetch = async (input: RequestInfo | URL, init: RequestInit = {}
   const authToken = getAuthToken();
   if (authToken && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${authToken}`);
+  }
+  // The same fallback the axios interceptor sends, for the same reason: this
+  // path must not be the one place a stripped Authorization header goes unnoticed.
+  if (authToken && !headers.has('X-Auth-Token')) {
+    headers.set('X-Auth-Token', authToken);
+  }
+
+  const deviceId = getDeviceId();
+  if (deviceId && !headers.has('X-Device-Id')) {
+    headers.set('X-Device-Id', deviceId);
   }
 
   const xsrfToken = getCookie('XSRF-TOKEN');

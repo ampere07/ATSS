@@ -189,6 +189,12 @@ export const getCustomerDetail = async (accountNo: string): Promise<CustomerDeta
   // loads. The dashboard survives losing this: the balance and Pay Now come from
   // the pay-summary. What it costs is the plan, install date and location, which
   // is worth one more try.
+  // Kept across the attempts so the report below can name the status that ended
+  // it. Without this the log recorded only that the detail request failed, which
+  // is the one thing that does not distinguish a dead token from a dead network —
+  // and an expired session presents here exactly as a flat failure would.
+  let lastStatus: number | null = null;
+
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const response = await apiClient.get<CustomerDetailApiResponse>(
@@ -209,10 +215,11 @@ export const getCustomerDetail = async (accountNo: string): Promise<CustomerDeta
         success: response.data?.success,
       });
     } catch (error: any) {
+      lastStatus = error?.response?.status ?? null;
       console.error('[CustomerDetail] Request failed', {
         accountNo,
         attempt,
-        status: error?.response?.status ?? null,
+        status: lastStatus,
         message: error?.response?.data?.message || error?.message || 'unknown',
       });
     }
@@ -225,7 +232,7 @@ export const getCustomerDetail = async (accountNo: string): Promise<CustomerDeta
   // Both attempts gone. Reported once here rather than inside the loop, so the
   // log records a customer who ended up without their details — not every
   // individual retry along the way.
-  reportClientEvent('customer-detail-failed', { accountNo, attempts: 2 });
+  reportClientEvent('customer-detail-failed', { accountNo, attempts: 2, status: lastStatus ?? 'none' });
 
   return null;
 };

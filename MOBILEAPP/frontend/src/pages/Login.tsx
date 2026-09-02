@@ -146,9 +146,21 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           home: response.data.user.home || null,
           organization: response.data.user.organization
         };
-        if (response.data.token) {
-          await AsyncStorage.setItem('authToken', response.data.token);
+        // No token, no sign-in.
+        //
+        // This used to store the token only if one came back and sign the customer
+        // in either way, which meant a response missing it produced an app that
+        // believed it was authenticated and held nothing to prove it: the dashboard
+        // rendered name and account number from authData while every request 401'd.
+        // The server always issues one today, so this guards a path that cannot
+        // currently fire — but it is what makes "signed in without a credential"
+        // impossible by construction rather than by coincidence.
+        if (!response.data.token) {
+          setError('Login failed. Please try again.');
+          return;
         }
+
+        await AsyncStorage.setItem('authToken', response.data.token);
         onLogin(userData);
       } else if (response.status === 'suspended') {
         setShowSuspendedModal(true);

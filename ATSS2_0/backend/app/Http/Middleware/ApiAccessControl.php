@@ -57,7 +57,20 @@ class ApiAccessControl
         $user = $this->resolveUser($request);
 
         if ($user === null) {
-            return $this->deny($request, 'You must be signed in to perform this action.', 401);
+            // Which credential was missing, not just that one was.
+            //
+            // This log said only "denied", so a customer reporting a dashboard
+            // that would not load could not be told apart from a token the server
+            // never received, a token row that had been deleted, or a session that
+            // had simply lapsed — three different faults with three different
+            // fixes. Naming them is what makes the next occurrence answerable from
+            // the log instead of from a rebuild of the whole auth path.
+            return $this->deny($request, 'You must be signed in to perform this action.', 401, [
+                'had_authorization_header' => $request->hasHeader('Authorization'),
+                'had_auth_token_header'    => $request->hasHeader('X-Auth-Token'),
+                'had_session_cookie'       => $request->hasCookie(config('session.cookie')),
+                'device_id'                => substr((string) $request->header('X-Device-Id', ''), 0, 64) ?: null,
+            ]);
         }
 
         // null means "signed in is enough" — reference data, lookups, the
@@ -97,6 +110,16 @@ class ApiAccessControl
 
         Auth::shouldUse('sanctum');
         $request->setUserResolver(static fn () => $user);
+
+        // Which credential actually carried the request. A TransientToken means the
+        // session cookie won; anything else means the personal access token did.
+        // Recorded because the two fail on completely different timescales, and
+        // knowing which one clients are really running on is the difference between
+        // guessing at this and measuring it.
+        $request->attributes->set(
+            'auth_credential',
+            $user->currentAccessToken() instanceof \Laravel\Sanctum\TransientToken ? 'session' : 'token'
+        );
 
         return $user;
     }

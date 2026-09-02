@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use Illuminate\Support\ServiceProvider;
+use Laravel\Sanctum\Sanctum;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -40,6 +41,47 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot()
     {
-        //
+        /*
+         * Find the bearer token even where the web server did not hand it over.
+         *
+         * public/.htaccess now copies the Authorization header into the request
+         * environment, but .htaccess is only read when the host is Apache AND
+         * AllowOverride permits it — under nginx it is ignored outright, and some
+         * managed hosts strip Authorization before PHP ever runs. That single
+         * point of failure is what made this expensive: the token was issued
+         * correctly, stored correctly and sent correctly, and still authenticated
+         * nobody, so a customer who stayed signed in past the life of their
+         * session cookie was left with no working credential at all.
+         *
+         * Three sources, in order of preference:
+         *   - the standard Authorization header, when it arrives intact;
+         *   - X-Auth-Token, a plain header both clients also send, which nothing
+         *     between the phone and PHP has any reason to strip;
+         *   - the REDIRECT_-prefixed copies Apache leaves behind when the header
+         *     was rewritten across an internal redirect.
+         *
+         * X-Auth-Token adds no CSRF surface: no browser attaches a custom header
+         * on its own, so it cannot ride along on a forged cross-site request the
+         * way a cookie does.
+         */
+        Sanctum::getAccessTokenFromRequestUsing(function ($request) {
+            $raw = $request->bearerToken()
+                ?: $request->header('X-Auth-Token')
+                ?: ($_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+                    ?? $_SERVER['REDIRECT_REDIRECT_HTTP_AUTHORIZATION']
+                    ?? null);
+
+            if (!is_string($raw) || trim($raw) === '') {
+                return null;
+            }
+
+            $raw = preg_replace('/^\s*Bearer\s+/i', '', trim($raw));
+
+            // Sanctum's own format check, which overriding this callback skips.
+            // Without it every junk header becomes a database lookup, and the
+            // legacy "user_token_<id>_<time>" strings some installs still hold
+            // would each cost a query before failing.
+            return str_contains($raw, '|') ? $raw : null;
+        });
     }
 }

@@ -167,13 +167,18 @@ class Kernel extends ConsoleKernel
         // RADIUS STATUS SYNC
         // ===================================================================
 
-        // Sync RADIUS user status and sessions every 5 minutes
+        // Sync RADIUS user status and sessions every minute
         // Uses: RadiusStatusSyncService
         // Dependencies: RadiusConfig, BillingAccounts, TechnicalDetails, OnlineStatus
         // Applies accounts in batches of radius.status_sync.batch_size (default 500)
         // Logs: storage/logs/radiussync/radiussync.log
+        //
+        // Matches the crontab cadence documented in radius-sync-worker.php, which
+        // invokes the same command directly. Extra ticks are not extra work: the
+        // command's own Cache::lock plus its heartbeat check stand a run down when
+        // one is already in flight, so the two paths cannot sync concurrently.
         $schedule->command('cron:sync-radius-status')
-                 ->everyFiveMinutes()
+                 ->everyMinute()
                  ->withoutOverlapping()
                  ->runInBackground()
                  ->onSuccess(function () {
@@ -206,11 +211,15 @@ class Kernel extends ConsoleKernel
         // PAYMENT PROCESSING
         // ===================================================================
 
-        // Process pending payments every 2 minutes
+        // Process pending payments every minute
         // Uses: PaymentWorkerService
         // Dependencies: Xendit API
+        //
+        // Every minute rather than every two: a customer who has just paid sits with
+        // their connection still cut until the pass that posts the payment runs, so the
+        // tick interval IS their wait. Halving it halves the complaint window.
         $schedule->command('payments:process')
-                 ->everyTwoMinutes()
+                 ->everyMinute()
                  ->withoutOverlapping()
                  ->runInBackground()
                  ->onSuccess(function () {

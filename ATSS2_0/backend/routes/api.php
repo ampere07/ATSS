@@ -1329,11 +1329,53 @@ Route::post('/login', function (Request $request) {
         //
         // Named per device so a token can be traced and revoked on its own, and
         // so signing in again does not silently pile up duplicates.
-        $tokenName = 'spa:' . substr((string) ($request->userAgent() ?? 'unknown'), 0, 120);
+        //
+        // The name used to come from the User-Agent, which is not per-device at
+        // all. A React Native app sets no User-Agent of its own, so OkHttp
+        // supplies one and every Android install of this app sends the identical
+        // string. The delete below is scoped by user, not by device, so it reached
+        // the token of a phone that was still using it: one household with the
+        // account on two Android phones meant the second sign-in silently revoked
+        // the first. That phone kept its stored authData, so it went on showing the
+        // customer's name and account number while every request 401'd — and since
+        // customers are told to stay signed in for fast payment, it had no reason
+        // to sign in again and no way to know it needed to. Two browsers with the
+        // same User-Agent collided in exactly the same way, so this was never
+        // mobile-only.
+        //
+        // X-Device-Id is generated once per install by each client and kept in its
+        // own storage, so it identifies what the User-Agent was only assumed to.
+        $deviceId = trim((string) $request->header('X-Device-Id', ''));
+        $tokenName = $deviceId !== ''
+            ? 'device:' . substr($deviceId, 0, 64)
+            : 'spa:' . substr((string) ($request->userAgent() ?? 'unknown'), 0, 120);
 
-        // The previous token for this device is dropped first: a fresh login
-        // should replace the old credential rather than leave it valid.
-        $user->tokens()->where('name', $tokenName)->delete();
+        // The previous credential for THIS device is dropped, so a fresh login
+        // replaces it rather than leaving it valid.
+        //
+        // Only ever when the caller identified itself. Without a device id the
+        // name says what KIND of client this is, not which one, so any row it
+        // matches may belong to a phone that is still using it — which is the
+        // whole bug. Nothing is deleted in that case.
+        //
+        // Deliberately not "delete the ones that look idle": last_used_at cannot
+        // carry that judgement here. Sanctum writes it only when a request is
+        // authenticated by the token itself (vendor/laravel/sanctum/src/Guard.php:83),
+        // and a request authenticated by the session cookie returns at line 57
+        // without touching it. Wherever the Authorization header is not reaching
+        // PHP — the fault public/.htaccess and AppServiceProvider::boot now
+        // address — every row therefore reads NULL, including the ones on phones
+        // in daily use, so reaping "unused" rows would delete precisely the
+        // credentials this is meant to protect.
+        //
+        // Old clients that cannot send the header accumulate a row per sign-in
+        // until they update. That is the cheap side of the trade: a spare row
+        // costs storage, a wrongly deleted one signs a paying customer out. Once
+        // the token path is confirmed working in production, last_used_at becomes
+        // meaningful and a scheduled prune can use it.
+        if ($deviceId !== '') {
+            $user->tokens()->where('name', $tokenName)->delete();
+        }
 
         $responseData['token'] = $user->createToken($tokenName)->plainTextToken;
 
