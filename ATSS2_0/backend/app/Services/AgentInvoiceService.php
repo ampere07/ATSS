@@ -706,12 +706,21 @@ class AgentInvoiceService
         $to   = $periodEnd->format('Y-m-d H:i:s');
 
         // The paying row of each completed quota awarded in this week.
+        // Every completed quota awarded up to the end of this week that no invoice
+        // has claimed yet.
+        //
+        // As with the customers above, the lower bound was the problem, not the
+        // upper one. A quota the cron completed inside a week that had already
+        // been invoiced could never be billed by that week's invoice (it exists
+        // already) nor by any later one (its processed_at was too old), so the
+        // agent kept an incentive on their balance that no invoice would ever
+        // carry. `agent_invoice_id IS NULL` is what prevents double-billing here,
+        // and it does not need a date to help it.
         $paying = DB::table('agent_incentive_history')
             ->whereIn('agent_id', $agentIds)
             ->whereNull('agent_invoice_id')
             ->where('incentive_value', '>', 0)
             ->whereNotNull('processed_at')
-            ->where('processed_at', '>=', $from)
             ->where('processed_at', '<=', $to)
             ->orderBy('agent_id')
             ->orderBy('batch_number')
@@ -861,27 +870,35 @@ class AgentInvoiceService
      */
     private function reportUnbilledOutsidePeriod(array $agentIds, string $from, string $to, string $tag): void
     {
-        $stale = DB::table('agent_incentive_history')
+        // Only what this run genuinely cannot reach: a quota awarded AFTER the
+        // week being billed. Everything earlier is now swept up by
+        // incentivesForPeriod(), so anything reported here is dated in the
+        // future — a back-dated award, or a clock that disagrees with the run.
+        //
+        // It is tagged [UNBILLED] so it survives CronLog's filter. This warning
+        // used to be dropped from the log entirely: it carries no error tag and
+        // no failure phrase, so with the shipped defaults the one notice that
+        // money was sitting unbillable never reached the file it was written to.
+        $ahead = DB::table('agent_incentive_history')
             ->whereIn('agent_id', $agentIds)
             ->whereNull('agent_invoice_id')
             ->where('incentive_value', '>', 0)
-            ->where('processed_at', '<', $from)
-            ->selectRaw('COUNT(*) as cycles, COALESCE(SUM(incentive_value), 0) as amount, MIN(processed_at) as oldest')
+            ->where('processed_at', '>', $to)
+            ->selectRaw('COUNT(*) as cycles, COALESCE(SUM(incentive_value), 0) as amount, MIN(processed_at) as soonest')
             ->first();
 
-        if (!$stale || (int) $stale->cycles === 0) {
+        if (!$ahead || (int) $ahead->cycles === 0) {
             return;
         }
 
         $this->writeLog(sprintf(
-            '%s   ⚠ %d completed quota(s) worth ₱%s remain unbilled from BEFORE this window (oldest awarded %s). '
-            . 'They are not billed here on purpose — only incentives awarded %s to %s are. '
-            . 'If no earlier invoice covered the week they fall in, generate that week (--as-of) to pick them up.',
+            '%s   [UNBILLED] %d completed quota(s) worth ₱%s are dated AFTER this billing week '
+            . '(earliest %s, week ends %s). They will be billed by the run that covers that week. '
+            . 'A date in the future usually means a back-dated award or a clock difference.',
             $tag,
-            (int) $stale->cycles,
-            number_format((float) $stale->amount, 2),
-            (string) $stale->oldest,
-            $from,
+            (int) $ahead->cycles,
+            number_format((float) $ahead->amount, 2),
+            (string) $ahead->soonest,
             $to
         ));
     }
@@ -909,10 +926,23 @@ class AgentInvoiceService
             ->join('applications as a', 'jo.application_id', '=', 'a.id')
             ->whereIn(DB::raw('LOWER(TRIM(jo.onsite_status))'), ['done', 'completed'])
             ->whereNotNull('a.referred_by')
-            // Inclusive of both ends, to the second: periodFor() hands over the
-            // start at 00:00:00 and the end at 23:59:59, so the bounds are taken
-            // from it rather than re-stated here where they could drift.
-            ->whereRaw("{$completedAt} >= ?", [$periodStart->format('Y-m-d H:i:s')])
+            // Everything installed up to the end of this week that has not been
+            // billed to this owner yet — NOT only what falls inside the week.
+            //
+            // The window used to be closed at both ends, which read as tidy and
+            // lost money. A job order closed, back-dated or approved after its own
+            // Monday run fell into a week that could never be invoiced again
+            // (owner_key + period_start is unique), and because the query also
+            // refused anything older than this week's Monday, no later run would
+            // ever reach it either. The referral was simply never billed.
+            //
+            // Only the upper bound is a real boundary: work is not billed before
+            // it happens. The lower bound is redundant, because the already-billed
+            // check below and the unique key on (owner_key, application_id) are
+            // what stop a customer being billed twice - not the date.
+            //
+            // The first run after this change sweeps up whatever earlier runs left
+            // behind, which is the point: those referrals are owed.
             ->whereRaw("{$completedAt} <= ?", [$periodEnd->format('Y-m-d H:i:s')]);
 
         // Never bill for work done before the agent programme began.
@@ -927,6 +957,9 @@ class AgentInvoiceService
             'a.middle_initial',
             'a.last_name',
             'a.referred_by',
+            // The rate this job order was actually SETTLED at, stamped on it by
+            // JobOrderAgentPaymentService when it was approved. Null until then.
+            'jo.commission_value as settled_rate',
             DB::raw("{$completedAt} as installed_at")
         )->orderBy('jo.id')->get();
 
@@ -963,9 +996,24 @@ class AgentInvoiceService
                 'referred_by_name'     => $member['name'],
                 'referred_by_raw'      => (string) $row->referred_by,
                 'installed_date'       => $row->installed_at ? Carbon::parse($row->installed_at)->format('Y-m-d') : null,
-                // Carried so the invoice total is the sum of what each referral
-                // actually earns, rather than one rate applied to all of them.
-                'commission_rate'      => (float) ($member['commission_rate'] ?? 0),
+                // What this referral actually earns.
+                //
+                // The rate the job order was SETTLED at wins. That figure is what
+                // the agent was credited with when it was approved, and
+                // JobOrderAgentPaymentService stamps it onto the row precisely so
+                // that "raising the rate next month would [not] silently restate
+                // money already paid". Reading the live agent_balance.commission
+                // here defeated exactly that: an administrator changing the rate
+                // between approval and Monday made the invoice bill an amount the
+                // agent had never been credited with — proven at ₱250 billed
+                // against ₱100 credited.
+                //
+                // The agent's current rate still stands in where there is no
+                // snapshot: a job order approved before the column existed, or one
+                // being billed before it has been approved.
+                'commission_rate'      => $row->settled_rate !== null && (float) $row->settled_rate > 0
+                    ? (float) $row->settled_rate
+                    : (float) ($member['commission_rate'] ?? 0),
             ];
         }
 

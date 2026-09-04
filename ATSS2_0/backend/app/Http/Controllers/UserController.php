@@ -8,7 +8,9 @@ use App\Models\AgentBalance;
 use App\Models\Role;
 use App\Support\Permissions;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 use App\Services\ActivityLogService;
 
@@ -87,6 +89,114 @@ class UserController extends Controller
         }
 
         return null;
+    }
+
+    /**
+     * Is this account an agent, for the purpose of owning an agent_balance row?
+     *
+     * Three things make somebody one, and the third is why this is a method rather
+     * than the inline `role_id == 4` it replaces:
+     *
+     *   - the seeded Agent role, matched by its id;
+     *   - a per-organization role literally named "Agent", matched by name;
+     *   - a custom role built on Agent - see Role::baseRoleId(). `base_role_id` is
+     *     a newer column, so its presence is checked on the loaded row rather than
+     *     assumed: a deployment that has not run that migration simply has no
+     *     hybrids to detect, and must not error out looking for them.
+     */
+    private function isAgentRole(?User $user): bool
+    {
+        if (!$user) {
+            return false;
+        }
+
+        if ((int) ($user->role_id ?? 0) === Role::AGENT) {
+            return true;
+        }
+
+        $role = $user->role;
+
+        if (!$role) {
+            return false;
+        }
+
+        if (strtolower(trim((string) $role->role_name)) === 'agent') {
+            return true;
+        }
+
+        if (!array_key_exists('base_role_id', $role->getAttributes())) {
+            return false;
+        }
+
+        return $role->baseRoleId() === Role::AGENT;
+    }
+
+    /**
+     * Give an agent the agent_balance row that makes them one, or update it.
+     *
+     * Holding that row is the definition of an agent everywhere it matters - the
+     * incentive cron iterates agent_balance directly, and the invoice, payout and
+     * referral-name code all join through it - so an agent account without one is
+     * invisible to the entire scheme however their role reads. Creating it with the
+     * account is what stops that gap opening.
+     *
+     * Rates the form sent are written; the ones it did not are left as they are on
+     * an existing row, and initialized to zero on a new one, so a partial edit can
+     * never blank a rate it said nothing about. The running totals (balance, earned
+     * commission, incentives) are seeded to zero on creation only - they are the
+     * cron's to move afterwards, never this endpoint's.
+     */
+    private function syncAgentBalance(User $user, Request $request): void
+    {
+        if (!$this->isAgentRole($user)) {
+            return;
+        }
+
+        $data = ['organization_id' => $user->organization_id];
+
+        foreach (['commission', 'quota', 'incentives_value', 'remarks'] as $field) {
+            if ($request->has($field)) {
+                $data[$field] = $request->input($field);
+            }
+        }
+
+        if (!AgentBalance::where('agent_id', $user->id)->exists()) {
+            // Only fills the keys the request did not already set.
+            $data += [
+                'commission'       => 0.00,
+                'quota'            => 0.00,
+                'incentives_value' => 0.00,
+                'balance'          => 0.00,
+                'commission_value' => 0.00,
+                'incentives'       => 0.00,
+            ];
+        }
+
+        // agent_balance grew its configuration and running-total columns across
+        // several guarded migrations, so a deployment that is behind on them has a
+        // narrower table than this code knows about. Writing a column that is not
+        // there throws, and the row is now created inside the account's own
+        // transaction - which would take the whole account down with it. Dropping
+        // the unknown keys instead means such a deployment still gets the row, just
+        // without the columns it has no place to put; the rest is upgraded by
+        // running the migrations, not by failing every agent that is created.
+        $data = array_intersect_key($data, array_flip(self::balanceColumns()));
+
+        AgentBalance::updateOrCreate(['agent_id' => $user->id], $data);
+    }
+
+    /**
+     * The columns agent_balance actually has, read once per request.
+     */
+    private static function balanceColumns(): array
+    {
+        static $columns = null;
+
+        if ($columns === null) {
+            $columns = Schema::getColumnListing('agent_balance');
+        }
+
+        return $columns;
     }
 
     public function index(Request $request)
@@ -210,26 +320,26 @@ class UserController extends Controller
                     'active' => $request->has('active') ? $request->active : 1,
                 ];
             
-            $user = User::create($userData);
-            
-            if (!$user) {
-                throw new \Exception('Failed to create user');
-            }
+            // The account and its agent_balance row are one unit of work. An agent
+            // holding no balance row is not an agent to any of the code that pays them,
+            // so the pair must not be left half-written: if the balance insert fails the
+            // user is rolled back with it and the caller gets the 500 below, rather than
+            // an account that looks created and earns nothing.
+            $user = DB::transaction(function () use ($userData, $request) {
+                $user = User::create($userData);
+
+                if (!$user) {
+                    throw new \Exception('Failed to create user');
+                }
+
+                // isAgentRole() reads the role row, so it has to be on the model.
+                $user->load('role');
+                $this->syncAgentBalance($user, $request);
+
+                return $user;
+            });
 
             $user->load(['organization', 'role', 'agent', 'agentBalance']);
-
-            if ($user->role_id == 4 || ($user->role && strtolower($user->role->role_name) === 'agent')) {
-                AgentBalance::updateOrCreate(
-                    ['agent_id' => $user->id],
-                    [
-                        'balance' => 0.00,
-                        'commission' => $request->commission ?? 0.00,
-                        'quota' => $request->quota ?? 0.00,
-                        'incentives_value' => $request->incentives_value ?? 0.00,
-                        'remarks' => $request->remarks ?? null,
-                    ]
-                );
-            }
 
             // Try to log user creation activity (but don't fail if logging fails)
             try {
@@ -403,40 +513,9 @@ class UserController extends Controller
             $user->update($updateData);
             $user->load(['organization', 'role', 'agent', 'agentBalance']);
 
-            if ($user->role_id == 4 || ($user->role && strtolower($user->role->role_name) === 'agent')) {
-                $balanceData = [];
-                if ($request->has('commission')) {
-                    $balanceData['commission'] = $request->commission;
-                }
-                if ($request->has('quota')) {
-                    $balanceData['quota'] = $request->quota;
-                }
-                if ($request->has('incentives_value')) {
-                    $balanceData['incentives_value'] = $request->incentives_value;
-                }
-                if ($request->has('remarks')) {
-                    $balanceData['remarks'] = $request->remarks;
-                }
-                // Check if record exists, if not, initialize balance to 0.00
-                if (!AgentBalance::where('agent_id', $user->id)->exists()) {
-                    $balanceData['balance'] = 0.00;
-                    if (!isset($balanceData['commission'])) {
-                        $balanceData['commission'] = 0.00;
-                    }
-                    if (!isset($balanceData['quota'])) {
-                        $balanceData['quota'] = 0.00;
-                    }
-                    if (!isset($balanceData['incentives_value'])) {
-                        $balanceData['incentives_value'] = 0.00;
-                    }
-                }
-                if (!empty($balanceData)) {
-                    AgentBalance::updateOrCreate(
-                        ['agent_id' => $user->id],
-                        $balanceData
-                    );
-                }
-            }
+            // Also covers an account being PROMOTED to agent here: the row is created
+            // on the edit that makes them one, not left for a later save to notice.
+            $this->syncAgentBalance($user, $request);
 
             // Try to log user update activity (but don't fail if logging fails)
             try {

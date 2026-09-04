@@ -42,6 +42,12 @@ use Throwable;
  * how the rest of the scheme already treats it (commission needs the job order
  * approved; achievements and invoice lines need Done or Completed).
  *
+ * That qualifier only decides what to count NOW, so on its own it never covered
+ * the case where the site was still countable when the quota completed and
+ * failed afterwards — the incentive was already paid. reverseAbandonedBatches()
+ * closes that from the other end, undoing a completed quota once one of its
+ * referrals turns out to have been abandoned.
+ *
  * Counting early does not risk counting twice: a Job Order consumed by a
  * completed quota is recorded in `agent_incentive_history`, and the
  * `whereNotExists` below can never see it again — so its later flip to "Done"
@@ -81,11 +87,17 @@ use Throwable;
  * related application's `referred_by` field.
  *
  * That field now holds the agent's user id for any referral made through the
- * "Referred By" picker — stored tagged, as `agent:37`, see App\Support\
- * AgentReferral. An id names exactly one account, so those referrals are immune
- * to the name collisions, renames and partial matches that the full-name
- * matching below could never resolve. No new column was needed: the same
- * varchar carries both forms.
+ * "Referred By" picker, stored as the BARE NUMBER — `37`, not `agent:37`; see
+ * AgentReferral::encode(). An id names exactly one account, so those referrals
+ * are immune to the name collisions, renames and partial matches that the
+ * full-name matching below could never resolve. No new column was needed: the
+ * same varchar carries both forms.
+ *
+ * The cost of the bare form is that only its shape separates it from legacy free
+ * text. AgentReferral::agentId() refuses anything that is not all digits and
+ * refuses leading zeros, so "09077694575" and "000201" stay text — but a
+ * historic referral recorded as a small bare number cannot be told apart from a
+ * user id, and will be read as one.
  *
  * Older referrals are still free text — agent names, team names, and values
  * like "Walk in" — and are still matched by name, so both forms are queried
@@ -94,6 +106,23 @@ use Throwable;
 class AgentIncentiveService
 {
     private string $logName = 'Agent_Incentives';
+
+    /**
+     * Agents touched by the current run, bucketed by outcome.
+     *
+     * The per-agent narration this service writes is filtered out of the log file now
+     * (see App\Support\CronLog), so the record of which agents were actually handled has
+     * to survive somewhere. It is emitted once at the end of the run as a quoted,
+     * comma-separated list per outcome — short enough to read at a glance, and in a form
+     * that pastes straight into `WHERE agent_id IN (...)` when a specific agent has to be
+     * chased.
+     */
+    private CronLog $runLog;
+
+    public function __construct()
+    {
+        $this->runLog = new CronLog();
+    }
 
     /** The two statuses that count as a successful finish. */
     private const SUCCESSFUL_ONSITE_STATUSES = ['done', 'completed'];
@@ -156,6 +185,13 @@ class AgentIncentiveService
         $startTime = Carbon::now();
         $this->writeLog("Start Time: " . $startTime->format('Y-m-d H:i:s'));
 
+        // Before counting anything, undo quotas that turned out not to have been
+        // met. See reverseAbandonedBatches().
+        $summary['batches_reversed'] = 0;
+        $summary['amount_reversed']  = 0.0;
+        $summary['reversals_blocked'] = 0;
+        $this->reverseAbandonedBatches($summary);
+
         // One small query: every agent's incentive configuration.
         $balances = DB::table('agent_balance')->get();
         $total = $balances->count();
@@ -175,6 +211,7 @@ class AgentIncentiveService
             } catch (Throwable $e) {
                 // One agent's failure must never stop the rest of the run.
                 $summary['errors']++;
+                $this->runLog->failed((string) $balance->agent_id);
                 $this->writeLog("  [ERROR] Agent #{$balance->agent_id}: " . $e->getMessage());
                 $this->writeLog("[{$counter}/{$total}] ✗ ERROR");
                 Log::channel('single')->error("[{$this->logName}] Agent #{$balance->agent_id} failed: " . $e->getMessage(), [
@@ -199,12 +236,198 @@ class AgentIncentiveService
         $this->writeLog("  • Agents Skipped:      {$summary['skipped']}");
         $this->writeLog("  • Job Orders Skipped:  {$summary['skipped_job_orders']}");
         $this->writeLog("  • Job Orders Carried:  {$summary['job_orders_carried']} (unfinished quota progress kept for the next run)");
+        $this->writeLog("  • Batches Reversed:    {$summary['batches_reversed']} (abandoned after the quota completed) worth " . number_format($summary['amount_reversed'], 2));
+        $this->writeLog("  • Reversals Blocked:   {$summary['reversals_blocked']} (already billed — needs a credit note)");
         $this->writeLog("  • Errors:              {$summary['errors']}");
         $this->writeLog("  • Duration:            {$duration} second(s)");
         $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
         $this->writeLog("");
 
+        $this->writeRunSummary();
+
         return $summary;
+    }
+
+    /**
+     * Undo completed quotas that contain a job order which has since been abandoned.
+     *
+     * A referral counts toward a quota as soon as its site is pre-installed —
+     * deliberately, so an agent is not kept waiting for the technician to close
+     * the install. The abandoned-status filter in the counting query is what was
+     * meant to stop that paying for work which never landed, but it is a
+     * point-in-time test: it only decides what to count NOW. It says nothing
+     * about a job order that was countable when the quota completed and failed
+     * afterwards.
+     *
+     * That sequence — pre-installed, cron runs, install fails — left the incentive
+     * paid, and there was nothing anywhere in the module to take it back: no
+     * negative rows, no reversal, no adjustment. In the simulation an agent kept
+     * ₱500 for two referrals that both ended Failed, and it was billed to the
+     * company on a weekly invoice.
+     *
+     * This closes it from the other end. Every run, before counting anything:
+     *
+     *   • find the recorded job orders that are now abandoned
+     *   • take the whole batch each one belongs to — the quota was only ever
+     *     complete BECAUSE of it, so the rest of the batch did not earn the award
+     *     on its own
+     *   • debit the award from the agent's balance and delete the batch's rows
+     *
+     * Deleting rather than flagging is deliberate: `job_order_id` is UNIQUE, so a
+     * flagged row would block the still-valid referrals in that batch from ever
+     * being counted again. Removing them returns those referrals to the pool,
+     * where they belong — they were never the problem — and the abandoned one
+     * stays out because the counting query still refuses it. The deletion is
+     * recorded on the audit trail, so the ledger is not the only account of it.
+     *
+     * A batch that has ALREADY been billed is left alone and reported instead.
+     * Rewriting it would silently contradict an invoice that has been issued, and
+     * possibly paid; that needs a credit note, which this module has no concept
+     * of. Naming it is the honest outcome, and the [REVERSED] tag survives the
+     * cron log filter so it cannot go quiet.
+     */
+    private function reverseAbandonedBatches(array &$summary): void
+    {
+        $abandoned = self::abandonedOnsiteStatuses();
+
+        if ($abandoned === []) {
+            return;
+        }
+
+        // The recorded job orders that have since been abandoned.
+        $spoiled = DB::table('agent_incentive_history as aih')
+            ->join('job_orders as jo', 'jo.id', '=', 'aih.job_order_id')
+            ->whereIn(DB::raw('LOWER(TRIM(jo.onsite_status))'), $abandoned)
+            ->get(['aih.agent_id', 'aih.batch_number', 'aih.job_order_id', 'aih.agent_invoice_id']);
+
+        if ($spoiled->isEmpty()) {
+            return;
+        }
+
+        // One entry per affected batch, not per job order.
+        $batches = [];
+        foreach ($spoiled as $row) {
+            $key = $row->agent_id . ':' . $row->batch_number;
+            $batches[$key] ??= [
+                'agent_id'     => (int) $row->agent_id,
+                'batch_number' => (int) $row->batch_number,
+                'job_orders'   => [],
+            ];
+            $batches[$key]['job_orders'][] = (int) $row->job_order_id;
+        }
+
+        foreach ($batches as $batch) {
+            $rows = DB::table('agent_incentive_history')
+                ->where('agent_id', $batch['agent_id'])
+                ->where('batch_number', $batch['batch_number'])
+                ->get(['id', 'job_order_id', 'incentive_value', 'agent_invoice_id']);
+
+            if ($rows->isEmpty()) {
+                continue;
+            }
+
+            $award  = round((float) $rows->sum('incentive_value'), 2);
+            $billed = $rows->first(fn ($r) => $r->agent_invoice_id !== null);
+
+            if ($billed !== null) {
+                $summary['reversals_blocked']++;
+                $this->writeLog(sprintf(
+                    '  [REVERSED] CANNOT reverse batch %d for agent #%d: it was already billed on '
+                    . 'agent invoice #%d. The quota included job order(s) %s, which have since been '
+                    . 'abandoned, so ₱%s was paid for work that did not land. The invoice is left '
+                    . 'untouched — settle this by credit note, not by editing the ledger.',
+                    $batch['batch_number'],
+                    $batch['agent_id'],
+                    (int) $billed->agent_invoice_id,
+                    implode(', ', $batch['job_orders']),
+                    number_format($award, 2)
+                ));
+                continue;
+            }
+
+            try {
+                DB::transaction(function () use ($batch, $rows, $award) {
+                    DB::table('agent_incentive_history')
+                        ->whereIn('id', $rows->pluck('id')->all())
+                        ->delete();
+
+                    if ($award > 0) {
+                        DB::table('agent_balance')
+                            ->where('agent_id', $batch['agent_id'])
+                            ->update([
+                                // GREATEST so a balance already drawn down by a
+                                // payout cannot be pushed negative by the claw-back.
+                                'incentives' => DB::raw(
+                                    'GREATEST(0, COALESCE(incentives, 0) - ' . number_format($award, 2, '.', '') . ')'
+                                ),
+                                'updated_at' => Carbon::now(),
+                            ]);
+                    }
+                });
+            } catch (Throwable $e) {
+                $summary['errors']++;
+                $this->writeLog(sprintf(
+                    '  [ERROR] Could not reverse batch %d for agent #%d: %s',
+                    $batch['batch_number'],
+                    $batch['agent_id'],
+                    $e->getMessage()
+                ));
+                continue;
+            }
+
+            $summary['batches_reversed']++;
+            $summary['amount_reversed'] += $award;
+
+            $this->writeLog(sprintf(
+                '  [REVERSED] batch %d for agent #%d — ₱%s clawed back. Job order(s) %s were '
+                . 'abandoned after the quota completed; the other %d referral(s) in the batch return '
+                . 'to the pool and may count toward a later quota.',
+                $batch['batch_number'],
+                $batch['agent_id'],
+                number_format($award, 2),
+                implode(', ', $batch['job_orders']),
+                max(0, $rows->count() - count($batch['job_orders']))
+            ));
+
+            $this->recordReversalOnAuditTrail($batch, $rows, $award);
+        }
+    }
+
+    /**
+     * Leave an account of a reversal outside the ledger it just changed.
+     *
+     * The rows are gone, so without this the only record of the claw-back would
+     * be a log line. Never fatal: an audit trail that cannot be written must not
+     * stop the money being corrected.
+     */
+    private function recordReversalOnAuditTrail(array $batch, $rows, float $award): void
+    {
+        try {
+            \App\Models\AuditTrailLog::create([
+                'old_details' => [
+                    'type'  => 'agent_incentive_history',
+                    'event' => 'quota_batch_paid',
+                    'agent_id'     => $batch['agent_id'],
+                    'batch_number' => $batch['batch_number'],
+                    'amount'       => $award,
+                    'job_order_ids' => $rows->pluck('job_order_id')->all(),
+                ],
+                'new_details' => [
+                    'type'  => 'agent_incentive_history',
+                    'event' => 'quota_batch_reversed',
+                    'reason' => 'A job order inside the completed quota was abandoned '
+                        . '(Failed or Cancelled) after the incentive was awarded.',
+                    'agent_id'      => $batch['agent_id'],
+                    'batch_number'  => $batch['batch_number'],
+                    'amount_reversed' => $award,
+                    'abandoned_job_order_ids' => $batch['job_orders'],
+                ],
+                'created_by_user' => 'System (' . $this->logName . ')',
+                'updated_by_user' => 'System (' . $this->logName . ')',
+            ]);
+        } catch (Throwable $e) {
+            $this->writeLog('  [WARN] Reversal audit entry could not be written: ' . $e->getMessage());
+        }
     }
 
     /**
@@ -221,6 +444,7 @@ class AgentIncentiveService
         $user = DB::table('users')->where('id', $agentId)->first();
         if (!$user) {
             $summary['skipped']++;
+            $this->runLog->skipped((string) $agentId);
             $this->writeLog("  [SKIP] Agent #{$agentId}: no matching user record");
             $this->writeLog("[{$counter}/{$total}] ⊘ SKIPPED");
             return;
@@ -233,6 +457,7 @@ class AgentIncentiveService
         // Nothing to do if the agent is not configured for incentives.
         if ($quota <= 0 || $incentiveValue <= 0) {
             $summary['skipped']++;
+            $this->runLog->skipped((string) $agentId);
             $this->writeLog("  [SKIP] Quota or incentive value not configured — nothing to award");
             $this->writeLog("[{$counter}/{$total}] ⊘ SKIPPED");
             return;
@@ -249,6 +474,7 @@ class AgentIncentiveService
 
         if (empty($nameVariants) && $taggedId === null) {
             $summary['skipped']++;
+            $this->runLog->skipped((string) $agentId);
             $this->writeLog("  [SKIP] Unable to build a name to match job orders");
             $this->writeLog("[{$counter}/{$total}] ⊘ SKIPPED");
             return;
@@ -398,6 +624,7 @@ class AgentIncentiveService
             if ($available > 0) {
                 $this->writeLog("  [CARRY] Kept for the next run (not reset): job order ID(s) " . implode(', ', $jobOrderIds));
             }
+            $this->runLog->record('CARRIED', (string) $agentId);
             $this->writeLog("[{$counter}/{$total}] ✓ DONE (no award)");
             return;
         }
@@ -530,6 +757,7 @@ class AgentIncentiveService
             $summary['job_orders_carried'] += count($carried);
             $this->writeLog("  [CARRY] " . count($carried) . " completed job order(s) carried over to next run (not reset): job order ID(s) " . implode(', ', $carried));
         }
+        $this->runLog->processed((string) $agentId);
         $this->writeLog("  [COMPLETE] {$agentName} (#{$agentId}) — awarded incentive x{$cycles}, recorded {$processCount} job order(s)");
         $this->writeLog("[{$counter}/{$total}] ✓ SUCCESS");
     }
@@ -572,6 +800,23 @@ class AgentIncentiveService
         $name   = trim($first . ' ' . ($middle !== '' ? $middle . '. ' : '') . $last);
 
         return $name !== '' ? $name : ('Agent #' . ($user->id ?? '?'));
+    }
+
+    /**
+     * Emit the run's agent lists, then clear them.
+     *
+     * Written through writeLog() like everything else — the summary marker is what carries
+     * these lines past the error filter, so they stay in the file when the narration does
+     * not. Cleared afterwards so a second run on the same instance cannot inherit the
+     * first one's agents.
+     */
+    private function writeRunSummary(): void
+    {
+        foreach ($this->runLog->summaryLines() as $line) {
+            $this->writeLog($line);
+        }
+
+        $this->runLog->reset();
     }
 
     /**

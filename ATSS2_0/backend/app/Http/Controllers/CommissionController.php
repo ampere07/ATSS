@@ -278,7 +278,18 @@ class CommissionController extends Controller
             // explicit zero or empty string rather than a NULL the reports would
             // have to special-case.
             if ($fromInvoice) {
-                $validated['total_amount']     = $validated['total_amount'] ?? 0;
+                // An amount that was not given is taken FROM THE INVOICE, not
+                // defaulted to zero.
+                //
+                // Zero was what it used to be, and it made the settlement
+                // cosmetic: approving it marked the invoice Paid but moved
+                // nothing off the agent's balance, so the very same entitlement
+                // was still sitting there and could be — and was — paid a second
+                // time through the payout screen. The invoice says what is owed;
+                // paying it should draw exactly that.
+                $named = AgentInvoice::where('invoice_number', trim((string) $validated['ref_number']))->first();
+
+                $validated['total_amount']     = $validated['total_amount'] ?? ($named->subtotal ?? 0);
                 $validated['remarks']          = $validated['remarks'] ?? '';
                 $validated['proof_of_payment'] = $validated['proof_of_payment'] ?? '';
             }
@@ -988,6 +999,31 @@ class CommissionController extends Controller
         $incentives = max(0, (float) $agentBalance->incentives);
         $bonus      = max(0, (float) ($agentBalance->bonus ?? 0));
 
+        // A payout that names an invoice draws each bucket by what that invoice
+        // actually bills, rather than taking the whole subtotal out of commission.
+        //
+        // An agent invoice is two figures — commission earned per referral, and
+        // the incentive claimed from the quota ledger — and the agent's balance
+        // holds those in two separate columns. Debiting the lot from
+        // `commission_value` would leave the incentive still owed and still
+        // payable, which is the double-payment this is here to close.
+        //
+        // Only the default type takes this path; an operator who deliberately
+        // recorded an `incentives_payout` or a `Bonus_payout` against an invoice
+        // number meant that type, and gets it.
+        $named = $history->type === 'commission'
+            ? AgentInvoice::where('invoice_number', trim((string) $history->ref_number))->first()
+            : null;
+
+        if ($named) {
+            $agentBalance->update([
+                'commission_value' => max(0, $commission - (float) $named->commission),
+                'incentives'       => max(0, $incentives - (float) $named->total_amount),
+            ]);
+
+            return;
+        }
+
         if ($history->type === 'incentives') {
             $agentBalance->update(['incentives' => $incentives + $amount]);
         } elseif ($history->type === 'incentives_payout') {
@@ -1021,6 +1057,34 @@ class CommissionController extends Controller
             // which is where an approved job order credits its payment.
             $agentBalance->update(['commission_value' => max(0, $commission - $amount)]);
         }
+    }
+
+    /**
+     * Did this payout leave the agent holding nothing?
+     *
+     * Read AFTER applyCommissionMovement() has run, so it reports what the agent
+     * is left with rather than what they had. An "All Balance" payout is only
+     * entitled to settle the owner's outstanding invoices when it genuinely
+     * cleared every bucket; a partial one has paid some of what is owed and must
+     * leave the invoices open for the rest.
+     *
+     * A rounding tolerance rather than a bare `> 0`, so a residue of a fraction
+     * of a centavo does not keep an invoice open forever.
+     */
+    private function clearedEveryBucket(AgentCommissionHistory $history): bool
+    {
+        $balance = AgentBalance::where('agent_id', $history->agent_id)->first();
+
+        if (!$balance) {
+            return false;
+        }
+
+        $remaining = (float) ($balance->commission_value ?? 0)
+            + (float) ($balance->balance ?? 0)
+            + (float) ($balance->incentives ?? 0)
+            + (float) ($balance->bonus ?? 0);
+
+        return $remaining < 0.005;
     }
 
     /**
@@ -1243,7 +1307,14 @@ class CommissionController extends Controller
 
             if ($named) {
                 $settled = $this->settleNamedInvoice($named, $history);
-            } elseif ($history->type === 'all') {
+            } elseif ($history->type === 'all' && $this->clearedEveryBucket($history)) {
+                // Only when the payout ACTUALLY emptied the agent, which is the
+                // premise the comment above rests on. applyCommissionMovement()
+                // supports a partial 'all' payout - it drains the buckets in order
+                // and leaves the remainder - and settling every invoice against
+                // one of those wrote off work that had not been paid for. A ₱1
+                // payout marked ₱1,200 of invoices Paid while the agent was still
+                // owed ₱1,199.
                 $settled = $this->settleAgentInvoicesFor($history);
             }
 

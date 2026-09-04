@@ -47,6 +47,21 @@ class CronLog
     private const WARNING_TAGS = ['WARNING', 'WARN'];
 
     /**
+     * Tags that survive the filter no matter how it is configured.
+     *
+     * The filter keeps faults and drops narration, which is right for a run that
+     * either worked or did not. It is wrong for a line reporting that MONEY is in
+     * an unexpected state — an incentive earned but never billable, a completed
+     * quota reversed because the install failed. Those are not faults; nothing
+     * threw, and the run reports success. But they are the only warning anybody
+     * gets that an agent is owed something the scheme will not pay, and they were
+     * being dropped in silence.
+     *
+     * Matched as whole uppercase words, the same way ERROR_TAGS are.
+     */
+    private const ALWAYS_KEEP_TAGS = ['UNBILLED', 'STRANDED', 'REVERSED', 'MONEY'];
+
+    /**
      * Lower-confidence failure wording, matched case-insensitively, for the narrated
      * failures that carry a section tag rather than a severity one.
      */
@@ -89,7 +104,18 @@ class CronLog
             return true;
         }
 
-        return self::isSummary($message) || self::isError($message);
+        return self::isSummary($message) || self::isMoneyNotice($message) || self::isError($message);
+    }
+
+    /**
+     * Does this line report money in an unexpected state?
+     *
+     * Kept unconditionally — see ALWAYS_KEEP_TAGS. Checked before isError() so a
+     * phrase like "not billed" cannot be written off as a zero count.
+     */
+    public static function isMoneyNotice(string $message): bool
+    {
+        return (bool) preg_match('/\b(' . implode('|', self::ALWAYS_KEEP_TAGS) . ')\b/', $message);
     }
 
     /** Does this line report a fault? */
