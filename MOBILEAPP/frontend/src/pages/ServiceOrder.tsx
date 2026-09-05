@@ -12,7 +12,7 @@ import {
   isTechnicianUser,
   sortServiceOrdersForTechnician
 } from '../utils/technicianServiceOrderAccess';
-import { agentOwnsReferral } from '../utils/agentReferral';
+import { createAgentReferralMatcher } from '../utils/agentReferral';
 
 // Location grouping removed as per user request
 
@@ -369,10 +369,17 @@ const ServiceOrderPage: React.FC = () => {
     const lowerSearch = debouncedSearch.toLowerCase();
     const isSearchEmpty = lowerSearch === '';
 
+    // Fixed for the whole scan: the role words the filter below keeps
+    // re-lowercasing, and the agent's own half of the referral test (see
+    // createAgentReferralMatcher).
+    const isTechnicianRole = userRole.toLowerCase() === 'technician' || userRoleId === 2;
+    const isAgentRole = userRole.toLowerCase() === 'agent' || userRoleId === 4;
+    const ownsReferral = createAgentReferralMatcher(userFullName, userEmail, userId);
+
     const matched = serviceOrders
       .filter(serviceOrder => {
         // Hide resolved service orders for technicians
-        if (!isSuperUser && isTechnician && (userRole.toLowerCase() === 'technician' || userRoleId === 2)) {
+        if (!isSuperUser && isTechnician && isTechnicianRole) {
           const supportStatus = (serviceOrder.supportStatus || '').toLowerCase().trim();
           if (supportStatus === 'resolved') return false;
         }
@@ -386,8 +393,8 @@ const ServiceOrderPage: React.FC = () => {
         
         // Status filtering
         if (statusFilter !== 'all') {
-          const s = (userRole.toLowerCase() === 'technician' || userRoleId === 2) 
-            ? (serviceOrder.visitStatus || '').toLowerCase().trim() 
+          const s = isTechnicianRole
+            ? (serviceOrder.visitStatus || '').toLowerCase().trim()
             : (serviceOrder.supportStatus || '').toLowerCase().trim();
           
           if (statusFilter === 'done') {
@@ -402,18 +409,11 @@ const ServiceOrderPage: React.FC = () => {
         }
 
         // Role-based filtering: Agents (role_id 4) only see their own referrals
-        if (!isSuperUser && (userRole.toLowerCase() === 'agent' || userRoleId === 4)) {
+        if (!isSuperUser && isAgentRole) {
           // The shared rule, not a substring test of its own: a referral is now
           // stored as the agent's user id, which contains none of their name, and
           // `includes` would also have counted "Ana" as a match for "Joana".
-          const matchesAgent = agentOwnsReferral(
-            (serviceOrder as any).referredBy || '',
-            userFullName,
-            userEmail,
-            userId
-          );
-
-          if (!matchesAgent) return false;
+          if (!ownsReferral((serviceOrder as any).referredBy || '')) return false;
         }
 
         return true;

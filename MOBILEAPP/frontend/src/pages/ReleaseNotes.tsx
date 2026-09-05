@@ -28,6 +28,19 @@ const ReleaseNotes: React.FC<ReleaseNotesProps> = ({ onBack }) => {
 
     const allNotes: ReleaseNote[] = [
         {
+            version: '2.5.66',
+            date: 'September 4, 2026',
+            title: 'Completed Referrals in View & One History List',
+            updates: [
+                { text: 'Completed Referrals Back on Your List: Your Job Order page no longer drops a referral the moment it is installed. Done referrals stay on the page and sit at the very bottom, so you can look back over what you closed without leaving the list you work from.', visibility: 'agent' },
+                { text: 'Read in the Order You Work It: Your referrals are now grouped the way you follow them up — In Progress first, then Reschedule, then Failed, with Done last — and newest first inside each group. The visits still happening lead the page.', visibility: 'agent' },
+                { text: 'One History List: Pay Out/In no longer splits your history across Commission, Incentives and Bonus tabs. Every payout, incentive and bonus movement is in one list, newest first, each row tagged with what kind of record it is and whether it is still pending or has been approved.', visibility: 'agent' },
+                { text: 'Payouts That Were Missing: A payout recorded against all of your balances at once belonged to none of the three old tabs, so your history read "No matching records found" while the record was sitting there. Every record now shows, whatever kind it is.', visibility: 'agent' },
+                { text: 'Only Ever Your Own: Your history is matched to your account, so nothing belonging to another agent can appear on your screen — not even for the moment while the page is loading.', visibility: 'agent' },
+                { text: 'Faster Across the Board: Your dashboard, Job Order list, Agent History and Achievements all do far less work to show the same figures. The matching that finds your referrals is now worked out once per screen instead of once per referral, and your incentive batches no longer search your whole history for every entry in them — a long referral history is where you will notice it most.', visibility: 'agent' }
+            ]
+        },
+        {
             version: '2.5.61',
             date: 'August 25, 2026',
             title: 'Agent Dashboard Rebuilt & Full Referral History',

@@ -14,7 +14,7 @@ import apiClient from '../config/api';
 import { exportToCSV } from '../utils/exportUtils';
 import { userService } from '../services/userService';
 import { User } from '../types/api';
-import { agentOwnsReferral, getOnsiteStatus, isAgentUser, isDoneOnsiteStatus } from '../utils/agentReferral';
+import { agentJobOrderBand, createAgentReferralMatcher, isAgentUser } from '../utils/agentReferral';
 import {
   buildTechnicianLockedJobOrderIds,
   isTechnicianUser,
@@ -283,6 +283,7 @@ const JobOrderPage: React.FC = () => {
     return ['timestamp', 'dateInstalled', 'referredBy', 'fullName', 'address', 'onsiteStatus', 'billingStatus', 'assignedEmail', 'billingDay', 'installationFee', 'modifiedBy', 'modifiedDate'];
   });
   const isTechnician = isTechnicianUser(userRole, roleId);
+  const isAgentViewer = isAgentUser(userRole, roleId);
   // Technicians land on their queue in the order they are expected to work it —
   // oldest first — which the presort below applies when no column sort is set.
   // Everyone else keeps the newest-first default. Sorting a column still works
@@ -782,10 +783,10 @@ const JobOrderPage: React.FC = () => {
 
     // Then filter by agent if applicable.
     //
-    // An agent sees the referrals they own that are still in flight, however
-    // long ago they were raised — there is no date cut-off. Completed ones are
-    // left out: they belong to the agent's history, and this page is what is
-    // still to come.
+    // An agent sees every referral they own, however long ago it was raised —
+    // there is no date cut-off, and finished ones are kept rather than dropped:
+    // they read at the bottom of the list (see sortedJobOrders) so the work
+    // still in flight leads.
     //
     // Matching mirrors the mobile app: tolerant of middle names, or an exact
     // email match. The identity check is deliberately INSIDE the agent branch
@@ -794,13 +795,10 @@ const JobOrderPage: React.FC = () => {
     if (isAgentUser(userRole, roleId)) {
       if (!agentName && !agentEmail && agentUserId === null) return [];
 
-      return filtered.filter((jo: JobOrder) => {
-        const referredBy = jo.Referred_By || jo.referred_by || '';
-        if (!agentOwnsReferral(referredBy, agentName, agentEmail, agentUserId)) return false;
-
-        // Done and completed are history rather than work still to come.
-        return !isDoneOnsiteStatus(getOnsiteStatus(jo));
-      });
+      // Built once for the whole scan rather than per row — see
+      // createAgentReferralMatcher.
+      const ownsReferral = createAgentReferralMatcher(agentName, agentEmail, agentUserId);
+      return filtered.filter((jo: JobOrder) => ownsReferral(jo.Referred_By || jo.referred_by || ''));
     }
     return filtered;
   }, [jobOrders, userRole, roleId, agentUserId, agentName, agentEmail, currentUserOrgId]);
@@ -1143,18 +1141,60 @@ const JobOrderPage: React.FC = () => {
 
     // Technicians read their list in the order they work it: In Progress oldest
     // first, then other active work, with Done / Reschedule / Failed at the end.
+    //
+    // Agents read theirs by status band — In Progress, then Reschedule, then
+    // Failed, with Done last — and newest first inside each band, so the visits
+    // still happening lead and the finished installations sit at the bottom.
+    //
     // Every other role keeps the newest-first default untouched.
+    //
+    // The sort keys are worked out once per job order and remembered, rather
+    // than inside the comparator: a comparator runs O(n log n) times, so parsing
+    // each timestamp there meant parsing the same handful of dates over and over
+    // — thousands of Date constructions to order a few hundred rows. The band an
+    // agent's row falls in is cached the same way.
+    const timeKeys = new Map<JobOrder, number>();
+    const timeOf = (jo: JobOrder): number => {
+      let key = timeKeys.get(jo);
+      if (key === undefined) {
+        key = new Date(getVal(jo, 'timestamp') || 0).getTime();
+        timeKeys.set(jo, key);
+      }
+      return key;
+    };
+
+    const idKeys = new Map<JobOrder, number>();
+    const idOf = (jo: JobOrder): number => {
+      let key = idKeys.get(jo);
+      if (key === undefined) {
+        key = parseInt(String(jo.id)) || 0;
+        idKeys.set(jo, key);
+      }
+      return key;
+    };
+
+    const byRecency = (a: JobOrder, b: JobOrder) => {
+      const timeA = timeOf(a);
+      const timeB = timeOf(b);
+      if (timeA !== timeB) return timeB - timeA;
+      return idOf(b) - idOf(a);
+    };
+
     const presorted = isTechnician
       ? sortJobOrdersForTechnician(filtered)
-      : [...filtered].sort((a, b) => {
-        const timeA = new Date(getVal(a, 'timestamp') || 0).getTime();
-        const timeB = new Date(getVal(b, 'timestamp') || 0).getTime();
-        if (timeA !== timeB) return timeB - timeA;
+      : isAgentViewer
+        ? (() => {
+          const bands = new Map<JobOrder, number>();
+          for (const jo of filtered) bands.set(jo, agentJobOrderBand(jo));
 
-        const idA = parseInt(String(a.id)) || 0;
-        const idB = parseInt(String(b.id)) || 0;
-        return idB - idA;
-      });
+          return [...filtered].sort((a, b) => {
+            const bandA = bands.get(a) ?? 0;
+            const bandB = bands.get(b) ?? 0;
+            if (bandA !== bandB) return bandA - bandB;
+            return byRecency(a, b);
+          });
+        })()
+        : [...filtered].sort(byRecency);
 
     if (sortColumn) {
       return [...presorted].sort((a, b) => {
@@ -1172,7 +1212,7 @@ const JobOrderPage: React.FC = () => {
       });
     }
     return presorted;
-  }, [globalFilteredJobOrders, selectedLocation, sortColumn, sortDirection, isTechnician]);
+  }, [globalFilteredJobOrders, selectedLocation, sortColumn, sortDirection, isTechnician, isAgentViewer]);
 
   /**
    * The job orders a technician may not open yet.

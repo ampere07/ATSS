@@ -9,24 +9,51 @@ import {
     Platform,
     useWindowDimensions,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Download, RefreshCw, Plus, History, Gift, Filter } from 'lucide-react-native';
+import { Download, RefreshCw, Plus, Filter } from 'lucide-react-native';
 import { exportToPDF } from '../utils/exportUtils';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useCommissionStore } from '../store/commissionStore';
 import { CommissionData, PayoutHistoryData } from '../types/commission';
 import CommissionDetails from '../components/CommissionDetails';
 import CommissionPayoutModal from '../modals/CommissionPayoutModal';
-import IncentivesPayoutModal from '../modals/IncentivesPayoutModal';
-import BonusPayoutModal from '../modals/BonusPayoutModal';
 import { useAgentStore } from '../store/agentStore';
 import usePermissions from '../hooks/usePermissions';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 
-type TabKey = 'payouts' | 'incentives' | 'bonus';
-
 // Forced light mode to match the ~50 already-migrated pages.
 const isDarkMode = false;
+
+// Roles that read this page as an administrator rather than as an agent, so the
+// list is NOT narrowed to their own id. Mirrors CommissionController::ADMIN_ROLES,
+// which decides the same thing server-side.
+const ADMIN_ROLES = ['administrator', 'superadmin', 'headtech'];
+
+// The transaction kind, labelled the way ATSS2_0's Agent Payout table labels it.
+//
+// `type` is a loose column on agent_commission_history — commission, incentives,
+// incentives_payout, Bonus, Bonus_payout, all, achievement — so an unrecognised
+// value is shown as stored rather than hidden, and a row carrying no type at all
+// still appears. Splitting this page into Commission / Incentives / Bonus tabs
+// is what used to hide records: the Commission tab matched only `commission` or
+// null, so a real payout written as `all` fell through every tab and the agent
+// saw an empty list.
+const TYPE_LABELS: Record<string, string> = {
+    incentives_payout: 'Payout',
+    incentives: 'Add Incentives',
+    Bonus_payout: 'Payout',
+    Bonus: 'Add Bonus',
+};
+
+const typeLabel = (type?: string | null): string => (type ? TYPE_LABELS[type] || type : '---');
+
+// Money out of the agent's balance, and money into it. Everything else — a
+// commission payout, an `all` payout — reads plain, exactly as on the web.
+const isPayoutType = (type?: string | null): boolean =>
+    type === 'incentives_payout' || type === 'Bonus_payout';
+const isAddType = (type?: string | null): boolean =>
+    type === 'incentives' || type === 'Bonus';
 
 const toDateString = (d: Date | null): string => {
     if (!d) return '';
@@ -43,27 +70,26 @@ const formatAmount = (val: any): string => {
 };
 
 const Commission: React.FC = () => {
-    const store = useCommissionStore();
     const {
         payoutHistory,
         isLoading,
         fetchCommissions,
         fetchUpdates,
-    } = store;
-
-    // Both lists are loaded by the store alongside earnings and payouts. They
-    // used to be absent from it entirely and were read through a cast that fell
-    // back to [], so these two tabs showed nothing whatever the agent earned.
-    const incentiveHistory = store.incentiveHistory;
-    const bonusHistory = store.bonusHistory;
+    } = useCommissionStore();
 
     const { width } = useWindowDimensions();
     const isTablet = width >= 768;
 
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
-    const [activeTab, setActiveTab] = useState<TabKey>('payouts');
     const [searchTerm, setSearchTerm] = useState('');
     const [refreshing, setRefreshing] = useState(false);
+
+    // Who is reading the page. An agent sees only the agent_commission_history
+    // rows carrying their own id; an administrator sees every agent's, which is
+    // what their "Pay Out/In" screen is for.
+    const [userId, setUserId] = useState<number | null>(null);
+    const [isAdminViewer, setIsAdminViewer] = useState(false);
+    const [identityReady, setIdentityReady] = useState(false);
 
     // Date range state
     const [dateFrom, setDateFrom] = useState<Date | null>(null);
@@ -82,8 +108,6 @@ const Commission: React.FC = () => {
     const [showDetails, setShowDetails] = useState(false);
 
     const [showPayoutModal, setShowPayoutModal] = useState(false);
-    const [showIncentiveModal, setShowIncentiveModal] = useState(false);
-    const [showBonusModal, setShowBonusModal] = useState(false);
 
     const { fetchAgents } = useAgentStore();
 
@@ -101,6 +125,21 @@ const Commission: React.FC = () => {
             setRefreshing(false);
         }
     };
+
+    useEffect(() => {
+        AsyncStorage.getItem('authData').then((raw) => {
+            if (raw) {
+                try {
+                    const ud = JSON.parse(raw);
+                    setUserId(ud.id ?? ud.user_id ?? null);
+                    setIsAdminViewer(ADMIN_ROLES.includes(String(ud.role || '').toLowerCase().trim()));
+                } catch (err) {
+                    console.error('[Commission Page] Failed to parse auth data:', err);
+                }
+            }
+            setIdentityReady(true);
+        });
+    }, []);
 
     useEffect(() => {
         const fetchPalette = async () => {
@@ -121,33 +160,47 @@ const Commission: React.FC = () => {
         return () => clearInterval(intervalId);
     }, [fetchUpdates]);
 
-    // Data for the active tab.
-    const rawData: any[] = activeTab === 'payouts'
-        ? payoutHistory.filter((item: any) => !item.type || item.type === 'commission')
-        : activeTab === 'incentives'
-            ? incentiveHistory
-            : bonusHistory;
-
     const filteredData = React.useMemo(() => {
-        const normalizedQuery = searchTerm.toLowerCase().replace(/\s+/g, '');
-        return rawData.filter((row: any) => {
-            const checkValue = (val: any): boolean => {
-                if (val === null || val === undefined) return false;
-                if (typeof val === 'object') return Object.values(val).some((v) => checkValue(v));
-                return String(val).toLowerCase().replace(/\s+/g, '').includes(normalizedQuery);
-            };
-            const matchesSearch = searchTerm === '' || checkValue(row);
+        // Nothing is listed until the reader is known, so an agent never sees
+        // another agent's history, even for a single frame.
+        if (!identityReady) return [];
 
-            if (dateFrom || dateTo) {
-                const dateVal = row.date || row.created_at || row.processed_at;
+        const normalizedQuery = searchTerm.toLowerCase().replace(/\s+/g, '');
+        const hasSearch = searchTerm !== '';
+
+        // Built once. Declared inside the filter it was a fresh closure per row,
+        // and its own recursion re-created it again for every nested value.
+        const checkValue = (val: any): boolean => {
+            if (val === null || val === undefined) return false;
+            if (typeof val === 'object') return Object.values(val).some((v) => checkValue(v));
+            return String(val).toLowerCase().replace(/\s+/g, '').includes(normalizedQuery);
+        };
+
+        const from = dateFrom ? dateFrom.getTime() : null;
+        const to = dateTo ? dateTo.getTime() : null;
+
+        return payoutHistory.filter((row: any) => {
+            // The whole of agent_commission_history, narrowed to this agent's own
+            // rows. The API already does this for a non-admin account; repeating
+            // it here means a role the server counts as an administrator can
+            // never leak another agent's payouts into an agent's screen.
+            if (!isAdminViewer) {
+                if (userId === null) return false;
+                if (Number(row.agent_id) !== Number(userId)) return false;
+            }
+
+            const matchesSearch = !hasSearch || checkValue(row);
+
+            if (from !== null || to !== null) {
+                const dateVal = row.created_at || (row as any).date || (row as any).processed_at;
                 if (!dateVal) return matchesSearch;
                 const itemDate = new Date(dateVal).getTime();
-                if (dateFrom && itemDate < dateFrom.getTime()) return false;
-                if (dateTo && itemDate > dateTo.getTime()) return false;
+                if (from !== null && itemDate < from) return false;
+                if (to !== null && itemDate > to) return false;
             }
             return matchesSearch;
         });
-    }, [rawData, searchTerm, dateFrom, dateTo]);
+    }, [payoutHistory, identityReady, isAdminViewer, userId, searchTerm, dateFrom, dateTo]);
 
     const handleRowClick = (record: CommissionData | PayoutHistoryData) => {
         setSelectedRecord(record);
@@ -168,58 +221,30 @@ const Commission: React.FC = () => {
         }
     };
 
-    const handleOpenPayout = () => {
-        if (activeTab === 'incentives') {
-            setShowIncentiveModal(true);
-        } else if (activeTab === 'bonus') {
-            setShowBonusModal(true);
-        } else {
-            setShowPayoutModal(true);
-        }
-    };
-
     const handleExport = () => {
-        // Export the visible rows for the active tab. RN exportToPDF falls back to CSV share.
-        const columnMap: Record<TabKey, { key: string; label: string }[]> = {
-            payouts: [
-                { key: 'id', label: 'ID' },
-                { key: 'ref_number', label: 'Ref Number' },
-                { key: 'total_amount', label: 'Total Amount' },
-                { key: 'commission_id_list', label: 'Job Orders' },
-                { key: 'created_by', label: 'Processed By' },
-            ],
-            incentives: [
-                { key: 'id', label: 'ID' },
-                { key: 'agent_name', label: 'Agent' },
-                { key: 'job_order_id', label: 'Job Order' },
-                { key: 'batch_number', label: 'Batch' },
-                { key: 'quota_reached', label: 'Quota Reached' },
-                { key: 'incentive_value', label: 'Incentive Value' },
-                { key: 'processed_at', label: 'Processed At' },
-            ],
-            bonus: [
-                { key: 'id', label: 'ID' },
-                { key: 'ref_number', label: 'Ref Number' },
-                { key: 'type', label: 'Type' },
-                { key: 'total_amount', label: 'Total Amount' },
-                { key: 'created_by', label: 'Processed By' },
-            ],
-        };
+        // The same columns the web Agent Payout exports, so the two reports read
+        // alike. RN exportToPDF falls back to CSV share.
+        const columns = [
+            { key: 'id', label: 'ID' },
+            { key: 'ref_number', label: 'Ref Number' },
+            { key: 'type', label: 'Type' },
+            { key: 'total_amount', label: 'Total Amount' },
+            { key: 'commission_id_list', label: 'Job Orders' },
+            { key: 'created_by', label: 'Created By' },
+            { key: 'status', label: 'Status' },
+            { key: 'approved_by', label: 'Approved By' },
+        ];
 
         const getExportValue = (row: any, key: string) => {
             const val = row[key];
-            if (key === 'total_amount' || key === 'amount' || key === 'incentive_value') return formatAmount(val);
-            if (key === 'created_at' || key === 'date' || key === 'processed_at') return val ? new Date(val).toLocaleString() : '-';
+            if (key === 'total_amount') return formatAmount(val);
+            if (key === 'type') return typeLabel(val);
+            if (key === 'status') return val || 'Pending';
+            if (key === 'created_at') return val ? new Date(val).toLocaleString() : '-';
             return val ?? '-';
         };
 
-        const titleMap: Record<TabKey, string> = {
-            payouts: 'Commission Payout History Report',
-            incentives: 'Incentives History Report',
-            bonus: 'Bonus Payout History Report',
-        };
-
-        exportToPDF(titleMap[activeTab], `commission_${activeTab}_export`, columnMap[activeTab], filteredData, getExportValue);
+        exportToPDF('Commission History Report', 'commission_history_export', columns, filteredData, getExportValue);
     };
 
     const primaryColor = colorPalette?.primary || '#7c3aed';
@@ -230,55 +255,19 @@ const Commission: React.FC = () => {
     const mutedColor = '#6b7280';
     const faintColor = '#9ca3af';
 
-    const TabButton = ({ id, label, icon: Icon }: { id: TabKey; label: string; icon: any }) => {
-        const active = activeTab === id;
-        return (
-            <TouchableOpacity
-                onPress={() => {
-                    setActiveTab(id);
-                    setShowDetails(false);
-                    setSelectedRecord(null);
-                }}
-                style={{
-                    flex: 1,
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                    paddingVertical: 12,
-                    borderBottomWidth: 2,
-                    borderBottomColor: active ? primaryColor : 'transparent',
-                }}
-            >
-                <Icon size={16} color={active ? primaryColor : mutedColor} />
-                <Text style={{ fontSize: 13, fontWeight: '600', color: active ? primaryColor : mutedColor }}>{label}</Text>
-            </TouchableOpacity>
-        );
-    };
-
     const renderCard = ({ item }: { item: any }) => {
-        const isIncentive = activeTab === 'incentives';
-        const isBonus = activeTab === 'bonus';
+        const payout = isPayoutType(item.type);
+        const add = isAddType(item.type);
+        const amtColor = payout ? '#ef4444' : add ? '#16a34a' : textColor;
+        const sign = payout ? '-' : add ? '+' : '';
 
-        // Primary amount + label per tab.
-        let amountNode: React.ReactNode = null;
-        if (isIncentive) {
-            amountNode = (
-                <Text style={{ fontSize: 15, fontWeight: '700', color: '#16a34a' }}>
-                    +{formatAmount(item.incentive_value)}
-                </Text>
-            );
-        } else {
-            const isPayoutType = item.type === 'incentives_payout';
-            const isAddType = item.type === 'incentives';
-            const amtColor = isPayoutType ? '#ef4444' : isAddType ? '#16a34a' : textColor;
-            const sign = isPayoutType ? '-' : isAddType ? '+' : '';
-            amountNode = (
-                <Text style={{ fontSize: 15, fontWeight: '700', color: amtColor }}>
-                    {sign}{formatAmount(item.total_amount)}
-                </Text>
-            );
-        }
+        // Approval state, read the same way as the web table: settled in green,
+        // awaiting action in amber, declined in red.
+        const status = item.status || 'Pending';
+        const settled = status === 'Paid' || status === 'Approved';
+        const rejected = status === 'Rejected';
+        const statusBg = settled ? '#dcfce7' : rejected ? '#fee2e2' : '#fef3c7';
+        const statusFg = settled ? '#15803d' : rejected ? '#b91c1c' : '#b45309';
 
         return (
             <TouchableOpacity
@@ -295,58 +284,43 @@ const Commission: React.FC = () => {
             >
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <View style={{ flex: 1, paddingRight: 10 }}>
-                        {isIncentive ? (
-                            <>
-                                <Text style={{ fontSize: 14, fontWeight: '600', color: textColor }}>
-                                    {item.agent_name || '---'}
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: '#3b82f6', fontVariant: ['tabular-nums'] }}>
+                            {item.ref_number || `#${item.id}`}
+                        </Text>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                            <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: payout ? '#fee2e2' : '#dcfce7' }}>
+                                <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: payout ? '#b91c1c' : '#15803d' }}>
+                                    {typeLabel(item.type)}
                                 </Text>
-                                <Text style={{ fontSize: 12, color: '#3b82f6', marginTop: 2 }}>
-                                    JO #{item.job_order_id ?? '---'}
-                                    {item.batch_number != null ? `  ·  Batch ${item.batch_number}` : ''}
+                            </View>
+                            <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: statusBg }}>
+                                <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: statusFg }}>
+                                    {status}
                                 </Text>
-                                {item.quota_reached != null ? (
-                                    <Text style={{ fontSize: 12, color: mutedColor, marginTop: 2 }}>
-                                        Quota Reached: {item.quota_reached}
-                                    </Text>
-                                ) : null}
-                                <Text style={{ fontSize: 11, color: faintColor, marginTop: 4 }}>
-                                    {item.processed_at ? new Date(item.processed_at).toLocaleString() : '---'}
-                                </Text>
-                            </>
-                        ) : (
-                            <>
-                                <Text style={{ fontSize: 14, fontWeight: '600', color: '#3b82f6', fontVariant: ['tabular-nums'] }}>
-                                    {item.ref_number || `#${item.id}`}
-                                </Text>
-                                {isBonus && item.type ? (
-                                    <View style={{ alignSelf: 'flex-start', marginTop: 4, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: item.type === 'Bonus_payout' ? '#fee2e2' : '#dcfce7' }}>
-                                        <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: item.type === 'Bonus_payout' ? '#b91c1c' : '#15803d' }}>
-                                            {item.type === 'Bonus_payout' ? 'Payout' : 'Add Bonus'}
-                                        </Text>
-                                    </View>
-                                ) : null}
-                                {item.agent_name ? (
-                                    <Text style={{ fontSize: 12, color: mutedColor, marginTop: 2 }}>{item.agent_name}</Text>
-                                ) : null}
-                                {item.commission_id_list ? (
-                                    <Text style={{ fontSize: 12, color: '#60a5fa', marginTop: 2 }} numberOfLines={1}>
-                                        {item.commission_id_list.split(',').map((id: string) => `#${id.trim()}`).join(', ')}
-                                    </Text>
-                                ) : null}
-                                <Text style={{ fontSize: 11, color: faintColor, marginTop: 4 }}>
-                                    {item.created_at ? new Date(item.created_at).toLocaleString() : '---'}
-                                    {item.created_by ? `  ·  ${item.created_by}` : ''}
-                                </Text>
-                            </>
-                        )}
+                            </View>
+                        </View>
+                        {item.agent_name ? (
+                            <Text style={{ fontSize: 12, color: mutedColor, marginTop: 4 }}>{item.agent_name}</Text>
+                        ) : null}
+                        {item.commission_id_list ? (
+                            <Text style={{ fontSize: 12, color: '#60a5fa', marginTop: 2 }} numberOfLines={1}>
+                                {item.commission_id_list.split(',').map((id: string) => `#${id.trim()}`).join(', ')}
+                            </Text>
+                        ) : null}
+                        <Text style={{ fontSize: 11, color: faintColor, marginTop: 4 }}>
+                            {item.created_at ? new Date(item.created_at).toLocaleString() : '---'}
+                            {item.created_by ? `  ·  ${item.created_by}` : ''}
+                        </Text>
                     </View>
-                    <View style={{ alignItems: 'flex-end' }}>{amountNode}</View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: amtColor }}>
+                            {sign}{formatAmount(item.total_amount)}
+                        </Text>
+                    </View>
                 </View>
             </TouchableOpacity>
         );
     };
-
-    const headerTitle = activeTab === 'incentives' ? 'Incentives History' : activeTab === 'bonus' ? 'Bonus History' : 'Commission History';
 
     if (isLoading && payoutHistory.length === 0) {
         return (
@@ -368,10 +342,10 @@ const Commission: React.FC = () => {
                 borderBottomColor: borderColor,
             }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                    <Text style={{ fontSize: 18, fontWeight: '700', color: textColor }}>{headerTitle}</Text>
-                    {activeTab !== 'incentives' && canPayOut ? (
+                    <Text style={{ fontSize: 18, fontWeight: '700', color: textColor }}>Commission History</Text>
+                    {canPayOut ? (
                         <TouchableOpacity
-                            onPress={handleOpenPayout}
+                            onPress={() => setShowPayoutModal(true)}
                             style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, backgroundColor: primaryColor }}
                         >
                             <Plus size={14} color="#ffffff" />
@@ -472,13 +446,6 @@ const Commission: React.FC = () => {
                 ) : null}
             </View>
 
-            {/* Tabs */}
-            <View style={{ flexDirection: 'row', backgroundColor: cardBg, borderBottomWidth: 1, borderBottomColor: borderColor }}>
-                <TabButton id="payouts" label="Commission" icon={History} />
-                <TabButton id="incentives" label="Incentives" icon={Gift} />
-                <TabButton id="bonus" label="Bonus" icon={Gift} />
-            </View>
-
             {/* List */}
             <FlatList
                 data={filteredData}
@@ -491,11 +458,6 @@ const Commission: React.FC = () => {
                 ListEmptyComponent={
                     <View style={{ paddingVertical: 48, alignItems: 'center' }}>
                         <Text style={{ fontSize: 14, fontStyle: 'italic', color: faintColor }}>No matching records found</Text>
-                        {activeTab === 'incentives' && incentiveHistory.length === 0 ? (
-                            <Text style={{ fontSize: 12, color: faintColor, marginTop: 4, textAlign: 'center' }}>
-                                Incentive history is not available on mobile yet.
-                            </Text>
-                        ) : null}
                     </View>
                 }
             />
@@ -504,7 +466,7 @@ const Commission: React.FC = () => {
             {showDetails && selectedRecord ? (
                 <CommissionDetails
                     data={selectedRecord}
-                    type={activeTab}
+                    type="payouts"
                     isMobile
                     onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
                     onPrevious={currentIndex > 0 ? handlePrevious : undefined}
@@ -517,20 +479,6 @@ const Commission: React.FC = () => {
                 isOpen={showPayoutModal}
                 onClose={() => setShowPayoutModal(false)}
                 onSuccess={() => { setShowPayoutModal(false); fetchData(); }}
-            />
-
-            {/* Incentives Payout Modal */}
-            <IncentivesPayoutModal
-                isOpen={showIncentiveModal}
-                onClose={() => setShowIncentiveModal(false)}
-                onSuccess={() => { setShowIncentiveModal(false); handleRefresh(); }}
-            />
-
-            {/* Bonus Payout Modal */}
-            <BonusPayoutModal
-                isOpen={showBonusModal}
-                onClose={() => setShowBonusModal(false)}
-                onSuccess={() => { setShowBonusModal(false); fetchData(); }}
             />
         </View>
     );

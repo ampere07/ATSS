@@ -4,7 +4,7 @@ import { CheckCircle } from 'lucide-react-native';
 import Svg, { Circle, G } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
-import { agentOwnsReferral } from '../utils/agentReferral';
+import { createAgentReferralMatcher, getOnsiteStatus, isDoneOnsiteStatus } from '../utils/agentReferral';
 import { useJobOrderContext } from '../contexts/JobOrderContext';
 import { 
     fetchAgentAchievements, 
@@ -84,20 +84,19 @@ const Achievement: React.FC = () => {
         // The shared rule, not a substring test of its own: a referral is now
         // stored as the agent's user id, which contains none of their name, and
         // `includes` would also have counted "Ana" as a match for "Joana".
-        const filtered = jobOrders.filter(jo =>
-            agentOwnsReferral(
-                jo.Referred_By || jo.referred_by || '',
-                agentName,
-                agentEmail,
-                agentId
-            )
-        );
+        //
+        // Built once and counted in one pass: this used to walk the whole job
+        // order set twice and re-derive the agent's name for every row of it,
+        // all to produce a single number.
+        const ownsReferral = createAgentReferralMatcher(agentName, agentEmail, agentId);
 
-        return filtered.filter(jo => {
-            const status = (jo.Onsite_Status || jo.onsite_status || '').toLowerCase().trim();
-            return status === 'done' || status === 'completed';
-        }).length;
-    }, [jobOrders, agentEmail, agentName]);
+        let onboarded = 0;
+        for (const jo of jobOrders) {
+            if (!ownsReferral(jo.Referred_By || jo.referred_by || '')) continue;
+            if (isDoneOnsiteStatus(getOnsiteStatus(jo))) onboarded++;
+        }
+        return onboarded;
+    }, [jobOrders, agentEmail, agentName, agentId]);
 
     const target = 30;
     

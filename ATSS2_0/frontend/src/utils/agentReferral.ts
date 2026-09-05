@@ -137,35 +137,64 @@ export const resolveReferralLabel = (value: unknown, agents: any[]): string => {
 // a whole word) in Referred By. This covers values like "John Rusell Ampere" for
 // an account named "John Ampere", while still rejecting unrelated names. Email
 // exact-match is also accepted.
+
+/** Tests one Referred By value against an agent fixed when the matcher was made. */
+export type AgentReferralMatcher = (referredByRaw: string) => boolean;
+
+/**
+ * The ownership test above, with the AGENT's half of it worked out once.
+ *
+ * Use this wherever a list is scanned. Every screen an agent opens filters the
+ * whole job order set through this rule, and the plain call below re-derives the
+ * agent's normalized name, its token list and their lowercased email on every
+ * row — the same three values, thousands of times over, for a name that cannot
+ * change while the screen is open. Hoisting them out is the difference between
+ * work proportional to the list and work proportional to the list times the
+ * length of the agent's name.
+ *
+ * The decision itself is unchanged, and is written only here: agentOwnsReferral
+ * delegates to it, so the two can never drift apart.
+ */
+export const createAgentReferralMatcher = (
+  fullName: string,
+  email: string,
+  agentId?: number | string | null
+): AgentReferralMatcher => {
+  const id = agentId === null || agentId === undefined ? null : Number(agentId);
+  // Compared against the RAW referral, not a normalized one: normalizeName turns
+  // dots into spaces, so "juan@x.com" would become "juan@x com" and could never
+  // equal the address it came from.
+  const em = (email || '').toLowerCase().trim();
+  const fn = normalizeName(fullName);
+  const nameTokens = fn ? fn.split(' ').filter(t => t.length >= 2) : [];
+
+  return (referredByRaw: string): boolean => {
+    // An id-form referral is decided here and goes no further: "37" is not a
+    // name, and letting it reach the tolerant branch could only ever be wrong.
+    const referralId = agentReferralId(referredByRaw);
+    if (referralId !== null) return id !== null && id === referralId;
+
+    const ref = normalizeName(referredByRaw);
+    if (!ref) return false;
+
+    if (em && (referredByRaw || '').toLowerCase().trim() === em) return true;
+
+    if (!fn) return false;
+    if (ref === fn) return true;
+
+    if (nameTokens.length === 0) return false;
+    const refTokens = new Set(ref.split(' '));
+    return nameTokens.every(t => refTokens.has(t));
+  };
+};
+
 export const agentOwnsReferral = (
   referredByRaw: string,
   fullName: string,
   email: string,
   agentId?: number | string | null
 ): boolean => {
-  // An id-form referral is decided here and goes no further: "agent:37" is not a
-  // name, and letting it reach the tolerant branch could only ever be wrong.
-  const referralId = agentReferralId(referredByRaw);
-  if (referralId !== null) {
-    return agentId !== null && agentId !== undefined && Number(agentId) === referralId;
-  }
-
-  const ref = normalizeName(referredByRaw);
-  if (!ref) return false;
-
-  // Compare the email against the RAW referral, not the normalized one: normalizeName
-  // turns dots into spaces, so "juan@x.com" would become "juan@x com" and could never
-  // equal the address it came from.
-  const em = (email || '').toLowerCase().trim();
-  if (em && (referredByRaw || '').toLowerCase().trim() === em) return true;
-
-  const fn = normalizeName(fullName);
-  if (!fn) return false;
-  if (ref === fn) return true;
-
-  const refTokens = new Set(ref.split(' '));
-  const nameTokens = fn.split(' ').filter(t => t.length >= 2);
-  return nameTokens.length > 0 && nameTokens.every(t => refTokens.has(t));
+  return createAgentReferralMatcher(fullName, email, agentId)(referredByRaw);
 };
 
 // Normalized onsite status of a job order.
@@ -193,6 +222,28 @@ export const isRescheduleOnsiteStatus = (status: string): boolean =>
 // Job orders that have not been visited yet.
 export const isInProgressOnsiteStatus = (status: string): boolean =>
   status === 'in progress' || status === 'inprogress' || status === 'in-progress' || status === 'pending';
+
+/**
+ * Where a job order sits in an agent's own list.
+ *
+ * An agent reads their referrals as work in flight: the visits happening now
+ * first, then the ones waiting on a return visit, then the ones that fell
+ * through, with the finished installations filed at the very bottom. A record
+ * whose status matches none of those sits just above the finished work rather
+ * than being lost among it.
+ *
+ * Read by both the web portal and the mobile app so an agent's list reads the
+ * same on either. Ordering WITHIN a band is each page's own business - both
+ * keep their newest-first default.
+ */
+export const agentJobOrderBand = (jo: any): number => {
+  const status = getOnsiteStatus(jo);
+  if (isInProgressOnsiteStatus(status)) return 0;
+  if (isRescheduleOnsiteStatus(status)) return 1;
+  if (isFailedOnsiteStatus(status)) return 2;
+  if (isDoneOnsiteStatus(status)) return 4;
+  return 3;
+};
 
 export const isAgentUser = (role?: string | null, roleId?: number | string | null): boolean =>
   (role || '').toLowerCase().trim() === 'agent' || String(roleId ?? '') === String(AGENT_ROLE_ID);

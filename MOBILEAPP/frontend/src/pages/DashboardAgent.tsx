@@ -11,12 +11,17 @@ import { useJobOrderContext } from '../contexts/JobOrderContext';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { fetchAgentCommissionHistory, fetchAgentAchievements, claimAgentAchievement, fetchAgentApplicationCount } from '../services/api';
 import {
-    agentOwnsReferral,
     ACHIEVEMENT_TIERS,
     AchievementTier,
     clockSkewFrom,
+    createAgentReferralMatcher,
     formatCountdown,
+    getOnsiteStatus,
+    isDoneOnsiteStatus,
+    isFailedOnsiteStatus,
+    isInProgressOnsiteStatus,
     isOnOrAfterAgentStartDate,
+    isRescheduleOnsiteStatus,
     millisUntilReset,
     parseResetsAt
 } from '../utils/agentReferral';
@@ -222,30 +227,32 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         // Without this the tiles would count an agent's whole history while the
         // list below shows only what the programme covers, and neither those
         // figures nor the achievement count would reconcile with the other.
-        const filtered = jobOrders.filter(jo =>
-            agentOwnsReferral(jo.Referred_By || jo.referred_by || '', agentName, agentEmail, user?.id ?? null)
-            && isOnOrAfterAgentStartDate(jo)
-        );
+        // One pass, and one status read per job order. The four tiles used to be
+        // four separate scans of the list, each normalizing the same statuses
+        // again — five walks of every job order the agent owns to produce four
+        // numbers. A status belongs to at most one tile, so the buckets are
+        // counted together and the else-if chain stops at the first match.
+        //
+        // The status lists are the shared predicates rather than literals copied
+        // in here, so this screen and the web dashboard can only ever agree on
+        // what counts as onboarded.
+        const ownsReferral = createAgentReferralMatcher(agentName, agentEmail, user?.id ?? null);
 
-        const inProgress = filtered.filter(jo => {
-            const status = (jo.Onsite_Status || jo.onsite_status || '').toLowerCase().trim();
-            return status === 'in progress' || status === 'inprogress' || status === 'in-progress' || status === 'pending';
-        }).length;
+        let inProgress = 0;
+        let onboard = 0;
+        let failed = 0;
+        let reschedule = 0;
 
-        const onboard = filtered.filter(jo => {
-            const status = (jo.Onsite_Status || jo.onsite_status || '').toLowerCase().trim();
-            return status === 'done' || status === 'completed';
-        }).length;
+        for (const jo of jobOrders) {
+            if (!ownsReferral(jo.Referred_By || jo.referred_by || '')) continue;
+            if (!isOnOrAfterAgentStartDate(jo)) continue;
 
-        const failed = filtered.filter(jo => {
-            const status = (jo.Onsite_Status || jo.onsite_status || '').toLowerCase().trim();
-            return status === 'failed' || status === 'cancelled' || status === 'suspended' || status === 'disapproved';
-        }).length;
-
-        const reschedule = filtered.filter(jo => {
-            const status = (jo.Onsite_Status || jo.onsite_status || '').toLowerCase().trim();
-            return status === 'reschedule' || status === 'rescheduled' || status === 're-schedule';
-        }).length;
+            const status = getOnsiteStatus(jo);
+            if (isInProgressOnsiteStatus(status)) inProgress++;
+            else if (isDoneOnsiteStatus(status)) onboard++;
+            else if (isFailedOnsiteStatus(status)) failed++;
+            else if (isRescheduleOnsiteStatus(status)) reschedule++;
+        }
 
         return {
             referredCount: inProgress,

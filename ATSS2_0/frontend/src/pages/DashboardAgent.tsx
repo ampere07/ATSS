@@ -7,8 +7,8 @@ import {
     ACHIEVEMENT_TIERS,
     AchievementTier,
     AgentIdentity,
-    agentOwnsReferral,
     clockSkewFrom,
+    createAgentReferralMatcher,
     formatCountdown,
     getOnsiteStatus,
     getStoredAgentIdentity,
@@ -378,19 +378,35 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         // Without this the tiles would count an agent's whole history while the
         // list below shows only what the programme covers, and neither those
         // figures nor the achievement count would reconcile with the other.
-        const mine = jobOrders.filter((jo: any) =>
-            agentOwnsReferral(jo.Referred_By || jo.referred_by || '', identity.fullName, identity.email, identity.id)
-            && isOnOrAfterAgentStartDate(jo)
-        );
+        //
+        // One pass, and one status read per job order. The four tiles used to be
+        // four separate scans of the list, each normalizing the same statuses
+        // again — five walks of every job order the agent owns to produce four
+        // numbers. A status belongs to at most one tile, so the buckets are
+        // counted together and the else-if chain stops at the first match.
+        const ownsReferral = createAgentReferralMatcher(identity.fullName, identity.email, identity.id);
 
-        const countBy = (predicate: (status: string) => boolean) =>
-            mine.filter((jo: any) => predicate(getOnsiteStatus(jo))).length;
+        let inProgress = 0;
+        let onboarded = 0;
+        let failed = 0;
+        let reschedule = 0;
+
+        for (const jo of jobOrders as any[]) {
+            if (!ownsReferral(jo.Referred_By || jo.referred_by || '')) continue;
+            if (!isOnOrAfterAgentStartDate(jo)) continue;
+
+            const status = getOnsiteStatus(jo);
+            if (isInProgressOnsiteStatus(status)) inProgress++;
+            else if (isDoneOnsiteStatus(status)) onboarded++;
+            else if (isFailedOnsiteStatus(status)) failed++;
+            else if (isRescheduleOnsiteStatus(status)) reschedule++;
+        }
 
         return {
-            inProgressCount: countBy(isInProgressOnsiteStatus),
-            onboardedCount: countBy(isDoneOnsiteStatus),
-            failedCount: countBy(isFailedOnsiteStatus),
-            rescheduleCount: countBy(isRescheduleOnsiteStatus)
+            inProgressCount: inProgress,
+            onboardedCount: onboarded,
+            failedCount: failed,
+            rescheduleCount: reschedule
         };
     }, [jobOrders, identity.id, identity.fullName, identity.email]);
 

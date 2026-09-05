@@ -11,7 +11,7 @@ import { JobOrder } from '../types/jobOrder';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { techInOutService } from '../services/techInOutService';
 import TimeInOutModal from '../modals/TimeInOutModal';
-import { agentOwnsReferral, getOnsiteStatus, isDoneOnsiteStatus } from '../utils/agentReferral';
+import { agentJobOrderBand, createAgentReferralMatcher } from '../utils/agentReferral';
 import {
   buildTechnicianLockedJobOrderIds,
   isTechnicianUser,
@@ -517,57 +517,105 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
     // never sees records it is not entitled to, even for a single frame.
     if (!identityReady) return [];
 
+    // Everything that depends on the signed-in user or on the filter settings —
+    // and so is the same for every row — is worked out here, once, instead of
+    // per job order. The role words were being lowercased, the agent's own name
+    // re-normalized, today's date rebuilt and every funnel filter's needle
+    // re-lowercased for each record in the list.
     const lowerSearch = debouncedSearch.toLowerCase();
+    const hasSearch = debouncedSearch !== '';
+
+    const role = userRole.toLowerCase();
+    const isSuperUser =
+      userRoleId === 1 || userRoleId === 7 || userRoleId === 8 ||
+      role === 'superadmin' || role === 'administrator' || role === 'headtech';
+    const isAgentRole = role === 'agent' || userRoleId === 4;
+    const isTechnicianRole = role === 'technician' || userRoleId === 2;
+
+    // An agent with neither name nor email must see nothing, never everyone's
+    // job orders.
+    const agentKnowsWhoTheyAre = Boolean(userFullName) || Boolean(userEmail) || userId !== null;
+    const ownsReferral = createAgentReferralMatcher(userFullName, userEmail, userId);
+
+    const now = new Date();
+    const todayYear = now.getFullYear();
+    const todayMonth = now.getMonth();
+    const todayDate = now.getDate();
+
+    // The funnel filters, prepared once: extractor resolved, text lowercased,
+    // bounds parsed. A filter that excludes nothing is dropped here rather than
+    // being re-examined and skipped for every row.
+    const funnelChecks: ((jo: JobOrder) => boolean)[] = [];
+    for (const key in filterValues) {
+      const filter = filterValues[key];
+      const extractor = itemExtractorMap[key];
+      if (!extractor) continue;
+
+      if (filter.type === 'text') {
+        if (!filter.value) continue;
+        const needle = filter.value.toLowerCase();
+        funnelChecks.push(jo => String(extractor(jo) || '').toLowerCase().includes(needle));
+      } else if (filter.type === 'number') {
+        const from = filter.from !== undefined ? Number(filter.from) : null;
+        const to = filter.to !== undefined ? Number(filter.to) : null;
+        if (from === null && to === null) continue;
+        funnelChecks.push(jo => {
+          const num = parseFloat(extractor(jo));
+          if (from !== null && num < from) return false;
+          if (to !== null && num > to) return false;
+          return true;
+        });
+      } else if (filter.type === 'date') {
+        const from = filter.from ? new Date(String(filter.from)).getTime() : null;
+        const to = filter.to ? new Date(String(filter.to)).getTime() : null;
+        if (from === null && to === null) continue;
+        funnelChecks.push(jo => {
+          const stamp = new Date(extractor(jo)).getTime();
+          if (from !== null && stamp < from) return false;
+          if (to !== null && stamp > to) return false;
+          return true;
+        });
+      }
+    }
+
     return jobOrders.filter(jobOrder => {
-      const fullName = getClientFullName(jobOrder).toLowerCase();
-      const matchesSearch = debouncedSearch === '' ||
-        fullName.includes(lowerSearch) ||
-        ((jobOrder.Address || jobOrder.address) || '').toLowerCase().includes(lowerSearch) ||
-        ((jobOrder.Assigned_Email || jobOrder.assigned_email) || '').toLowerCase().includes(lowerSearch);
+      // Only built when there is something to match it against: with the box
+      // empty this used to assemble and lowercase every customer's full name on
+      // every render, to compare it with nothing.
+      if (hasSearch) {
+        const matchesSearch =
+          getClientFullName(jobOrder).toLowerCase().includes(lowerSearch) ||
+          ((jobOrder.Address || jobOrder.address) || '').toLowerCase().includes(lowerSearch) ||
+          ((jobOrder.Assigned_Email || jobOrder.assigned_email) || '').toLowerCase().includes(lowerSearch);
 
-      if (!matchesSearch) return false;
-
-      const isSuperUser = 
-        userRoleId === 1 || userRoleId === 7 || userRoleId === 8 ||
-        userRole.toLowerCase() === 'superadmin' || userRole.toLowerCase() === 'administrator' || userRole.toLowerCase() === 'headtech';
+        if (!matchesSearch) return false;
+      }
 
       // Role-based filtering: Agents (role_id 4) only see their own referrals.
       //
-      // An agent sees the referrals they own that are still in flight, however
-      // long ago they were raised — there is no date cut-off. Completed ones are
-      // left out: they are the Agent History page's, and this page is what is
-      // still to come.
-      if (!isSuperUser && (userRole.toLowerCase() === 'agent' || userRoleId === 4)) {
-        const referredBy = jobOrder.Referred_By || jobOrder.referred_by || '';
-
-        // An agent with neither name nor email must see nothing, never
-        // everyone's job orders.
-        if (!userFullName && !userEmail && userId === null) return false;
-
-        if (!agentOwnsReferral(referredBy, userFullName, userEmail, userId)) return false;
-
-        // Done and completed belong to Agent History.
-        if (isDoneOnsiteStatus(getOnsiteStatus(jobOrder))) return false;
+      // An agent sees every referral they own, however long ago it was raised —
+      // there is no date cut-off, and finished ones are kept rather than
+      // dropped: they read at the bottom of the list (see sortedJobOrders) so
+      // the work still in flight leads.
+      if (!isSuperUser && isAgentRole) {
+        if (!agentKnowsWhoTheyAre) return false;
+        if (!ownsReferral(jobOrder.Referred_By || jobOrder.referred_by || '')) return false;
       }
 
       // Hide job orders with onsite status "done", "completed", or "failed" after 1 day
       // Only applicable for technicians
-      if (!isSuperUser && debouncedSearch === '') {
-        const isTechnician = userRole.toLowerCase() === 'technician' || userRoleId === 2;
-        if (isTechnician) {
-          const onsiteStatus = (jobOrder.Onsite_Status || jobOrder.onsite_status || '').toLowerCase().trim();
-          if (onsiteStatus === 'done' || onsiteStatus === 'completed' || onsiteStatus === 'failed') {
-            // Use updated_at or EndTimeStamp to determine when it was completed
-            const completionTime = jobOrder.Updated_At || jobOrder.updated_at || jobOrder.EndTimeStamp || jobOrder.end_timestamp;
-            if (completionTime) {
-              const completionDate = new Date(completionTime);
-              const today = new Date();
-              const isToday = completionDate.getFullYear() === today.getFullYear() &&
-                completionDate.getMonth() === today.getMonth() &&
-                completionDate.getDate() === today.getDate();
+      if (!isSuperUser && !hasSearch && isTechnicianRole) {
+        const onsiteStatus = (jobOrder.Onsite_Status || jobOrder.onsite_status || '').toLowerCase().trim();
+        if (onsiteStatus === 'done' || onsiteStatus === 'completed' || onsiteStatus === 'failed') {
+          // Use updated_at or EndTimeStamp to determine when it was completed
+          const completionTime = jobOrder.Updated_At || jobOrder.updated_at || jobOrder.EndTimeStamp || jobOrder.end_timestamp;
+          if (completionTime) {
+            const completionDate = new Date(completionTime);
+            const isToday = completionDate.getFullYear() === todayYear &&
+              completionDate.getMonth() === todayMonth &&
+              completionDate.getDate() === todayDate;
 
-              if (!isToday) return false;
-            }
+            if (!isToday) return false;
           }
         }
       }
@@ -588,27 +636,8 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
         }
       }
 
-      // Apply funnel filters
-      for (const key in filterValues) {
-        const filter = filterValues[key];
-        const extractor = itemExtractorMap[key];
-        if (!extractor) continue;
-
-        const itemValue = extractor(jobOrder);
-
-        if (filter.type === 'text' && filter.value) {
-          if (!String(itemValue || '').toLowerCase().includes(filter.value.toLowerCase())) {
-            return false;
-          }
-        } else if (filter.type === 'number') {
-          const numValue = parseFloat(itemValue);
-          if (filter.from !== undefined && numValue < Number(filter.from)) return false;
-          if (filter.to !== undefined && numValue > Number(filter.to)) return false;
-        } else if (filter.type === 'date') {
-          const dateValue = new Date(itemValue).getTime();
-          if (filter.from && dateValue < new Date(String(filter.from)).getTime()) return false;
-          if (filter.to && dateValue > new Date(String(filter.to)).getTime()) return false;
-        }
+      for (const check of funnelChecks) {
+        if (!check(jobOrder)) return false;
       }
 
       return true;
@@ -694,14 +723,22 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
       });
     }
 
-    // An agent's list is their own referral history, so it reads by recency
-    // alone. The started-first rule below pins whatever a technician currently
-    // has open to the top, which pushes an agent's completed referrals down the
-    // page for a reason that has nothing to do with them.
+    // An agent reads their referrals by status band — In Progress first, then
+    // Reschedule, then Failed, with Done last — and newest first inside each
+    // band, so the visits still happening lead and the finished installations
+    // sit at the bottom.
+    //
+    // The started-first rule below is deliberately not applied: it pins
+    // whatever a technician currently has open to the top, which reorders an
+    // agent's list for a reason that has nothing to do with them.
     if (isAgentViewer) {
-      return [...filteredJobOrders].sort(
-        (a, b) => (parseInt(String(b.id), 10) || 0) - (parseInt(String(a.id), 10) || 0)
-      );
+      return [...filteredJobOrders].sort((a, b) => {
+        const bandA = agentJobOrderBand(a);
+        const bandB = agentJobOrderBand(b);
+        if (bandA !== bandB) return bandA - bandB;
+
+        return (parseInt(String(b.id), 10) || 0) - (parseInt(String(a.id), 10) || 0);
+      });
     }
 
     // Every other role keeps the existing started-first, newest-first ordering.

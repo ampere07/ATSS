@@ -3,6 +3,7 @@ import { Gift, Plus, RefreshCw, Search, Loader2 } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { commissionService } from '../services/commissionService';
 import { usePermissions } from '../hooks/usePermissions';
+import { getStoredAgentIdentity } from '../utils/agentReferral';
 import BonusPayoutModal from '../modals/BonusPayoutModal';
 
 interface ColumnDefinition {
@@ -24,23 +25,68 @@ const bonusColumns: ColumnDefinition[] = [
     { key: 'approved_by', label: 'Approved By', minWidth: 180 },
 ];
 
+// What an agent reads: the columns Agent Payout shows for the same rows, so the
+// record an agent sees and the one an administrator signs off are laid out alike.
+const agentColumns: ColumnDefinition[] = [
+    { key: 'id', label: 'ID', minWidth: 80 },
+    { key: 'ref_number', label: 'Ref Number', minWidth: 150 },
+    { key: 'type', label: 'Type', minWidth: 120 },
+    { key: 'total_amount', label: 'Total Amount', minWidth: 150, align: 'right' },
+    { key: 'commission_id_list', label: 'Job Orders', minWidth: 200 },
+    { key: 'created_by', label: 'Created By', minWidth: 180 },
+    { key: 'status', label: 'Status', minWidth: 120 },
+    { key: 'approved_by', label: 'Approved By', minWidth: 180 },
+];
+
+// The transaction kind, labelled as Agent Payout labels it. `type` is a loose
+// column — commission, incentives, incentives_payout, Bonus, Bonus_payout, all,
+// achievement — so an unrecognised value is shown as stored rather than hidden.
+const TYPE_LABELS: Record<string, string> = {
+    incentives_payout: 'Payout',
+    incentives: 'Add Incentives',
+    Bonus_payout: 'Payout',
+    Bonus: 'Add Bonus',
+};
+
+const typeLabel = (type?: string | null): string => (type ? TYPE_LABELS[type] || type : '—');
+
 const PAGE_SIZE = 50;
 
 /**
- * Agent bonus history.
+ * The agent history screen, and the administrator's Bonus History.
  *
- * Reads /commissions/bonus-history directly rather than through
- * useCommissionStore: that store loads earnings, payouts and incentives too, and
- * this page shows none of them. Its own small piece of state also means the
- * 3-second poll that store runs — and the re-render churn that came with it —
- * is not inherited here.
+ * One page under two sidebar labels, reading a different table for each — the
+ * two roles want different things from it:
  *
- * The endpoint is scoped server side to what the signed-in user may see, so an
- * agent reaching this page gets their own records and nothing else.
+ *   - An AGENT reads their own row of agent_commission_history: every payout,
+ *     incentive and bonus movement against them, in one list. That table's
+ *     `type` column already spans all of them (commission / incentives /
+ *     incentives_payout / Bonus / Bonus_payout / all / achievement), so there is
+ *     nothing to split into tabs and no kind of record to leave out.
+ *   - Everyone else reads agent_bonus_history, which is what the "Bonus History"
+ *     entry inside the Agent group means.
+ *
+ * Reads the endpoints directly rather than through useCommissionStore: that
+ * store loads earnings alongside the history, and this page shows none of them.
+ * Its own small piece of state also means the poll that store runs — and the
+ * re-render churn that came with it — is not inherited here.
+ *
+ * Both endpoints are scoped server side to what the signed-in user may see. The
+ * agent branch narrows by id again on this side, so a role the server counts as
+ * an administrator can never put another agent's payouts on an agent's screen.
  */
 const BonusHistory: React.FC = () => {
     const { can } = usePermissions();
+    // Raising a bonus is an administrator's act against an agent, so the button
+    // has no place on the agent's own reading of their history — whatever keys
+    // the account happens to hold.
     const canManagePayouts = can('agent-payout');
+
+    // Read once: the signed-in user does not change while the page is open, and
+    // reading it up front means the first render is already the right one.
+    const identity = useMemo(() => getStoredAgentIdentity(), []);
+    const isAgentViewer = identity.isAgent;
+    const columns = isAgentViewer ? agentColumns : bonusColumns;
 
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -107,22 +153,37 @@ const BonusHistory: React.FC = () => {
     const load = useCallback(async () => {
         setIsLoading(true);
         setError(null);
+        const label = isAgentViewer ? 'history' : 'bonus history';
         try {
-            const res = await commissionService.getBonusHistory(2000, 0) as any;
+            // One list either way — the agent's whole agent_commission_history,
+            // or agent_bonus_history for everyone else.
+            const res = await (isAgentViewer
+                ? commissionService.getPayoutHistory(2000, 0)
+                : commissionService.getBonusHistory(2000, 0)) as any;
+
             if (res?.success) {
-                setRows(res.data || []);
+                const data: any[] = res.data || [];
+
+                // An agent sees only rows carrying their own id. Their name and
+                // email are not consulted: agent_commission_history points at an
+                // account by id, so the id is the only thing that can match.
+                setRows(isAgentViewer
+                    ? (identity.id === null
+                        ? []
+                        : data.filter(row => Number(row.agent_id) === Number(identity.id)))
+                    : data);
             } else {
                 setRows([]);
-                setError('Failed to load bonus history.');
+                setError(`Failed to load ${label}.`);
             }
         } catch (err: any) {
             console.error('[BonusHistory] Load failed:', err);
             setRows([]);
-            setError(err?.response?.data?.message || err?.message || 'Failed to load bonus history.');
+            setError(err?.response?.data?.message || err?.message || `Failed to load ${label}.`);
         } finally {
             setIsLoading(false);
         }
-    }, []);
+    }, [isAgentViewer, identity.id]);
 
     useEffect(() => {
         load();
@@ -149,13 +210,13 @@ const BonusHistory: React.FC = () => {
 
             if (query === '') return true;
 
-            return bonusColumns.some(col => {
+            return columns.some(col => {
                 const val = row[col.key];
                 if (val === null || val === undefined) return false;
                 return String(val).toLowerCase().replace(/\s+/g, '').includes(query);
             });
         });
-    }, [rows, searchTerm, dateFrom, dateTo]);
+    }, [rows, columns, searchTerm, dateFrom, dateTo]);
 
     const lastPage = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
     const pageRows = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
@@ -164,6 +225,54 @@ const BonusHistory: React.FC = () => {
         const n = parseFloat(String(value ?? '').replace(/[^\d.-]/g, ''));
         if (isNaN(n)) return String(value ?? '');
         return `₱${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    };
+
+    /**
+     * One cell, read the way Agent Payout reads the same columns: the kind and
+     * the approval state as badges, the job orders as #ids, the amount as money.
+     */
+    const renderCell = (row: any, key: string): React.ReactNode => {
+        const val = row[key];
+
+        if (key === 'total_amount') return formatAmount(val);
+
+        if (key === 'type') {
+            const payout = val === 'incentives_payout' || val === 'Bonus_payout';
+            return (
+                <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${payout
+                    ? isDarkMode ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-red-100 text-red-700'
+                    : isDarkMode ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-green-100 text-green-700'
+                    }`}>
+                    {typeLabel(val)}
+                </span>
+            );
+        }
+
+        if (key === 'status') {
+            // Settled states in green, awaiting action in amber, declined in red
+            // — the same reading as the Transaction List and Agent Payout.
+            const status = val || 'Pending';
+            return (
+                <span className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${(status === 'Paid' || status === 'Approved')
+                    ? isDarkMode ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-green-100 text-green-700'
+                    : status === 'Rejected'
+                        ? isDarkMode ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-red-100 text-red-700'
+                        : isDarkMode ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                    {status}
+                </span>
+            );
+        }
+
+        if (key === 'commission_id_list') {
+            return (
+                <span className="font-mono text-xs text-blue-400 font-medium">
+                    {val ? String(val).split(',').map((id: string) => `#${id.trim()}`).join(', ') : '—'}
+                </span>
+            );
+        }
+
+        return val ?? '—';
     };
 
     const surface = isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200';
@@ -180,9 +289,9 @@ const BonusHistory: React.FC = () => {
                 <div className={`p-4 border-b flex-shrink-0 ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
                     <div className="flex items-center justify-between mb-1">
                         <h2 className={`text-lg font-semibold uppercase ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
-                            BONUS HISTORY
+                            {isAgentViewer ? 'HISTORY' : 'BONUS HISTORY'}
                         </h2>
-                        {canManagePayouts && (
+                        {canManagePayouts && !isAgentViewer && (
                             <button
                                 onClick={() => setShowBonusModal(true)}
                                 className="px-3 py-1.5 rounded text-white text-sm font-medium flex items-center gap-1.5 transition-colors shadow-sm"
@@ -269,7 +378,7 @@ const BonusHistory: React.FC = () => {
 
                         {/* On mobile the sidebar is hidden, so Add has nowhere
                             else to live. */}
-                        {canManagePayouts && (
+                        {canManagePayouts && !isAgentViewer && (
                             <button
                                 onClick={() => setShowBonusModal(true)}
                                 className="md:hidden p-2 rounded border transition-colors flex-shrink-0 text-white"
@@ -296,7 +405,7 @@ const BonusHistory: React.FC = () => {
                 {isLoading && rows.length === 0 ? (
                     <div className={`flex items-center justify-center gap-2 py-16 ${textMuted}`}>
                         <Loader2 size={18} className="animate-spin" />
-                        <span>Loading bonus history...</span>
+                        <span>Loading {isAgentViewer ? 'history' : 'bonus history'}...</span>
                     </div>
                 ) : error ? (
                     <div className="py-16 text-center text-red-500">{error}</div>
@@ -304,7 +413,7 @@ const BonusHistory: React.FC = () => {
                     <table className="w-full text-sm">
                         <thead className={isDarkMode ? 'bg-gray-900' : 'bg-gray-100'}>
                             <tr>
-                                {bonusColumns.map(col => (
+                                {columns.map(col => (
                                     <th
                                         key={col.key}
                                         style={{ minWidth: col.minWidth }}
@@ -319,7 +428,7 @@ const BonusHistory: React.FC = () => {
                         <tbody>
                             {pageRows.length === 0 ? (
                                 <tr>
-                                    <td colSpan={bonusColumns.length} className={`py-16 text-center ${textMuted}`}>
+                                    <td colSpan={columns.length} className={`py-16 text-center ${textMuted}`}>
                                         No matching records found
                                     </td>
                                 </tr>
@@ -329,15 +438,13 @@ const BonusHistory: React.FC = () => {
                                     className={`border-b ${isDarkMode
                                         ? 'border-gray-800 hover:bg-gray-900' : 'border-gray-200 hover:bg-gray-50'}`}
                                 >
-                                    {bonusColumns.map(col => (
+                                    {columns.map(col => (
                                         <td
                                             key={col.key}
                                             className={`px-4 py-3 whitespace-nowrap ${col.align === 'right' ? 'text-right' : 'text-left'
                                                 } ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}
                                         >
-                                            {col.key === 'total_amount'
-                                                ? formatAmount(row[col.key])
-                                                : (row[col.key] ?? '—')}
+                                            {renderCell(row, col.key)}
                                         </td>
                                     ))}
                                 </tr>

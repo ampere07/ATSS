@@ -8,7 +8,7 @@ import { fetchAgentCommissionHistory, fetchAgentIncentiveHistory } from '../serv
 import { useJobOrderContext } from '../contexts/JobOrderContext';
 import { JobOrder } from '../types/jobOrder';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { agentOwnsReferral, getOnsiteStatus, isDoneOnsiteStatus } from '../utils/agentReferral';
+import { createAgentReferralMatcher, getOnsiteStatus, isDoneOnsiteStatus } from '../utils/agentReferral';
 
 /**
  * A status word in the colour its state calls for.
@@ -140,9 +140,17 @@ const AgentHistory: React.FC = () => {
   }, []);
 
   const agentJobOrders = useMemo(() => {
+    // Everything that does not vary per job order is worked out here rather than
+    // inside the filter: the agent's own half of the ownership test (see
+    // createAgentReferralMatcher), and the two day boundaries, which were being
+    // rebuilt through dayjs on every row the filter looked at.
+    const ownsReferral = createAgentReferralMatcher(userFullName, userEmail, userId);
+    const from = dateFrom ? dayjs(dateFrom).startOf('day').valueOf() : null;
+    const to = dateTo ? dayjs(dateTo).endOf('day').valueOf() : null;
+
     return jobOrders.filter(jo => {
       const referredBy = jo.Referred_By || jo.referred_by || '';
-      if (!agentOwnsReferral(referredBy, userFullName, userEmail, userId)) return false;
+      if (!ownsReferral(referredBy)) return false;
 
       // Only completed ("done") job orders belong in Agent History.
       if (!isDoneOnsiteStatus(getOnsiteStatus(jo))) return false;
@@ -153,12 +161,12 @@ const AgentHistory: React.FC = () => {
         if (filterType === 'paid' && cStatus !== 'paid' && cStatus !== 'done') return false;
       }
 
-      if (dateFrom || dateTo) {
+      if (from !== null || to !== null) {
         const raw = jo.created_at || (jo as any).Created_At || jo.Timestamp || jo.timestamp;
-        const d = raw ? new Date(raw) : null;
-        if (!d || isNaN(d.getTime())) return false;
-        if (dateFrom && d < dayjs(dateFrom).startOf('day').toDate()) return false;
-        if (dateTo && d > dayjs(dateTo).endOf('day').toDate()) return false;
+        const stamp = raw ? new Date(raw).getTime() : NaN;
+        if (isNaN(stamp)) return false;
+        if (from !== null && stamp < from) return false;
+        if (to !== null && stamp > to) return false;
       }
       return true;
     }).sort((a, b) => (parseInt(String(b.id)) || 0) - (parseInt(String(a.id)) || 0));
@@ -173,6 +181,17 @@ const AgentHistory: React.FC = () => {
       groups[key].push(item);
     });
 
+    // The job orders indexed by id, once.
+    //
+    // Each incentive names the job order it was earned on, and every one of them
+    // used to be resolved with a `jobOrders.find(...)` — a fresh walk of the
+    // whole set per incentive, so an agent with a long history paid for their
+    // incentive count times their job order count. Keyed by String(id) because
+    // the ids arrive as numbers from one source and strings from the other, and
+    // the lookup this replaces compared them loosely.
+    const jobOrderById = new Map<string, any>();
+    for (const jo of jobOrders) jobOrderById.set(String(jo.id), jo);
+
     const batches = [];
     let batchIndex = 1;
     // Sort groups by processed_at descending
@@ -182,7 +201,7 @@ const AgentHistory: React.FC = () => {
       const items = groups[key];
       const customers = items.map((incItem: any) => {
         // match job order by id
-        const jo = jobOrders.find(j => j.id == incItem.job_order_id);
+        const jo = jobOrderById.get(String(incItem.job_order_id));
         if (jo) return jo;
         // fallback if job order not in context
         return {

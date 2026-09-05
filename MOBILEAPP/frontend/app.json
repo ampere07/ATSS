@@ -3,7 +3,7 @@
     "name": "ATSS",
     "slug": "atss",
     "scheme": "atss-app",
-    "version": "2.5.65",
+    "version": "2.5.66",
     "orientation": "portrait",
     "icon": "./assets/applogo.png",
     "userInterfaceStyle": "light",

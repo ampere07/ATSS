@@ -55,15 +55,11 @@ export const resetAllStores = () => {
 
   useCommissionStore.setState({
     earnings: [],
-    payoutHistory: [],
     // Cleared too, otherwise the previous session's rows stay visible to the next user.
-    incentiveHistory: [],
-    bonusHistory: [],
+    payoutHistory: [],
     stats: null,
     totalEarnings: 0,
     totalPayouts: 0,
-    totalIncentives: 0,
-    totalBonus: 0,
     isLoading: false,
     lastUpdated: null,
     currentFetchId: null,
