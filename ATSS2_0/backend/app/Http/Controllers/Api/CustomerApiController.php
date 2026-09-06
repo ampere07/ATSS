@@ -172,7 +172,13 @@ class CustomerApiController extends Controller
             ]);
             
             $customer->update($validated);
-            
+
+            // The portal password is the primary contact number, so editing the
+            // number here has to move the login with it. Without this the mobile
+            // API silently locked the customer out of the portal, exactly as the
+            // web endpoint used to.
+            \App\Support\PortalPassword::sync($customer);
+
             return response()->json([
                 'success' => true,
                 'message' => 'Customer updated successfully',

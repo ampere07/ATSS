@@ -3,7 +3,10 @@
 namespace App\Support;
 
 use App\Models\Role;
+use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 
 /**
  * The customer portal's password convention: the primary contact number.
@@ -81,7 +84,7 @@ class PortalPassword
             return '';
         }
 
-        $digits = preg_replace('/\D/', '', $raw);
+        $digits = preg_replace('/\D/', '', self::foldDigits($raw));
 
         // Not a phone number — leave it alone rather than turn it into one.
         if ($digits === '' || strlen($digits) < 7) {
@@ -98,6 +101,65 @@ class PortalPassword
         $digits = ltrim($digits, '0');
 
         return $digits === '' ? $raw : $digits;
+    }
+
+    /**
+     * Where the digit 0 sits in each non-ASCII decimal-digit block.
+     *
+     * A number typed on a phone keyboard, pasted out of Messenger, or carried
+     * through a spreadsheet can arrive written in digits that render exactly
+     * like ASCII ones and are not — fullwidth "０９１７…" most often. Stripping
+     * them as punctuation would silently shorten the number; folding them to
+     * ASCII keeps it intact, so the same subscriber's number still collapses
+     * onto one canonical form. Mirrors the blocks APPLY's TextNormalizer folds.
+     */
+    private const DIGIT_ZEROS = [
+        0xFF10,  // Fullwidth
+        0x0660, 0x06F0,  // Arabic-Indic, Extended Arabic-Indic
+        0x0966, 0x09E6, 0x0A66, 0x0AE6, 0x0B66, 0x0BE6,  // Indic
+        0x0C66, 0x0CE6, 0x0D66,
+        0x0E50, 0x0ED0, 0x0F20, 0x1040, 0x17E0, 0x1810,  // Thai … Mongolian
+        0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6,  // Mathematical
+    ];
+
+    /**
+     * Rewrite non-ASCII decimal digits as ASCII, leaving everything else alone.
+     *
+     * Invisible characters — a zero-width space, a non-breaking space, an RTL
+     * mark — need no handling here: they are not digits, so the caller's
+     * non-digit strip removes them. This exists only for characters that ARE
+     * digits and would otherwise be thrown away with the punctuation.
+     */
+    private static function foldDigits(string $value): string
+    {
+        // Overwhelmingly the common case, and the only one worth being fast.
+        if (preg_match('/[^\x00-\x7F]/', $value) !== 1) {
+            return $value;
+        }
+
+        // Broken UTF-8 makes a /u pattern return null and lose the value.
+        if (preg_match('//u', $value) !== 1) {
+            $repaired = @mb_convert_encoding($value, 'UTF-8', 'UTF-8');
+            $value = is_string($repaired) ? $repaired : '';
+        }
+
+        $folded = preg_replace_callback('/[^\x00-\x7F]/u', function (array $m) {
+            $cp = mb_ord($m[0], 'UTF-8');
+
+            if ($cp === false) {
+                return $m[0];
+            }
+
+            foreach (self::DIGIT_ZEROS as $zero) {
+                if ($cp >= $zero && $cp <= $zero + 9) {
+                    return (string) ($cp - $zero);
+                }
+            }
+
+            return $m[0];
+        }, $value);
+
+        return is_string($folded) ? $folded : $value;
     }
 
     /**
@@ -221,6 +283,73 @@ class PortalPassword
         }
 
         return false;
+    }
+
+    /**
+     * Re-point a customer's portal logins at their current primary number.
+     *
+     * Any path that writes contact_number_primary owes the users row this call.
+     * Skipping it is what put 2,000 accounts out of step: the hash kept verifying
+     * the number from the original application while the admin UI showed the
+     * edited one, so the number on screen — the one support reads out, the one
+     * the customer is told to use — was the one number that did not work.
+     *
+     * Lives here rather than in a controller because more than one endpoint edits
+     * a customer, and each copy of this rule was a chance to forget it.
+     *
+     * The users row is found the way the rest of the system finds it: username is
+     * the billing account number. A customer with no billing account has no
+     * portal login yet, and nothing to sync.
+     *
+     * Best-effort: a failure must not fail the customer edit that succeeded.
+     * Returns how many logins were repointed.
+     */
+    public static function sync($customer): int
+    {
+        $synced = 0;
+
+        try {
+            $number = trim((string) ($customer->contact_number_primary ?? ''));
+
+            if ($number === '') {
+                return 0;
+            }
+
+            $accountNos = DB::table('billing_accounts')
+                ->where('customer_id', $customer->id)
+                ->pluck('account_no');
+
+            foreach ($accountNos as $accountNo) {
+                $user = User::where('username', $accountNo)->first();
+
+                if (!$user || !self::isCustomer($user)) {
+                    continue;
+                }
+
+                if (self::hashIsCurrent($number, $user->password_hash)
+                    && trim((string) $user->contact_number) === $number) {
+                    continue;
+                }
+
+                $user->contact_number = $number;
+                // The model mutator hashes this. Canonical spelling, so the
+                // number verifies however the customer types it.
+                $user->password_hash = self::normalize($number);
+                $user->save();
+                $synced++;
+
+                Log::info('Portal credential resynced from customer update', [
+                    'customer_id' => $customer->id,
+                    'username' => $accountNo,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            Log::error('Failed to resync portal credential: ' . $e->getMessage(), [
+                'customer_id' => $customer->id ?? null,
+            ]);
+        }
+
+        return $synced;
     }
 
     /**

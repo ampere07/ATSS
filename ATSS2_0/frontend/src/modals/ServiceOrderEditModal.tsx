@@ -100,6 +100,24 @@ interface ImageFiles {
   clientSignatureFile: File | null;
 }
 
+/**
+ * Support statuses that close the visit, and the visit status each one implies.
+ *
+ * The Visit Status field is only shown under "For Visit", so on these two there
+ * is no field for the user to set it in — that is what left resolved and failed
+ * tickets carrying no visit status at all. Any support status not listed here
+ * leaves the visit status exactly as the user left it.
+ *
+ * Kept in one place because the rule is applied three times — on change, again
+ * on save, and once more to decide whether the payload carries visit_status —
+ * and the three drifting apart is what would put a value on screen that never
+ * reaches the row.
+ */
+const CLOSING_VISIT_STATUS: Record<string, string> = {
+  Resolved: 'Done',
+  Failed: 'Failed'
+};
+
 const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
   isOpen,
   onClose,
@@ -703,6 +721,10 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       if (field === 'newLcp' || field === 'newNap' || field === 'newLcpnap') {
         newState.newPort = '';
       }
+      // Closing the ticket closes its visit with it — see CLOSING_VISIT_STATUS.
+      if (field === 'supportStatus' && CLOSING_VISIT_STATUS[value]) {
+        newState.visitStatus = CLOSING_VISIT_STATUS[value];
+      }
       // Region -> City -> Barangay cascade: clear the dependent levels when a parent changes
       if (field === 'region') {
         newState.city = '';
@@ -980,14 +1002,39 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       })
     };
 
-    if (updatedFormData.supportStatus === 'Resolved') {
-      const originalVisitStatus = serviceOrderData.visitStatus || (serviceOrderData.visit_status === 'In Progress' ? 'In Progress' : (serviceOrderData.visitStatus || serviceOrderData.visit_status || 'In Progress'));
-      if (originalVisitStatus === 'In Progress' || originalVisitStatus === 'In-Progress' || originalVisitStatus === 'Reschedule') {
-        updatedFormData.visitStatus = '';
-      } else {
-        updatedFormData.visitStatus = originalVisitStatus;
-      }
+    // A closed ticket always saves as a closed visit. handleInputChange already set
+    // this when the user picked the status; repeating it here is what guarantees it
+    // reaches the payload — the status can also arrive from a ticket that opened
+    // Resolved or Failed, carrying a visit status the form never showed.
+    const closingVisitStatus = CLOSING_VISIT_STATUS[updatedFormData.supportStatus];
+    if (closingVisitStatus) {
+      updatedFormData.visitStatus = closingVisitStatus;
     }
+
+    /**
+     * Is the record ALREADY carrying the visit status this save would force?
+     *
+     * If it is, the save must not send visit_status at all. The API keys several
+     * one-shot actions off the column *changing* — the service charge posted when
+     * it becomes Done, and the auto-migration and auto-pullout read back from the
+     * row — so re-sending a value the row already holds is what risks running them
+     * a second time. Omitting the key leaves the column untouched and those
+     * triggers unreached.
+     *
+     * Read from serviceOrderData, not from formData: the form loader turns a blank
+     * stored value into "In Progress", so the form cannot tell an empty column from
+     * a genuine in-progress visit. Only the raw record can.
+     *
+     * "completed" counts as Done, the same equivalence the loader applies, so a
+     * ticket stored under that older spelling is not rewritten just to restyle it.
+     */
+    const normalizeVisitStatus = (value: unknown) => {
+      const lower = String(value ?? '').toLowerCase().trim();
+      return lower === 'completed' ? 'done' : lower;
+    };
+    const visitStatusAlreadyClosed = !!closingVisitStatus
+      && normalizeVisitStatus(serviceOrderData.visitStatus ?? serviceOrderData.visit_status)
+        === normalizeVisitStatus(closingVisitStatus);
 
     if (updatedFormData.visitStatus === 'Reschedule') {
       updatedFormData.visitBy = '';
@@ -1211,8 +1258,11 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         vlan: updatedFormData.vlan,
         support_status: updatedFormData.supportStatus,
 
-        // Include visit_status if visible (For Visit status) or explicitly cleared when Resolved
-        ...((isForVisit || (updatedFormData.supportStatus === 'Resolved' && updatedFormData.visitStatus === '')) ? {
+        // Include visit_status when the field is visible (For Visit), or when a closing
+        // support status forced it above AND the row is not already holding that value
+        // — see visitStatusAlreadyClosed: re-sending it is what could run the API's
+        // one-shot triggers twice.
+        ...((isForVisit || (closingVisitStatus && !visitStatusAlreadyClosed)) ? {
           visit_status: updatedFormData.visitStatus,
         } : {}),
         ...(isForVisit ? {
@@ -1270,6 +1320,39 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         // technician starts a fresh visit (no inherited start/end time).
         ...(technicianChanged ? { start_time: null, end_time: null } : {})
       };
+
+      /**
+       * A Resolved or Failed save closes the ticket — it does not rewrite the record.
+       *
+       * The payload above carries the whole form, and the API writes every key it
+       * receives. The form loads a blank for anything the record left empty, and for
+       * anything the current support status never put on screen, so sending those
+       * blanks back would null columns the user never touched. Dropping them leaves
+       * the save carrying the forced visit_status plus the fields that actually hold
+       * a value — an unchanged field re-sends what is already stored, which writes
+       * nothing.
+       *
+       * Only the closing statuses are pruned. A For Visit save still sends its blanks,
+       * because there the empty field was on screen and clearing it is a real edit.
+       *
+       * The exempt keys are the ones whose blank IS the intended write:
+       *   • start_time / end_time — deliberately nulled when the technician changes;
+       *   • service_charge — the API only posts the charge on a request that carries
+       *     it, so dropping a 0 would silently skip the billing on resolve.
+       *
+       * The trade matches remarkIfPresent above: a field cannot be emptied from this
+       * form on a closing save. Set it before resolving, or reopen the ticket.
+       */
+      if (closingVisitStatus) {
+        const keepWhenBlank = new Set(['start_time', 'end_time', 'service_charge']);
+        Object.keys(serviceOrderUpdateData).forEach(key => {
+          if (keepWhenBlank.has(key)) return;
+          const value = serviceOrderUpdateData[key];
+          if (value === null || value === undefined || String(value).trim() === '') {
+            delete serviceOrderUpdateData[key];
+          }
+        });
+      }
 
       setUploadProgress(85);
 

@@ -868,7 +868,11 @@ const ServiceOrderPage: React.FC = () => {
       if (catNode) {
         catNode.count++;
 
-        let visitKey = v || 'empty';
+        // A resolved ticket with no visit status is a finished visit that was
+        // never stamped, so it counts as Done instead of getting its own
+        // '(Empty)' branch. Only Resolved does this — under the other statuses
+        // a blank still means the visit is unaccounted for.
+        let visitKey = v || (category === 'resolved' ? 'done' : 'empty');
         if (visitKey === 'completed') visitKey = 'done';
         if (visitKey === 'in progress') visitKey = 'inprogress';
 
@@ -915,7 +919,12 @@ const ServiceOrderPage: React.FC = () => {
           if (vKey === 'done') vName = 'Done';
           else if (vKey === 'inprogress') vName = 'In Progress';
           else if (vKey === 'reschedule') vName = 'Reschedule';
-          else if (vKey === 'empty') vName = '(Empty)';
+          // A blank visit status means different things per status, so it is named
+          // for what it means rather than for being blank. Under For Visit the
+          // ticket is waiting to be scheduled — nothing has gone wrong with it, and
+          // "(Empty)" reads like missing data rather than a real queue. Elsewhere it
+          // still means the visit is genuinely unaccounted for.
+          else if (vKey === 'empty') vName = c.id === 'forvisit' ? 'Not Assigned' : '(Empty)';
           else vName = vKey.charAt(0).toUpperCase() + vKey.slice(1);
 
           return {
@@ -988,7 +997,9 @@ const ServiceOrderPage: React.FC = () => {
 
         if (parts.length > 2 && parts[2] === 'visit') {
           const visitKeyFilter = parts[3];
-          let visitKey = v || 'empty';
+          // Same rule the counts are built with, so a Resolved > Done branch
+          // opens exactly the rows it counted.
+          let visitKey = v || (category === 'resolved' ? 'done' : 'empty');
           if (visitKey === 'completed') visitKey = 'done';
           if (visitKey === 'in progress') visitKey = 'inprogress';
 

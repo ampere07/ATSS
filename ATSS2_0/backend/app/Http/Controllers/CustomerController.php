@@ -281,7 +281,7 @@ class CustomerController extends Controller
             // while the portal password is that number — so editing a customer
             // here silently locked them out of the portal, with the stored hash
             // still holding the previous number and nothing to indicate it.
-            $this->syncPortalCredential($customer);
+            \App\Support\PortalPassword::sync($customer);
 
             // Broadcast customer-updated event
             $this->broadcastCustomerUpdated($customer);
@@ -299,62 +299,6 @@ class CustomerController extends Controller
                 'message' => 'Failed to update customer',
                 'error' => $e->getMessage()
             ], 500);
-        }
-    }
-
-    /**
-     * Re-point a customer's portal login at their current primary number.
-     *
-     * The portal password convention is the primary contact number, so any path
-     * that writes that number owes the users row an update — otherwise the hash
-     * keeps verifying a number the customer no longer has, and the only visible
-     * symptom is "Invalid credentials" against a number that looks correct on
-     * screen.
-     *
-     * The user row is found the way the rest of the system finds it: username is
-     * the billing account number. No account, nothing to sync — a customer with
-     * no billing account has no portal login yet.
-     *
-     * Best-effort: a failure here must not fail the customer edit that succeeded.
-     */
-    private function syncPortalCredential($customer): void
-    {
-        try {
-            $number = trim((string) $customer->contact_number_primary);
-
-            if ($number === '') {
-                return;
-            }
-
-            $accountNos = BillingAccount::where('customer_id', $customer->id)->pluck('account_no');
-
-            foreach ($accountNos as $accountNo) {
-                $user = User::where('username', $accountNo)->first();
-
-                if (!$user || !\App\Support\PortalPassword::isCustomer($user)) {
-                    continue;
-                }
-
-                if (\App\Support\PortalPassword::hashIsCurrent($number, $user->password_hash)
-                    && trim((string) $user->contact_number) === $number) {
-                    continue;
-                }
-
-                $user->contact_number = $number;
-                // The mutator hashes this. Canonical spelling, so the number
-                // verifies however the customer types it.
-                $user->password_hash = \App\Support\PortalPassword::normalize($number);
-                $user->save();
-
-                \Log::info('Portal credential resynced from customer update', [
-                    'customer_id' => $customer->id,
-                    'username' => $accountNo,
-                ]);
-            }
-        } catch (\Exception $e) {
-            \Log::error('Failed to resync portal credential: ' . $e->getMessage(), [
-                'customer_id' => $customer->id ?? null,
-            ]);
         }
     }
 

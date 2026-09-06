@@ -2,10 +2,12 @@
 
 namespace App\Console\Commands;
 
+use App\Models\Role;
 use App\Models\User;
 use App\Support\PortalPassword;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 /**
@@ -41,12 +43,29 @@ class ResyncPortalPasswords extends Command
 
     protected $description = 'Rehash customer portal passwords from their primary contact number';
 
+    /** How many rows to print before sending the rest to a CSV. */
+    private const PREVIEW_ROWS = 25;
+
     public function handle(): int
     {
         $apply = (bool) $this->option('apply');
         $only = $this->option('account');
 
-        $query = User::query()->whereNotNull('username');
+        // Narrow to customer roles up front rather than walking every staff row
+        // and discarding it. A hybrid custom role that inherits from Customer is
+        // still a customer, so it is included alongside the seeded role.
+        $customerRoleIds = [Role::CUSTOMER];
+
+        if (Schema::hasColumn('roles', 'base_role_id')) {
+            $customerRoleIds = array_merge(
+                $customerRoleIds,
+                DB::table('roles')->where('base_role_id', Role::CUSTOMER)->pluck('id')->all()
+            );
+        }
+
+        $query = User::query()
+            ->whereNotNull('username')
+            ->whereIn('role_id', array_unique($customerRoleIds));
 
         if ($only) {
             $query->where('username', $only);
@@ -59,28 +78,56 @@ class ResyncPortalPasswords extends Command
         $failed = 0;
         $rows = [];
 
+        // Every check below is a bcrypt verification, which is deliberately slow
+        // — tens of milliseconds each, by design. Across a full customer base
+        // that is minutes of work, so say so and show it moving rather than
+        // leaving an operator staring at a cursor wondering if it hung.
+        $total = (clone $query)->count();
+        $this->line("Customer logins to check: {$total}");
+        $this->line($apply ? 'Writing changes (--apply).' : 'Reporting only. Nothing will be written.');
+        $this->newLine();
+
+        // Findings are written as they are discovered, not collected and dumped
+        // at the end. A full scan is tens of minutes of bcrypt, and a run that is
+        // interrupted at 80% should still leave behind the 80% it established.
+        $path = storage_path('app/portal-password-resync-' . now()->format('Ymd-His') . '.csv');
+        $csv = fopen($path, 'w');
+        fputcsv($csv, ['account_no', 'contact_number', 'action']);
+        $this->line("Findings are written to: {$path}");
+        $this->newLine();
+
+        $bar = $this->output->createProgressBar($total);
+        $bar->setFormat(" %current%/%max% [%bar%] %percent:3s%%  %message%");
+        $bar->setMessage('starting');
+        $bar->start();
+
         $query->orderBy('id')->chunkById(200, function ($users) use (
-            $apply, &$checked, &$drifted, &$fixed, &$noNumber, &$failed, &$rows
+            $apply, $bar, $csv, &$checked, &$drifted, &$fixed, &$noNumber, &$failed, &$rows
         ) {
+            // One lookup per chunk, not one per account. Over a remote database
+            // the per-account version was 10,000 round trips.
+            $numbers = DB::table('billing_accounts')
+                ->join('customers', 'customers.id', '=', 'billing_accounts.customer_id')
+                ->whereIn('billing_accounts.account_no', $users->pluck('username')->all())
+                ->pluck('customers.contact_number_primary', 'billing_accounts.account_no');
+
             foreach ($users as $user) {
                 if (!PortalPassword::isCustomer($user)) {
                     continue;
                 }
 
                 $checked++;
+                $bar->setMessage("out of step: {$drifted}   no number: {$noNumber}");
+                $bar->advance();
 
                 // username is the billing account number; that account names the
                 // customer whose number is the password.
-                $number = DB::table('billing_accounts')
-                    ->join('customers', 'customers.id', '=', 'billing_accounts.customer_id')
-                    ->where('billing_accounts.account_no', $user->username)
-                    ->value('customers.contact_number_primary');
-
-                $number = trim((string) ($number ?? $user->contact_number ?? ''));
+                $number = trim((string) ($numbers[$user->username] ?? $user->contact_number ?? ''));
 
                 if ($number === '') {
                     $noNumber++;
-                    $rows[] = [$user->username, '-', 'no contact number on record'];
+                    $rows[] = $row = [$user->username, '-', 'no contact number on record'];
+                    fputcsv($csv, $row);
                     continue;
                 }
 
@@ -89,7 +136,8 @@ class ResyncPortalPasswords extends Command
                 }
 
                 $drifted++;
-                $rows[] = [$user->username, $number, $apply ? 'rehashed' : 'would rehash'];
+                $rows[] = $row = [$user->username, $number, $apply ? 'rehashed' : 'would rehash'];
+                fputcsv($csv, $row);
 
                 if (!$apply) {
                     continue;
@@ -108,13 +156,31 @@ class ResyncPortalPasswords extends Command
             }
         });
 
+        $bar->finish();
+        fclose($csv);
+        $this->newLine(2);
+
+        // A full customer base can put thousands of rows here, which scrolls the
+        // summary off the screen and is unreadable anyway. Show a sample and put
+        // the complete list in a file worth opening.
+        $preview = self::PREVIEW_ROWS;
+
         if ($rows) {
-            $this->table(['Account', 'Contact number', 'Action'], $rows);
+            $this->table(['Account', 'Contact number', 'Action'], array_slice($rows, 0, $preview));
+
+            if (count($rows) > $preview) {
+                $this->comment('… ' . (count($rows) - $preview) . ' more not shown.');
+            }
+
+            $this->newLine();
+            $this->line("Full list: {$path}");
         }
 
+        $this->newLine();
         $this->line("customer logins checked : {$checked}");
         $this->line("out of step             : {$drifted}");
         $this->line("no contact number       : {$noNumber}");
+        $this->line('already correct         : ' . ($checked - $drifted - $noNumber));
 
         if ($apply) {
             $this->line("rehashed                : {$fixed}");
@@ -123,7 +189,13 @@ class ResyncPortalPasswords extends Command
             }
         } elseif ($drifted) {
             $this->newLine();
-            $this->comment('Nothing written. Re-run with --apply to fix these.');
+            $this->comment("Nothing written. Re-run with --apply to rehash those {$drifted}.");
+        } elseif ($checked === 0) {
+            $this->newLine();
+            $this->warn('No customer logins found at all. Check the database this is pointed at.');
+        } else {
+            $this->newLine();
+            $this->info('Every customer login already matches its contact number. Nothing to do.');
         }
 
         return $failed > 0 ? self::FAILURE : self::SUCCESS;

@@ -350,7 +350,7 @@ class PaymentWorkerService
                 // Run reconnect/settlement flow AFTER commit — RADIUS failure must never roll back a real payment
                 if ($balanceSettled) {
                     $this->workerLog("Balance settled for $ref — Status ID: {$currentStatusId}, Balance: ₱" . number_format($currentBalance, 2) . " — running reconnect/settlement flow");
-                    $reconnectStatus = $this->attemptReconnect($account);
+                    $reconnectStatus = $this->attemptReconnect($account, $ref);
 
                     // Update reconnect_status outside the main transaction (standalone)
                     DB::table('pending_payments')
@@ -524,8 +524,13 @@ class PaymentWorkerService
     /**
      * Attempt to reconnect user account
      * Matches logic in TransactionController::approve
+     *
+     * @param  string|null $paymentReference  the portal reference_no of the payment
+     *                                        that settled the balance. Only used to
+     *                                        name that payment on any pullout this
+     *                                        closes; nothing here branches on it.
      */
-    private function attemptReconnect($account)
+    private function attemptReconnect($account, ?string $paymentReference = null)
     {
         try {
             // Reload billing account to get latest balance and status
@@ -550,7 +555,7 @@ class PaymentWorkerService
             // Recovering equipment is not conditional on RADIUS needing a
             // reconnect, so it no longer waits on one.
             app(PulloutServiceOrderCloser::class)
-                ->closeIfSettled($accountNo, $balance, 'payment worker');
+                ->closeIfSettled($accountNo, $balance, 'payment worker', $paymentReference);
 
             // Step 2: Check current billing status.
             $isAlreadyActive = ($billingAccount->billing_status_id == 1);

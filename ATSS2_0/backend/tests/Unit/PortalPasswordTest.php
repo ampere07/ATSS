@@ -53,6 +53,27 @@ class PortalPasswordTest extends TestCase
         }
     }
 
+    public function test_digits_that_only_look_like_ascii_are_folded_not_dropped(): void
+    {
+        // Renders as "09171234567" in the admin UI and is not that byte string.
+        // Stripping these as punctuation would shorten the number to "1234567"
+        // and the account would never open.
+        $this->assertSame('9171234567', PortalPassword::normalize("\u{FF10}\u{FF19}\u{FF11}\u{FF17}1234567"));
+        $this->assertSame('9171234567', PortalPassword::normalize("\u{0660}\u{0669}\u{0661}\u{0667}1234567"));
+
+        // Invisible characters are not digits; the non-digit strip removes them.
+        foreach (["0917\u{200B}1234567", "0917\u{00A0}123\u{00A0}4567", "\u{200F}09171234567", "0917\u{2013}123\u{2013}4567"] as $raw) {
+            $this->assertSame('9171234567', PortalPassword::normalize($raw), 'normalising ' . bin2hex($raw));
+        }
+
+        // And a customer typing the plain number still opens a legacy hash made
+        // from the dirty spelling, via the number of record.
+        $dirty = "0917\u{200B}1234567";
+        $this->assertTrue(
+            PortalPassword::matchesWithStoredNumber('09171234567', Hash::make($dirty), $dirty)
+        );
+    }
+
     public function test_a_staff_password_is_left_alone(): void
     {
         $this->assertSame('admin123', PortalPassword::normalize('admin123'));

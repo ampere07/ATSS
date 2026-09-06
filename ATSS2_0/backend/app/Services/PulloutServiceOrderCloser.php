@@ -57,21 +57,36 @@ final class PulloutServiceOrderCloser
      */
     private const SETTLED_EPSILON = 0.01;
 
-    /** Left on the record so the close-out is self-explaining in the UI. */
-    private const REMARK = 'auto failed due to client reconnected';
+    /**
+     * Left on the record so the close-out is self-explaining in the UI.
+     *
+     * The payment that settled the balance is named in the remark, so a pullout
+     * closed automatically can be traced back to the money that closed it without
+     * reading the log. What identifies that payment differs by caller — see
+     * remarkFor() — so the reference is passed in rather than looked up here.
+     */
+    private const REMARK_BASE = 'System Auto failed due to client payment';
 
     /**
      * Close the account's open pullouts if its balance is settled.
      *
-     * @param  string      $accountNo      the billing account number
-     * @param  float|null  $knownBalance   the balance if the caller already read
-     *                                     it, saving a query; re-read when null
-     * @param  string      $trigger        what prompted this, for the log
+     * @param  string      $accountNo         the billing account number
+     * @param  float|null  $knownBalance      the balance if the caller already read
+     *                                        it, saving a query; re-read when null
+     * @param  string      $trigger           what prompted this, for the log
+     * @param  string|null $paymentReference  identifies the payment that settled the
+     *                                        balance, for the remark: the portal's
+     *                                        reference_no from the payment worker,
+     *                                        the transaction id from an approval
      *
      * @return array{closed:int, ids:array<int>, skipped:?string}
      */
-    public function closeIfSettled(string $accountNo, ?float $knownBalance = null, string $trigger = 'payment'): array
-    {
+    public function closeIfSettled(
+        string $accountNo,
+        ?float $knownBalance = null,
+        string $trigger = 'payment',
+        ?string $paymentReference = null
+    ): array {
         $result = ['closed' => 0, 'ids' => [], 'skipped' => null];
 
         $this->log("[RUNNING] Pullout check for account: {$accountNo} (trigger: {$trigger})");
@@ -109,7 +124,7 @@ final class PulloutServiceOrderCloser
                 ->update([
                     'support_status'  => 'Failed',
                     'visit_status'    => 'Failed',
-                    'support_remarks' => self::REMARK,
+                    'support_remarks' => $this->remarkFor($paymentReference),
                     'updated_by_user' => 'System',
                     'updated_at'      => now(),
                 ]);
@@ -126,6 +141,29 @@ final class PulloutServiceOrderCloser
         $this->log("[DONE] Pullout check for account: {$accountNo}");
 
         return $result;
+    }
+
+    /**
+     * The remark written onto the closed pullouts.
+     *
+     * "System Auto failed due to client payment reference no: <reference>", where
+     * the reference is whatever identifies the payment to the caller — the portal
+     * reference_no for a payment-worker run, the transaction id for a manually
+     * approved one. The two are not interchangeable, and neither is unique across
+     * the pair, so the trigger recorded in the log is what says which kind a given
+     * number is.
+     *
+     * With no reference the sentence stops before "reference no:" rather than
+     * trailing an empty colon. That is a defensive path only — every caller has an
+     * identifier — but a remark is read by people, so it should not look truncated.
+     */
+    private function remarkFor(?string $paymentReference): string
+    {
+        $reference = trim((string) $paymentReference);
+
+        return $reference === ''
+            ? self::REMARK_BASE
+            : self::REMARK_BASE . ' reference no: ' . $reference;
     }
 
     /** The account's balance, or null when there is no such account. */
