@@ -19,20 +19,36 @@ use Tests\TestCase;
  */
 class ApiPermissionCoverageTest extends TestCase
 {
-    /** A stand-in for an authenticated user, which is all Permissions reads. */
-    private function user(int $roleId, ?array $customPermissions = null): object
+    /**
+     * A stand-in for an authenticated user, which is all Permissions reads.
+     *
+     * A custom role is built at the current permissions version by default —
+     * the shape Role Management writes — so its stored list is read exactly as
+     * given. Pass $version 0 for a role saved before the per-action keys
+     * existed, which Permissions grandfathers; see user_saved_before_actions().
+     */
+    private function user(int $roleId, ?array $customPermissions = null, int $version = Permissions::CURRENT_VERSION): object
     {
-        return new class($roleId, $customPermissions) {
+        return new class($roleId, $customPermissions, $version) {
             public $id = 1;
             public $role_id;
             public $role;
 
-            public function __construct(int $roleId, ?array $permissions)
+            public function __construct(int $roleId, ?array $permissions, int $version)
             {
                 $this->role_id = $roleId;
-                $this->role = $permissions === null ? null : (object) ['permissions' => $permissions];
+                $this->role = $permissions === null ? null : (object) [
+                    'permissions' => $permissions,
+                    'permissions_version' => $version,
+                ];
             }
         };
+    }
+
+    /** A custom role last saved before the per-action keys existed. */
+    private function userSavedBeforeActions(int $roleId, array $customPermissions): object
+    {
+        return $this->user($roleId, $customPermissions, 0);
     }
 
     /** Every API route the application registers, as [method, path]. */
@@ -377,6 +393,87 @@ class ApiPermissionCoverageTest extends TestCase
         $issuer = $this->user(22, ['agent-invoices', 'agent-invoices.generate']);
         $this->assertTrue($this->permits($issuer, 'POST', 'api/agent-invoices/generate'));
         $this->assertFalse($this->permits($issuer, 'PATCH', 'api/agent-invoices/2/status'));
+    }
+
+    /**
+     * The Configurations and Users lists gate their buttons separately.
+     *
+     * These pages used to carry Add, Edit and Delete with the page key, so this
+     * is the split that did not exist before: holding "plan-list" now means the
+     * page and nothing on it.
+     */
+    public function test_configuration_pages_gate_each_button(): void
+    {
+        $reader = $this->user(30, ['plan-list', 'user-management', 'vlan-config']);
+
+        $this->assertTrue($this->permits($reader, 'GET', 'api/plans'));
+        $this->assertFalse($this->permits($reader, 'POST', 'api/plans'));
+        $this->assertFalse($this->permits($reader, 'PUT', 'api/plans/1'));
+        $this->assertFalse($this->permits($reader, 'DELETE', 'api/plans/1'));
+        $this->assertFalse($this->permits($reader, 'POST', 'api/users'));
+        $this->assertFalse($this->permits($reader, 'DELETE', 'api/vlans/1'));
+
+        // Add without Delete: the pair a data-entry account wants.
+        $adder = $this->user(31, ['plan-list', 'plan-list.create']);
+        $this->assertTrue($this->permits($adder, 'POST', 'api/plans'));
+        $this->assertFalse($this->permits($adder, 'PUT', 'api/plans/1'));
+        $this->assertFalse($this->permits($adder, 'DELETE', 'api/plans/1'));
+
+        // Edit answers both PUT and PATCH; no page means the two differ.
+        $editor = $this->user(32, ['plan-list', 'plan-list.edit']);
+        $this->assertTrue($this->permits($editor, 'PUT', 'api/plans/1'));
+        $this->assertTrue($this->permits($editor, 'PATCH', 'api/plans/1'));
+        $this->assertFalse($this->permits($editor, 'DELETE', 'api/plans/1'));
+    }
+
+    /**
+     * A role saved before the per-action keys keeps the buttons it had.
+     *
+     * Reading such a role strictly would revoke Add, Edit and Delete from every
+     * custom role on deploy, silently. It is grandfathered until somebody saves
+     * it from Role Management, which stamps the current version.
+     */
+    public function test_roles_saved_before_the_action_keys_keep_their_buttons(): void
+    {
+        $legacy = $this->userSavedBeforeActions(33, ['plan-list', 'ports', 'user-management']);
+
+        $this->assertTrue($this->permits($legacy, 'GET', 'api/plans'));
+        $this->assertTrue($this->permits($legacy, 'POST', 'api/plans'));
+        $this->assertTrue($this->permits($legacy, 'PUT', 'api/plans/1'));
+        $this->assertTrue($this->permits($legacy, 'DELETE', 'api/plans/1'));
+        $this->assertTrue($this->permits($legacy, 'DELETE', 'api/users/1'));
+
+        // The rule reproduces what each page allowed, rather than assuming the
+        // usual three everywhere. Ports drew nothing without `ports.manage`, so
+        // holding the bare page still draws nothing; editing a user was
+        // SuperAdmin's alone, so it is not conjured up either.
+        $this->assertFalse($this->permits($legacy, 'POST', 'api/ports'));
+        $this->assertFalse($this->permits($legacy, 'DELETE', 'api/ports/1'));
+        $this->assertFalse($this->permits($legacy, 'PUT', 'api/users/1'));
+        $this->assertTrue($this->permits($legacy, 'POST', 'api/users'));
+
+        // Only the pages it actually holds, and only the standard verbs. Writing
+        // to a page it was never granted stays shut — reads of reference data
+        // are open to any signed-in user by design, so the write is what tells
+        // the two apart — and a descriptive verb is never conjured up.
+        $this->assertFalse($this->permits($legacy, 'POST', 'api/promos'));
+        $this->assertFalse($this->permits($legacy, 'DELETE', 'api/promos/1'));
+        $this->assertFalse(Permissions::allows($legacy, 'job-order.approve'));
+    }
+
+    /**
+     * The single `.manage` key three pages used still grants all three verbs.
+     *
+     * Splitting it into create/edit/delete would otherwise have revoked the
+     * buttons from every role holding the old key.
+     */
+    public function test_the_retired_manage_key_still_grants_its_buttons(): void
+    {
+        $holder = $this->user(34, ['ports', 'ports.manage']);
+
+        $this->assertTrue($this->permits($holder, 'POST', 'api/ports'));
+        $this->assertTrue($this->permits($holder, 'PUT', 'api/ports/1'));
+        $this->assertTrue($this->permits($holder, 'DELETE', 'api/ports/1'));
     }
 
     /**

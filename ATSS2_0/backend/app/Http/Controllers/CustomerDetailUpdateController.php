@@ -105,8 +105,13 @@ class CustomerDetailUpdateController extends Controller
                 'middle_initial' => $validated['middleInitial'] ?? $customer->middle_initial,
                 'last_name' => $validated['lastName'],
                 'email_address' => $validated['emailAddress'],
-                'contact_number_primary' => $validated['contactNumberPrimary'],
-                'contact_number_secondary' => $validated['contactNumberSecondary'] ?? $customer->contact_number_secondary,
+                // Trimmed: a stray space around the number is invisible in the UI
+                // but was hashed verbatim into the portal password, locking the
+                // customer out with a number that looked exactly right.
+                'contact_number_primary' => trim($validated['contactNumberPrimary']),
+                'contact_number_secondary' => isset($validated['contactNumberSecondary'])
+                    ? trim($validated['contactNumberSecondary'])
+                    : $customer->contact_number_secondary,
                 'address' => $validated['address'],
                 'region' => $validated['region'],
                 'city' => $validated['city'],
@@ -128,12 +133,28 @@ class CustomerDetailUpdateController extends Controller
             if ($user) {
                 $userUpdate = [];
 
-                // If contact number changed, update contact_number and password_hash.
-                // The portal password convention is the primary contact number, so it
-                // follows the number. contactNumberPrimary is required, so never null.
-                if ($oldContact !== $validated['contactNumberPrimary']) {
-                    $userUpdate['contact_number'] = $validated['contactNumberPrimary'];
-                    $userUpdate['password_hash'] = $validated['contactNumberPrimary'];
+                // Keep contact_number and password_hash on the user in step with
+                // the customer's primary number. The portal password convention is
+                // that number, so the password follows it. contactNumberPrimary is
+                // required, so it is never null.
+                //
+                // The condition is deliberately not "did the number change". An
+                // account whose hash had already drifted from its number — written
+                // by a path that did not sync, or hashed in a spelling nobody types
+                // — could only be repaired by editing the contact number to
+                // something different, which is why operators had taken to adding a
+                // leading '0' and saving just to force a rehash. Rehashing whenever
+                // the stored hash does not already verify the number repairs those
+                // accounts on any save, with no edit to invent.
+                $newContact = trim($validated['contactNumberPrimary']);
+                $hashDrifted = \App\Support\PortalPassword::isCustomer($user)
+                    && !\App\Support\PortalPassword::hashIsCurrent($newContact, $user->password_hash);
+
+                if ($oldContact !== $newContact || $hashDrifted) {
+                    $userUpdate['contact_number'] = $newContact;
+                    // The mutator hashes this; store the canonical spelling so the
+                    // same number written any other way still verifies.
+                    $userUpdate['password_hash'] = \App\Support\PortalPassword::normalize($newContact);
                 }
 
                 // If email address changed, update email_address only. The email is never

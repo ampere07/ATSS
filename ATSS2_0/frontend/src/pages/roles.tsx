@@ -7,8 +7,14 @@ import RoleModal from '../modals/RoleModal';
 import { useRoleStore } from '../store/roleStore';
 import { roleService } from '../services/userService';
 import { baseRoleLabel } from '../config/permissions';
+import { usePageActions } from '../hooks/usePageActions';
 
 const Roles: React.FC = () => {
+    // Add, Edit and Delete are granted separately. The same keys the API
+    // demands, so a control is only drawn when the request behind it would
+    // succeed.
+    const actions = usePageActions('roles');
+
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [searchQuery, setSearchQuery] = useState('');
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -83,6 +89,7 @@ const Roles: React.FC = () => {
     };
 
     const handleDeleteRole = async (id: number) => {
+        if (!actions.canDelete) return;
         if (window.confirm('Are you sure you want to delete this role?')) {
             try {
                 const res = await roleService.deleteRole(id);
@@ -141,6 +148,7 @@ const Roles: React.FC = () => {
                         >
                             <RefreshCw size={18} className={isLoading ? 'animate-spin' : ''} />
                         </button>
+                        {actions.canCreate && (
                         <button
                             onClick={() => { setSelectedRole(null); setShowModal(true); }}
                             className="p-2 rounded-lg text-white shadow-lg transition-transform active:scale-95"
@@ -148,6 +156,7 @@ const Roles: React.FC = () => {
                         >
                             <Plus size={20} />
                         </button>
+                        )}
                     </div>
                 </div>
 
@@ -221,18 +230,22 @@ const Roles: React.FC = () => {
                                             <div className="flex items-center justify-end gap-2">
                                                 {role.id > 8 ? (
                                                     <>
+                                                        {actions.canEdit && (
                                                         <button
                                                             onClick={() => { setSelectedRole(role); setShowModal(true); }}
                                                             className={`p-1.5 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-blue-400' : 'hover:bg-gray-100 text-blue-600'}`}
                                                         >
                                                             <Edit size={16} />
                                                         </button>
+                                                        )}
+                                                        {actions.canDelete && (
                                                         <button
                                                             onClick={() => handleDeleteRole(role.id)}
                                                             className={`p-1.5 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-red-400' : 'hover:bg-gray-100 text-red-600'}`}
                                                         >
                                                             <Trash2 size={16} />
                                                         </button>
+                                                        )}
                                                     </>
                                                 ) : (
                                                     <span className={`text-[10px] font-medium px-2 py-1 rounded-full ${isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-100 text-gray-400'}`}>

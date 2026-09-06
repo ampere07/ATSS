@@ -84,8 +84,8 @@ interface MultiStepFormProps {
 const MultiStepForm = forwardRef<MultiStepFormRef, MultiStepFormProps>(({ showEditButton = false, onLayoutChange, currentLayout = 'multistep', isEditMode: externalIsEditMode, onEditModeChange, requireFields = true }, ref) => {
   const apiBaseUrl = process.env.REACT_APP_API_URL || "https://backend1.atssfiber.ph";
   const googleMapsApiKey = process.env.REACT_APP_GOOGLE_MAPS_API_KEY || "";
-  const COVERAGE_CENTER = { lat: 14.9136, lng: 121.0464 }; // Norzagaray, Bulacan
-  const COVERAGE_RADIUS = 25000; // 25km in meters - covers Norzagaray area
+  const COVERAGE_CENTER = { lat: 14.6076, lng: 121.1521 }; // Norzagaray, Bulacan
+  const COVERAGE_RADIUS = 20000; // 25km in meters - covers Norzagaray area
 
   const [currentStep, setCurrentStep] = useState(1);
   const [showMapModal, setShowMapModal] = useState(false);

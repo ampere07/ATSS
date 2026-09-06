@@ -1595,6 +1595,23 @@ class JobOrderController extends Controller
                     'account_number' => $accountNumber,
                     'existing_user_id' => $existingUser->id,
                 ]);
+
+                // Approving onto an account that already has a portal user left
+                // that user holding whatever password it was created with, while
+                // the customer is told their password is their mobile number.
+                // Point it at the number, but only for a customer-role account
+                // whose hash has drifted — never overwrite a staff password.
+                if (\App\Support\PortalPassword::isCustomer($existingUser)
+                    && !\App\Support\PortalPassword::hashIsCurrent($customer->contact_number_primary, $existingUser->password_hash)) {
+                    $existingUser->contact_number = trim((string) $customer->contact_number_primary);
+                    $existingUser->password_hash = \App\Support\PortalPassword::normalize($customer->contact_number_primary);
+                    $existingUser->save();
+
+                    \Log::info('Existing customer user repointed at current contact number', [
+                        'user_id' => $existingUser->id,
+                        'account_number' => $accountNumber,
+                    ]);
+                }
             } else {
                 // Create user with direct password hash assignment to avoid mutator
                 $userData = [
@@ -1603,7 +1620,7 @@ class JobOrderController extends Controller
                     'first_name' => $customer->first_name,
                     'middle_initial' => $customer->middle_initial,
                     'last_name' => $customer->last_name,
-                    'contact_number' => $customer->contact_number_primary,
+                    'contact_number' => trim((string) $customer->contact_number_primary),
                     'role_id' => $customerRoleId,
                     'status' => 'active',
                     'active' => 1,
@@ -1614,7 +1631,11 @@ class JobOrderController extends Controller
                 
                 // Directly insert into database to bypass mutator
                 $userId = \DB::table('users')->insertGetId(array_merge($userData, [
-                    'password_hash' => Hash::make($customer->contact_number_primary),
+                    // Canonical spelling, so the number verifies however the
+                    // customer types it at the login screen — "0917…", "917…",
+                    // "+63 917…" all reach the same hash. Hashing the raw column
+                    // value meant only its exact spelling ever worked.
+                    'password_hash' => \App\Support\PortalPassword::hash($customer->contact_number_primary),
                     'created_at' => now(),
                     'updated_at' => now(),
                 ]));

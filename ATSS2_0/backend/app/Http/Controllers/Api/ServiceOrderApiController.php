@@ -662,6 +662,32 @@ class ServiceOrderApiController extends Controller
                 }
             }
 
+            // The day a technician moved the visit status.
+            //
+            // Derived here rather than read from the request: it is a claim
+            // about who acted and on what day, and neither the acting role nor
+            // the device's clock is the client's to assert. `visit_status_date`
+            // is deliberately absent from $allowedFields above, so a request
+            // naming it is ignored rather than trusted.
+            //
+            // Written only when the status actually moves. Re-saving a ticket
+            // without touching the dropdown — which both clients do on every
+            // save, since visit_status is sent whenever the ticket is For Visit
+            // — leaves the original date standing.
+            if (array_key_exists('visit_status', $data)
+                && $this->isTechnician($this->resolveActingUser($request))
+                && $this->visitStatusChanged($serviceOrder->visit_status ?? null, $data['visit_status'])
+            ) {
+                $data['visit_status_date'] = now()->toDateString();
+
+                Log::info('Visit status moved by a technician', [
+                    'id' => $id,
+                    'from' => $serviceOrder->visit_status ?? null,
+                    'to' => $data['visit_status'],
+                    'visit_status_date' => $data['visit_status_date'],
+                ]);
+            }
+
             $data['updated_at'] = now();
 
             Log::info('Filtered data for update', ['data' => $data]);
@@ -1696,6 +1722,42 @@ class ServiceOrderApiController extends Controller
             // No sanctum guard configured — treat as unidentified.
             return null;
         }
+    }
+
+    /**
+     * Is the signed-in user a technician?
+     *
+     * Read strictly off role_id, the way isServiceOrderLockedForTechnician()
+     * below and JobOrderController do. A hybrid custom role that merely builds
+     * on Technician is deliberately not counted: it does not get the queue lock
+     * either, and visit_status_date records that a technician was on site, not
+     * that somebody held a technician-derived permission set.
+     *
+     * An unidentified caller is not a technician, so a request that fails to
+     * authenticate leaves the column alone rather than stamping today onto it.
+     */
+    private function isTechnician($currentUser): bool
+    {
+        return $currentUser !== null && (int) $currentUser->role_id === Role::TECHNICIAN;
+    }
+
+    /**
+     * Did the visit status actually move?
+     *
+     * Compared on the trimmed, case-folded strings. Both clients normalise the
+     * dropdown before sending it, but they do so from their own lists and the
+     * stored value may predate either — the show() query hands back whatever is
+     * in the column. A difference in casing or padding alone is not a
+     * technician moving anything, so it must not restamp the date.
+     *
+     * A null and an empty string are the same absence of a status, so clearing
+     * an already-empty field does not count as a move either.
+     */
+    private function visitStatusChanged($previous, $next): bool
+    {
+        $normalise = static fn ($value): string => strtolower(trim((string) ($value ?? '')));
+
+        return $normalise($previous) !== $normalise($next);
     }
 
     /**

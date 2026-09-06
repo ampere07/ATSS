@@ -4,7 +4,7 @@ import { API_BASE_URL } from '../config/api';
 import AddRouterModelModal from '../modals/AddRouterModelModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { authFetch } from '../config/api';
-import { currentUserCan } from '../hooks/usePermissions';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface RouterModel {
   SN: string;
@@ -21,7 +21,7 @@ interface RouterModel {
 const RouterModelList: React.FC = () => {
   // Add/edit/delete on this list. The same key the API demands, so a
   // control is only drawn when the request behind it would succeed.
-  const canManageRouterModels = currentUserCan('router-models.manage');
+  const actions = usePageActions('router-models');
   const [searchQuery, setSearchQuery] = useState('');
   const [routers, setRouters] = useState<RouterModel[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -131,7 +131,7 @@ const RouterModelList: React.FC = () => {
   };
 
   const handleDelete = async (router: RouterModel) => {
-    if (!canManageRouterModels) return;
+    if (!actions.canDelete) return;
     if (!window.confirm(`⚠️ PERMANENT DELETE WARNING ⚠️\n\nAre you sure you want to permanently delete router model "${router.brand} ${router.Model}"?\n\nThis will PERMANENTLY REMOVE the router model from the database and CANNOT BE UNDONE!\n\nClick OK to permanently delete, or Cancel to keep the router model.`)) {
       return;
     }
@@ -172,13 +172,13 @@ const RouterModelList: React.FC = () => {
   };
 
   const handleEdit = (router: RouterModel) => {
-    if (!canManageRouterModels) return;
+    if (!actions.canEdit) return;
     setEditingRouter(router);
     setIsModalOpen(true);
   };
 
   const handleAddNew = () => {
-    if (!canManageRouterModels) return;
+    if (!actions.canCreate) return;
     setEditingRouter(null);
     setIsModalOpen(true);
   };
@@ -246,7 +246,7 @@ const RouterModelList: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {canManageRouterModels && (
+            {actions.canEdit && (
               <button
                 onClick={() => handleEdit(router)}
                 className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded"
@@ -255,7 +255,7 @@ const RouterModelList: React.FC = () => {
                 <Edit2 className="h-4 w-4" />
               </button>
             )}
-            {canManageRouterModels && (
+            {actions.canDelete && (
               <button
                 onClick={() => handleDelete(router)}
                 disabled={deletingItems.has(router.SN)}
@@ -284,7 +284,7 @@ const RouterModelList: React.FC = () => {
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-xl font-semibold text-white">Router Models</h1>
             <div className="flex items-center gap-3">
-              {canManageRouterModels && (
+              {actions.canCreate && (
                 <button
                   onClick={handleAddNew}
                   className="px-4 py-2 text-white rounded-lg flex items-center gap-2 transition-colors"

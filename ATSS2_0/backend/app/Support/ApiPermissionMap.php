@@ -59,6 +59,18 @@ final class ApiPermissionMap
      * The fourth element exists for the handful of endpoints where one verb is
      * heavier than its neighbours — deleting a report is not the same act as
      * editing one — and is written `['DELETE' => 'reports.delete']`.
+     *
+     * It may also be a plain string naming a page, which is shorthand for that
+     * page's standard verbs:
+     *
+     *     ['plans*', null, 'plan-list', 'plan-list'],
+     *
+     * reads as "anyone signed in may read the plan list; creating needs
+     * plan-list.create, updating plan-list.edit, deleting plan-list.delete".
+     * The third element stays the page key, so a write method outside those
+     * four still requires the page rather than falling through to nothing.
+     * Writing the four out by hand twenty-five times would bury the handful of
+     * rows that genuinely differ.
      */
     private const RULES = [
         // ── Anonymous ────────────────────────────────────────────────────────
@@ -141,35 +153,39 @@ final class ApiPermissionMap
         // ── Reference data ───────────────────────────────────────────────────
         // Read by everyone (form dropdowns, detail panes); written from the
         // Configurations page that owns the list.
+        //
+        // The fourth column is the page whose standard verbs govern the write:
+        // POST needs `<page>.create`, PUT and PATCH `<page>.edit`, DELETE
+        // `<page>.delete`. See the block comment above RULES.
         ['locations/{type}/*/related',   null, null],
-        ['locations*',                   null, 'location-list'],
-        ['location-details*',            null, 'location-list'],
-        ['regions*',                     null, 'location-list'],
-        ['region_list*',                 null, 'location-list'],
-        ['cities*',                      null, 'location-list'],
-        ['city_list*',                   null, 'location-list'],
-        ['barangays*',                   null, 'location-list'],
-        ['barangay_list*',               null, 'location-list'],
-        ['villages*',                    null, 'location-list'],
-        ['plans*',                       null, 'plan-list'],
-        ['promos*',                      null, 'promo-list'],
+        ['locations*',                   null, 'location-list', 'location-list'],
+        ['location-details*',            null, 'location-list', 'location-list'],
+        ['regions*',                     null, 'location-list', 'location-list'],
+        ['region_list*',                 null, 'location-list', 'location-list'],
+        ['cities*',                      null, 'location-list', 'location-list'],
+        ['city_list*',                   null, 'location-list', 'location-list'],
+        ['barangays*',                   null, 'location-list', 'location-list'],
+        ['barangay_list*',               null, 'location-list', 'location-list'],
+        ['villages*',                    null, 'location-list', 'location-list'],
+        ['plans*',                       null, 'plan-list', 'plan-list'],
+        ['promos*',                      null, 'promo-list', 'promo-list'],
         ['lcp-nap-locations',            null, 'lcp-nap-location'],
         ['lcpnap*',                      null, ['lcp', 'nap', 'lcp-nap-location']],
-        ['lcp*',                         null, 'lcp'],
-        ['nap*',                         null, 'nap'],
-        ['ports*',                       null, 'ports.manage'],
-        ['port*',                        null, 'ports.manage'],
-        ['vlans*',                       null, 'vlan-config'],
-        ['vlan*',                        null, 'vlan-config'],
-        ['usage-types*',                 null, 'usage-type'],
-        ['payment-methods*',             null, 'payment-method'],
-        ['work-categories*',             null, 'work-category'],
-        ['router-models*',               null, 'router-models.manage'],
-        ['status-remarks*',              null, 'status-remarks-list.manage'],
-        ['concerns*',                    null, 'concern-config'],
-        ['sms-templates*',               null, 'sms-template'],
-        ['email-templates*',             null, 'email-templates'],
-        ['billing-statuses*',            null, 'billing-config'],
+        ['lcp*',                         null, 'lcp', 'lcp'],
+        ['nap*',                         null, 'nap', 'nap'],
+        ['ports*',                       null, 'ports', 'ports'],
+        ['port*',                        null, 'ports', 'ports'],
+        ['vlans*',                       null, 'vlan-config', 'vlan-config'],
+        ['vlan*',                        null, 'vlan-config', 'vlan-config'],
+        ['usage-types*',                 null, 'usage-type', 'usage-type'],
+        ['payment-methods*',             null, 'payment-method', 'payment-method'],
+        ['work-categories*',             null, 'work-category', 'work-category'],
+        ['router-models*',               null, 'router-models', 'router-models'],
+        ['status-remarks*',              null, 'status-remarks-list', 'status-remarks-list'],
+        ['concerns*',                    null, 'concern-config', 'concern-config'],
+        ['sms-templates*',               null, 'sms-template', 'sms-template'],
+        ['email-templates*',             null, 'email-templates', 'email-templates'],
+        ['billing-statuses*',            null, 'billing-config', 'billing-config'],
         ['custom-account-number*',       null, ['customer.details-edit', 'user-management']],
         ['settings-color-palette*',      null, 'settings'],
         ['settings-image-size*',         null, 'settings'],
@@ -215,18 +231,18 @@ final class ApiPermissionMap
             'user-management', 'tech-users', 'agent-management', 'team-agent',
             'job-order', 'service-order', 'work-order', 'application-management',
             'inventory',
-        ], ['user-management', 'tech-users', 'agent-management']],
+        ], ['user-management', 'tech-users', 'agent-management'], 'user-management'],
         ['technicians*', [
             'tech-users', 'user-management',
             'job-order', 'service-order', 'work-order', 'application-management',
-        ], 'tech-users'],
+        ], 'tech-users', 'tech-users'],
         ['agents*', [
             'agent-management', 'team-agent', 'bonus-history', 'agent-payout',
             'job-order', 'work-order', 'application-management',
         ], ['agent-management', 'team-agent']],
-        ['roles*',                       null, 'roles'],
-        ['groups*',                      null, ['group-management', 'user-management']],
-        ['organizations*',               null, 'organization'],
+        ['roles*',                       null, 'roles', 'roles'],
+        ['groups*',                      null, ['group-management', 'user-management'], 'group-management'],
+        ['organizations*',               null, 'organization', 'organization'],
         ['email-queue/send-credentials/*', 'user-management', 'user-management'],
 
         // ── Applications ─────────────────────────────────────────────────────
@@ -328,7 +344,7 @@ final class ApiPermissionMap
         ['billing-generation/statements', ['invoice', 'soa', 'customer', 'customer-bills', 'customer-dashboard'], 'billing-config'],
         ['billing-generation/*',         ['customer', 'billing-config'], ['customer', 'billing-config']],
         ['billing-notifications/*',      ['customer', 'billing-config'], ['customer', 'billing-config']],
-        ['billing-config*',              'billing-config', 'billing-config'],
+        ['billing-config*',              'billing-config', 'billing-config', 'billing-config'],
         ['billing-details*',             ['customer', 'customer-bills', 'customer-dashboard'], 'customer.details-edit'],
         ['billing_details*',             ['customer', 'customer-bills', 'customer-dashboard'], 'customer.details-edit'],
         // One account's billing record, read from the service order edit form to
@@ -407,14 +423,14 @@ final class ApiPermissionMap
         // further up in the billing section, would match it first. It is listed
         // there instead, at the top of that block.
 
-        ['radius-config*',               'radius-config', 'radius-config'],
+        ['radius-config*',               'radius-config', 'radius-config', 'radius-config'],
         ['radius/*',                     ['radius-config', 'job-order', 'customer'], ['radius-config', 'customer.details-edit', 'job-order.admin-edit', 'job-order.approve']],
         // The technician's Done form reads the username and password patterns to
         // build the PPPoE credentials it is about to save, so the read side names
         // Job Order alongside the page that defines them. Defining a pattern is
         // still PPPoE Setup's alone, as are the two maintenance endpoints that
         // fall through to the rule below.
-        ['pppoe/patterns*',              ['pppoe-setup', 'job-order'], 'pppoe-setup'],
+        ['pppoe/patterns*',              ['pppoe-setup', 'job-order'], 'pppoe-setup', 'pppoe-setup'],
         ['pppoe/*',                      'pppoe-setup', 'pppoe-setup'],
 
         // ── Inventory ────────────────────────────────────────────────────────
@@ -451,7 +467,7 @@ final class ApiPermissionMap
         ['sms/logs',                     'sms-logs', 'sms-logs'],
         ['sms/send',                     'sms-blast', 'sms-blast'],
         ['sms/test',                     'sms-config', 'sms-config'],
-        ['sms-config*',                  'sms-config', 'sms-config'],
+        ['sms-config*',                  'sms-config', 'sms-config', 'sms-config'],
         ['email-queue*',                 'email-logs', 'email-logs'],
 
         // ── Reports and logs ─────────────────────────────────────────────────
@@ -491,6 +507,11 @@ final class ApiPermissionMap
             // than the PUT beside it.
             $perMethod = $rule[3] ?? [];
 
+            // A page name rather than a map: the page's standard verbs.
+            if (is_string($perMethod)) {
+                $perMethod = self::crudRequirements($perMethod);
+            }
+
             if (array_key_exists($method, $perMethod)) {
                 return $perMethod[$method];
             }
@@ -499,6 +520,24 @@ final class ApiPermissionMap
         }
 
         return self::DEFAULT_REQUIREMENT;
+    }
+
+    /**
+     * The standard verbs of a page, as a per-method requirement map.
+     *
+     * PATCH is treated as PUT: both are how a list page saves an edit, and no
+     * page in the system means something different by the two.
+     *
+     * @return array<string, string>
+     */
+    private static function crudRequirements(string $page): array
+    {
+        return [
+            'POST'   => "$page.create",
+            'PUT'    => "$page.edit",
+            'PATCH'  => "$page.edit",
+            'DELETE' => "$page.delete",
+        ];
     }
 
     /** Is there an explicit rule for this path, or did it fall through? */

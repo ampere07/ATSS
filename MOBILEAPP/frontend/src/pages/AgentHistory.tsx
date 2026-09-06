@@ -669,7 +669,16 @@ const AgentHistory: React.FC = () => {
           ListFooterComponent={renderFooter}
           contentContainerStyle={[
             styles.listContainer,
-            { paddingBottom: isMobile ? 120 : 40 }
+            {
+              paddingBottom: isMobile ? 120 : 40,
+              // A payout card is a name on the left and a figure on the right.
+              // Given a tablet's full width the two end up a hand's span apart
+              // with nothing between them, so the list is held to a phone-like
+              // column and centred instead.
+              width: '100%',
+              maxWidth: 640,
+              alignSelf: 'center',
+            }
           ]}
           refreshControl={
             <RefreshControl

@@ -142,6 +142,9 @@ class Role extends Model
         // The seeded role a hybrid custom role inherits from. See baseRoleId().
         'base_role_id',
         'permissions',
+        // Which generation of the permission model this row was saved under.
+        // See the add_permissions_version_to_roles_table migration.
+        'permissions_version',
         'created_by_user_id',
         'updated_by_user_id',
         'organization_id'
@@ -150,6 +153,7 @@ class Role extends Model
     protected $casts = [
         'permissions' => 'array',
         'base_role_id' => 'integer',
+        'permissions_version' => 'integer',
     ];
 
     public function users()

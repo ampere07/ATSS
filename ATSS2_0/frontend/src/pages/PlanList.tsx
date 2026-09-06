@@ -7,6 +7,7 @@ import PlanListDetails from '../components/PlanListDetails';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { authFetch } from '../config/api';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface Plan {
   id: number;
@@ -35,6 +36,11 @@ interface GlobalModalState {
 }
 
 const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = '' }) => {
+  // Add, Edit and Delete are granted separately. The same keys the API
+  // demands, so a control is only drawn when the request behind it would
+  // succeed.
+  const actions = usePageActions('plan-list');
+
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [searchQuery, setSearchQuery] = useState(initialSearchQuery);
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -201,6 +207,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
   };
 
   const handleDelete = (plan: Plan) => {
+    if (!actions.canDelete) return;
     showGlobalModal(
       'confirm',
       'Confirm Deletion',
@@ -265,11 +272,13 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
   };
 
   const handleEdit = (plan: Plan) => {
+    if (!actions.canEdit) return;
     setEditingPlan(plan);
     setIsModalOpen(true);
   };
 
   const handleAddNew = () => {
+    if (!actions.canCreate) return;
     setEditingPlan(null);
     setIsModalOpen(true);
   };
@@ -406,6 +415,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
             </div>
           </div>
           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+            {actions.canEdit && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -419,6 +429,8 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
             >
               <Edit2 className="h-4 w-4" />
             </button>
+            )}
+            {actions.canDelete && (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -437,6 +449,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
                 <Trash2 className="h-4 w-4" />
               )}
             </button>
+            )}
           </div>
         </div>
       </div>
@@ -472,6 +485,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
                 colorPalette={colorPalette}
                 placeholder="Search Plan List"
               />
+              {actions.canCreate && (
               <button
                 onClick={handleAddNew}
                 className="px-4 py-2.5 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm"
@@ -492,6 +506,7 @@ const PlanList: React.FC<PlanListProps> = ({ onNavigate, initialSearchQuery = ''
                 <Plus className="h-4 w-4" />
                 <span className="hidden md:inline">Add Plan</span>
               </button>
+              )}
               <button
                 onClick={() => loadPlans()}
                 className="p-2.5 rounded-lg flex items-center justify-center transition-colors shadow-sm active:rotate-180 duration-500"

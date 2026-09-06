@@ -3,6 +3,7 @@ import { Receipt, Hash, Edit2, Trash2, Save, X, Calendar } from 'lucide-react';
 import { customAccountNumberService, CustomAccountNumber } from '../services/customAccountNumberService';
 import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface BillingConfigData {
   advance_generation_day: number;
@@ -34,6 +35,12 @@ interface ModalConfig {
 }
 
 const BillingConfig: React.FC = () => {
+  // This page holds one account-number rule and one billing configuration
+  // rather than a list, so Add is the first save and Edit is every one after.
+  // Both saves accept either key; the Edit and Delete controls take their own.
+  const actions = usePageActions('billing-config');
+  const maySave = actions.canCreate || actions.canEdit;
+
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [customAccountNumber, setCustomAccountNumber] = useState<CustomAccountNumber | null>(null);
   const [isEditingAccountNumber, setIsEditingAccountNumber] = useState<boolean>(false);
@@ -136,6 +143,7 @@ const BillingConfig: React.FC = () => {
   }, []);
 
   const handleSaveAccountNumber = async () => {
+    if (!maySave) return;
     try {
       setLoadingAccountNumber(true);
       const trimmedInput = accountNumberInput.trim();
@@ -185,6 +193,7 @@ const BillingConfig: React.FC = () => {
   };
 
   const handleDeleteAccountNumber = async () => {
+    if (!actions.canDelete) return;
     if (!customAccountNumber) return;
 
     setModal({
@@ -233,6 +242,7 @@ const BillingConfig: React.FC = () => {
   };
 
   const handleSaveBillingConfig = async () => {
+    if (!maySave) return;
     try {
       setLoadingBillingConfig(true);
 
@@ -308,6 +318,7 @@ const BillingConfig: React.FC = () => {
   };
 
   const handleDeleteBillingConfig = async () => {
+    if (!actions.canDelete) return;
     if (!billingConfig) return;
 
     setModal({
@@ -489,6 +500,7 @@ const BillingConfig: React.FC = () => {
                   </div>
 
                 <div className="flex items-center gap-2">
+                  {actions.canEdit && (
                   <button
                     onClick={() => setIsEditingAccountNumber(true)}
                     className="p-2 text-blue-400 hover:text-blue-300 hover:bg-blue-900 rounded transition-colors"
@@ -496,6 +508,8 @@ const BillingConfig: React.FC = () => {
                   >
                     <Edit2 size={18} />
                   </button>
+                  )}
+                  {actions.canDelete && (
                   <button
                     onClick={handleDeleteAccountNumber}
                     className="p-2 text-red-400 hover:text-red-300 hover:bg-red-900 rounded transition-colors"
@@ -503,6 +517,7 @@ const BillingConfig: React.FC = () => {
                   >
                     <Trash2 size={18} />
                   </button>
+                  )}
                 </div>
               </div>
             ) : (
@@ -683,6 +698,7 @@ const BillingConfig: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2 pt-2">
+                  {actions.canEdit && (
                   <button
                     onClick={() => setIsEditingBillingConfig(true)}
                     className="flex items-center gap-2 px-4 py-2 text-blue-400 hover:text-blue-300 hover:bg-blue-900 rounded transition-colors"
@@ -690,6 +706,8 @@ const BillingConfig: React.FC = () => {
                     <Edit2 size={18} />
                     <span>Edit</span>
                   </button>
+                  )}
+                  {actions.canDelete && (
                   <button
                     onClick={handleDeleteBillingConfig}
                     className="flex items-center gap-2 px-4 py-2 text-red-400 hover:text-red-300 hover:bg-red-900 rounded transition-colors"
@@ -697,6 +715,7 @@ const BillingConfig: React.FC = () => {
                     <Trash2 size={18} />
                     <span>Delete</span>
                   </button>
+                  )}
                 </div>
               </div>
             ) : (

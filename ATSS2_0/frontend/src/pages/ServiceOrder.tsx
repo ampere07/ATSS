@@ -54,8 +54,48 @@ const allColumns = [
   { key: 'startTime', label: 'Start Time', width: 'min-w-40' },
   { key: 'endTime', label: 'End Time', width: 'min-w-40' },
   { key: 'duration', label: 'Duration', width: 'min-w-28' },
-  { key: 'visitStatus', label: 'Visit Status', width: 'min-w-32' }
+  { key: 'visitStatus', label: 'Visit Status', width: 'min-w-32' },
+  { key: 'visitStatusDate', label: 'Visit Status Date', width: 'min-w-36' }
 ];
+
+// Columns the table starts with unticked. Timing detail most desks do not want
+// in the way; the column picker turns them on.
+const DEFAULT_HIDDEN_COLUMNS = ['startTime', 'endTime', 'duration'];
+
+// Columns added after the column picker shipped, and the note recording that
+// each has been shown once.
+//
+// A saved visibility list holds only the columns that were visible when it was
+// written, so a column added later is indistinguishable from one the user
+// deliberately hid. Naming the new ones here reveals each exactly once — the
+// adoption note is written at the same time, so unticking it afterwards sticks.
+// An entry can be deleted a release or two later, once every browser has seen it.
+const RECENTLY_ADDED_COLUMNS = ['visitStatusDate'];
+const COLUMN_ADOPTION_KEY = 'serviceOrderAdoptedColumns';
+
+const adoptNewColumns = (saved: string[]): string[] => {
+  let adopted: string[] = [];
+  try {
+    const raw = localStorage.getItem(COLUMN_ADOPTION_KEY);
+    if (raw) adopted = JSON.parse(raw);
+  } catch (err) {
+    console.error('Failed to read adopted columns:', err);
+  }
+
+  const pending = RECENTLY_ADDED_COLUMNS.filter(
+    key => !adopted.includes(key) && !saved.includes(key)
+  );
+  if (pending.length === 0) return saved;
+
+  const next = [...saved, ...pending];
+  try {
+    localStorage.setItem('serviceOrderVisibleColumns', JSON.stringify(next));
+    localStorage.setItem(COLUMN_ADOPTION_KEY, JSON.stringify([...adopted, ...pending]));
+  } catch (err) {
+    console.error('Failed to record adopted columns:', err);
+  }
+  return next;
+};
 
 const ServiceOrderPage: React.FC = () => {
   const calculateDuration = (start?: string | null, end?: string | null): string => {
@@ -131,14 +171,14 @@ const ServiceOrderPage: React.FC = () => {
     const saved = localStorage.getItem('serviceOrderVisibleColumns');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        return adoptNewColumns(JSON.parse(saved));
       } catch (err) {
         console.error('Failed to load column visibility:', err);
       }
     }
     return allColumns
       .map(col => col.key)
-      .filter(key => key !== 'startTime' && key !== 'endTime' && key !== 'duration');
+      .filter(key => !DEFAULT_HIDDEN_COLUMNS.includes(key));
   });
   const [technicianEmail, setTechnicianEmail] = useState<string | undefined>(undefined);
   const [sortColumn, setSortColumn] = useState<string | null>('timestamp');
@@ -152,7 +192,13 @@ const ServiceOrderPage: React.FC = () => {
     const saved = localStorage.getItem('serviceOrderColumnOrder');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        // A saved order is a rearrangement of every column that existed when it
+        // was written, hidden ones included, so anything missing from it is
+        // genuinely new. Append it — left out, its indexOf below is -1 and it
+        // would sort ahead of Timestamp.
+        const parsed: string[] = JSON.parse(saved);
+        const missing = allColumns.map(col => col.key).filter(key => !parsed.includes(key));
+        return [...parsed, ...missing];
       } catch (err) {
         console.error('Failed to load column order:', err);
       }
@@ -597,6 +643,8 @@ const ServiceOrderPage: React.FC = () => {
       case 'newLcpnap': return item.newLcpnap;
       case 'supportStatus': return item.supportStatus ?? (item as any).support_status ?? '';
       case 'visitStatus': return item.visitStatus;
+      // Already "YYYY-MM-DD", which sorts correctly as a string.
+      case 'visitStatusDate': return item.visitStatusDate;
       case 'timestamp': return item.timestamp;
       case 'dateInstalled': return item.dateInstalled;
       case 'modifiedBy': return item.modifiedBy ?? (item as any).updated_by_user ?? '';
@@ -1291,6 +1339,8 @@ const ServiceOrderPage: React.FC = () => {
         return <StatusText status={serviceOrder.supportStatus} type="support" />;
       case 'visitStatus':
         return <StatusText status={serviceOrder.visitStatus} type="visit" />;
+      case 'visitStatusDate':
+        return serviceOrder.visitStatusDate || '-';
       case 'fullName':
         return (
           <div className="flex items-center space-x-2 overflow-hidden">
@@ -1369,6 +1419,7 @@ const ServiceOrderPage: React.FC = () => {
         case 'timestamp': return so.timestamp || '-';
         case 'supportStatus': return so.supportStatus || '-';
         case 'visitStatus': return so.visitStatus || '-';
+        case 'visitStatusDate': return so.visitStatusDate || '-';
         case 'fullName': return so.fullName || '-';
         case 'contactNumber': return so.contactNumber || '-';
         case 'fullAddress': return so.fullAddress || '-';

@@ -5,7 +5,7 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import StatusRemarksFormModal from '../modals/StatusRemarksFormModal';
 import GlobalSearch from './globalfunctions/GlobalSearch';
-import { currentUserCan } from '../hooks/usePermissions';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface StatusRemark {
   id: number;
@@ -27,7 +27,7 @@ interface GlobalModalState {
 const StatusRemarksList: React.FC = () => {
   // Add/edit/delete on this list. The same key the API demands, so a
   // control is only drawn when the request behind it would succeed.
-  const canManageStatusRemarks = currentUserCan('status-remarks-list.manage');
+  const actions = usePageActions('status-remarks-list');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusRemarks, setStatusRemarks] = useState<StatusRemark[]>([]);
@@ -122,7 +122,7 @@ const StatusRemarksList: React.FC = () => {
   };
 
   const handleDelete = (remark: StatusRemark) => {
-    if (!canManageStatusRemarks) return;
+    if (!actions.canDelete) return;
     showGlobalModal(
       'confirm',
       'Confirm Deletion',
@@ -176,7 +176,7 @@ const StatusRemarksList: React.FC = () => {
   };
 
   const handleEdit = (remark: StatusRemark) => {
-    if (!canManageStatusRemarks) return;
+    if (!actions.canEdit) return;
     setEditingRemark(remark);
     setShowAddModal(true);
   };
@@ -255,7 +255,7 @@ const StatusRemarksList: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-            {canManageStatusRemarks && (
+            {actions.canEdit && (
               <button
                 onClick={() => handleEdit(remark)}
                 className={`p-2 rounded transition-colors ${isDarkMode
@@ -267,7 +267,7 @@ const StatusRemarksList: React.FC = () => {
                 <Edit2 className="h-4 w-4" />
               </button>
             )}
-            {canManageStatusRemarks && (
+            {actions.canDelete && (
               <button
                 onClick={() => handleDelete(remark)}
                 disabled={deletingItems.has(remark.id)}
@@ -305,6 +305,7 @@ const StatusRemarksList: React.FC = () => {
               colorPalette={colorPalette}
               placeholder="Search Status Remarks..."
             />
+            {actions.canCreate && (
             <button
               onClick={() => {
                 setEditingRemark(null);
@@ -328,6 +329,7 @@ const StatusRemarksList: React.FC = () => {
               <Plus className="h-4 w-4" />
               <span className="hidden md:inline">Add Remark</span>
             </button>
+            )}
             <button
               onClick={() => loadStatusRemarks()}
               className="p-2.5 rounded-lg flex items-center justify-center transition-colors shadow-sm active:rotate-180 duration-500"

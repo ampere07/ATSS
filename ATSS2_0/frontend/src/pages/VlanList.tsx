@@ -6,6 +6,7 @@ import AddVlanModal from '../modals/AddVlanModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { authFetch } from '../config/api';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface Vlan {
   id: number;
@@ -16,6 +17,11 @@ interface Vlan {
 }
 
 const VlanList: React.FC = () => {
+  // Add, Edit and Delete are granted separately. The same keys the API
+  // demands, so a control is only drawn when the request behind it would
+  // succeed.
+  const actions = usePageActions('vlan-config');
+
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [vlans, setVlans] = useState<Vlan[]>([]);
@@ -170,6 +176,7 @@ const VlanList: React.FC = () => {
   };
 
   const handleDelete = (vlan: Vlan) => {
+    if (!actions.canDelete) return;
     showGlobalModal(
       'confirm',
       'Confirm Deletion',
@@ -219,11 +226,13 @@ const VlanList: React.FC = () => {
   };
 
   const handleEdit = (vlan: Vlan) => {
+    if (!actions.canEdit) return;
     setEditingVlan(vlan);
     setShowAddModal(true);
   };
 
   const handleAddNew = () => {
+    if (!actions.canCreate) return;
     setEditingVlan(null);
     setShowAddModal(true);
   };
@@ -322,6 +331,7 @@ const VlanList: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          {actions.canEdit && (
           <button
             onClick={(e) => { e.stopPropagation(); handleEdit(vlan); }}
             className={`p-2 rounded transition-colors ${isDarkMode
@@ -331,6 +341,8 @@ const VlanList: React.FC = () => {
           >
             <Edit2 size={16} />
           </button>
+          )}
+          {actions.canDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); handleDelete(vlan); }}
             disabled={deletingItems.has(vlan.id)}
@@ -345,6 +357,7 @@ const VlanList: React.FC = () => {
               <Trash2 size={16} />
             )}
           </button>
+          )}
         </div>
       </div>
     );
@@ -365,6 +378,7 @@ const VlanList: React.FC = () => {
               colorPalette={colorPalette}
               placeholder="Search VLANs"
             />
+            {actions.canCreate && (
             <button
               onClick={handleAddNew}
               className="px-4 py-2.5 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm"
@@ -385,6 +399,7 @@ const VlanList: React.FC = () => {
               <Plus className="h-4 w-4" />
               <span className="hidden md:inline">Add VLAN</span>
             </button>
+            )}
             <button
               onClick={() => loadVlans()}
               className="p-2.5 rounded-lg flex items-center justify-center transition-colors shadow-sm active:rotate-180 duration-500"

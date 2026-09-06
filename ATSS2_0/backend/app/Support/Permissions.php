@@ -41,6 +41,15 @@ final class Permissions
     public const WILDCARD = '*';
 
     /**
+     * The generation of the permission model Role Management writes.
+     *
+     * Stamped on `roles.permissions_version` by every save, and compared in
+     * roleKeys() to decide whether a stored list is authoritative or predates
+     * the per-action keys. Raise it only alongside a rule that reads it.
+     */
+    public const CURRENT_VERSION = 1;
+
+    /**
      * Every page key in the system, grouped the way the sidebar groups them.
      * The Role modal renders this list, so a page missing here can never be
      * granted to a custom role.
@@ -236,21 +245,182 @@ final class Permissions
             'agent-invoices.payout',
         ],
 
-        // The three list pages added since the Role modal was written. Each has
-        // add/edit/delete controls that were open to anyone who could open the
-        // page.
-        'ports' => [
-            'ports.manage',
-        ],
-        'router-models' => [
-            'router-models.manage',
-        ],
-        'status-remarks-list' => [
-            'status-remarks-list.manage',
-        ],
         'soa-generation' => [
             'soa-generation.manage',
         ],
+
+        // ── Configurations ───────────────────────────────────────────────────
+        // Every page in this group is a list with Add, Edit and Delete
+        // controls, and until now holding the page granted all three. They
+        // follow the standard verbs described above CRUD_VERBS.
+        'promo-list' => [
+            'promo-list.create', 'promo-list.edit', 'promo-list.delete',
+        ],
+        'plan-list' => [
+            'plan-list.create', 'plan-list.edit', 'plan-list.delete',
+        ],
+        'location-list' => [
+            'location-list.create', 'location-list.edit', 'location-list.delete',
+        ],
+        'lcp' => [
+            'lcp.create', 'lcp.edit', 'lcp.delete',
+        ],
+        'nap' => [
+            'nap.create', 'nap.edit', 'nap.delete',
+        ],
+        'ports' => [
+            'ports.create', 'ports.edit', 'ports.delete',
+        ],
+        'router-models' => [
+            'router-models.create', 'router-models.edit', 'router-models.delete',
+        ],
+        'status-remarks-list' => [
+            'status-remarks-list.create', 'status-remarks-list.edit', 'status-remarks-list.delete',
+        ],
+        'usage-type' => [
+            'usage-type.create', 'usage-type.edit', 'usage-type.delete',
+        ],
+        'vlan-config' => [
+            'vlan-config.create', 'vlan-config.edit', 'vlan-config.delete',
+        ],
+        'payment-method' => [
+            'payment-method.create', 'payment-method.edit', 'payment-method.delete',
+        ],
+        'work-category' => [
+            'work-category.create', 'work-category.edit', 'work-category.delete',
+        ],
+        'radius-config' => [
+            'radius-config.create', 'radius-config.edit', 'radius-config.delete',
+        ],
+        'smart-olt' => [
+            'smart-olt.create', 'smart-olt.edit', 'smart-olt.delete',
+        ],
+        'sms-config' => [
+            'sms-config.create', 'sms-config.edit', 'sms-config.delete',
+        ],
+        'sms-template' => [
+            'sms-template.create', 'sms-template.edit', 'sms-template.delete',
+        ],
+        'email-templates' => [
+            'email-templates.create', 'email-templates.edit', 'email-templates.delete',
+        ],
+        'pppoe-setup' => [
+            'pppoe-setup.create', 'pppoe-setup.edit', 'pppoe-setup.delete',
+        ],
+        'concern-config' => [
+            'concern-config.create', 'concern-config.edit', 'concern-config.delete',
+        ],
+        'billing-config' => [
+            'billing-config.create', 'billing-config.edit', 'billing-config.delete',
+        ],
+
+        // ── Users ────────────────────────────────────────────────────────────
+        'user-management' => [
+            'user-management.create', 'user-management.edit', 'user-management.delete',
+        ],
+        'tech-users' => [
+            'tech-users.create', 'tech-users.edit', 'tech-users.delete',
+        ],
+        'organization' => [
+            'organization.create', 'organization.edit', 'organization.delete',
+        ],
+        'roles' => [
+            'roles.create', 'roles.edit', 'roles.delete',
+        ],
+        'group-management' => [
+            'group-management.create', 'group-management.edit', 'group-management.delete',
+        ],
+    ];
+
+    /**
+     * The standard verbs, in the order the Role modal shows them.
+     *
+     * A page whose controls are the ordinary "Add / Edit / Delete" three
+     * declares exactly these, named `<page>.<verb>`. Anything a page does that
+     * is not one of the three — approving, reverting, moving to a job order —
+     * keeps its own descriptive verb above, because a permission that reads
+     * `job-order.approve` says what it grants and `job-order.action3` does not.
+     *
+     * Adding a button to a page is therefore: add its key to ACTIONS here and to
+     * the two client catalogs, give it a label, gate the button with `can()`,
+     * and give the endpoint a rule in ApiPermissionMap. No part of the system
+     * has to learn about the key beyond those tables — the Role modal renders
+     * whatever ACTIONS holds, and both `allows()` and the middleware are
+     * agnostic about which keys exist.
+     */
+    public const CRUD_VERBS = ['create', 'edit', 'delete'];
+
+    /**
+     * What holding a page key used to carry with it, page by page.
+     *
+     * Before the verbs above existed, most of these pages drew their Add, Edit
+     * and Delete controls for anyone who could open them. A custom role saved in
+     * those days lists only the page, so reading it strictly would take those
+     * buttons away from roles that have always had them — silently, on deploy,
+     * with nothing in the UI to explain it. A role saved before the change
+     * (permissions_version 0) therefore still gets the verbs listed here for any
+     * of these pages it holds.
+     *
+     * This is a map rather than a list of pages because it has to reproduce what
+     * each page actually allowed, not what the common case allowed. Three
+     * entries differ, and granting them the full three would be widening access
+     * under cover of a compatibility rule:
+     *
+     *   status-remarks-list  Add was open to the page; Edit and Delete were
+     *                        already behind `status-remarks-list.manage`.
+     *   user-management      Add and Delete were open to the page; Edit was
+     *                        SuperAdmin's alone, checked in UserDetails.
+     *   ports, router-models Every control was already behind `.manage`, so the
+     *                        page on its own carried nothing. Roles holding the
+     *                        old key are served by RETIRED_ACTIONS instead.
+     *
+     * Saving the role from Role Management stamps the current version and the
+     * ticks become authoritative, which is the only way a role leaves this rule.
+     *
+     * @see roleKeys()
+     */
+    private const GRANDFATHERED_ACTIONS = [
+        'promo-list'          => self::CRUD_VERBS,
+        'plan-list'           => self::CRUD_VERBS,
+        'location-list'       => self::CRUD_VERBS,
+        'lcp'                 => self::CRUD_VERBS,
+        'nap'                 => self::CRUD_VERBS,
+        'usage-type'          => self::CRUD_VERBS,
+        'vlan-config'         => self::CRUD_VERBS,
+        'payment-method'      => self::CRUD_VERBS,
+        'work-category'       => self::CRUD_VERBS,
+        'radius-config'       => self::CRUD_VERBS,
+        'smart-olt'           => self::CRUD_VERBS,
+        'sms-config'          => self::CRUD_VERBS,
+        'sms-template'        => self::CRUD_VERBS,
+        'email-templates'     => self::CRUD_VERBS,
+        'pppoe-setup'         => self::CRUD_VERBS,
+        'concern-config'      => self::CRUD_VERBS,
+        'billing-config'      => self::CRUD_VERBS,
+        'tech-users'          => self::CRUD_VERBS,
+        'organization'        => self::CRUD_VERBS,
+        'roles'               => self::CRUD_VERBS,
+        'group-management'    => self::CRUD_VERBS,
+
+        // The three that were already narrower than their page. See above.
+        'status-remarks-list' => ['create'],
+        'user-management'     => ['create', 'delete'],
+    ];
+
+    /**
+     * Keys that no longer exist, and what they now mean.
+     *
+     * Three pages already gated their controls behind a single `.manage` key.
+     * Splitting that into the standard three would have revoked the buttons
+     * from every role holding the old key, so the old key is still read — it
+     * simply grants all three — while only the new ones are offered in the Role
+     * modal. A role resaved from the modal writes the new keys and stops
+     * relying on this.
+     */
+    private const RETIRED_ACTIONS = [
+        'ports.manage'               => ['ports.create', 'ports.edit', 'ports.delete'],
+        'router-models.manage'       => ['router-models.create', 'router-models.edit', 'router-models.delete'],
+        'status-remarks-list.manage' => ['status-remarks-list.create', 'status-remarks-list.edit', 'status-remarks-list.delete'],
     ];
 
     /**
@@ -396,9 +566,12 @@ final class Permissions
             'service-order', 'service-order.admin-edit',
             'work-order', 'work-order.manage',
             'lcp-nap-location',
-            'location-list',
-            'lcp',
-            'nap',
+            // The head technician maintains the outside-plant records, so the
+            // three verbs are spelled out rather than left to the
+            // grandfathering rule, which only covers stored custom roles.
+            'location-list', 'location-list.create', 'location-list.edit', 'location-list.delete',
+            'lcp', 'lcp.create', 'lcp.edit', 'lcp.delete',
+            'nap', 'nap.create', 'nap.edit', 'nap.delete',
             // The two network tools. Xendit Reconciliation is deliberately NOT
             // here: it settles real money against real accounts, which is an
             // Administrator and SuperAdmin concern rather than a
@@ -555,10 +728,64 @@ final class Permissions
             return [self::WILDCARD];
         }
 
+        $stored = self::parseKeys($role->permissions ?? null);
+
+        // A role last saved before the per-action keys existed listed only its
+        // pages, so its buttons are implied rather than ticked. Version 1 and
+        // above means the list is what the administrator actually chose.
+        if ((int) ($role->permissions_version ?? 0) < 1) {
+            $stored = self::withGrandfatheredActions($stored);
+        }
+
         return array_values(array_unique(array_merge(
             $inherited,
-            self::parseKeys($role->permissions ?? null)
+            self::expandRetiredActions($stored)
         )));
+    }
+
+    /**
+     * Add the verbs each page used to carry, for every page in the list.
+     *
+     * @param  string[]  $keys
+     * @return string[]
+     */
+    private static function withGrandfatheredActions(array $keys): array
+    {
+        $result = $keys;
+
+        foreach ($keys as $key) {
+            foreach (self::GRANDFATHERED_ACTIONS[$key] ?? [] as $verb) {
+                $result[] = "$key.$verb";
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Replace any retired key with the keys that took its place.
+     *
+     * The retired key itself is dropped: it is not in `all()` any more, so
+     * leaving it would put a value in the effective list that no check, on
+     * either side, ever asks for.
+     *
+     * @param  string[]  $keys
+     * @return string[]
+     */
+    private static function expandRetiredActions(array $keys): array
+    {
+        $result = [];
+
+        foreach ($keys as $key) {
+            if (isset(self::RETIRED_ACTIONS[$key])) {
+                array_push($result, ...self::RETIRED_ACTIONS[$key]);
+                continue;
+            }
+
+            $result[] = $key;
+        }
+
+        return $result;
     }
 
     /**

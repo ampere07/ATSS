@@ -210,12 +210,61 @@ export const ACTIONS: Record<string, string[]> = {
   // Issuing the weekly referral invoices, and marking one settled. An agent
   // reads their own; neither of these is theirs.
   'agent-invoices': ['agent-invoices.generate', 'agent-invoices.status', 'agent-invoices.payout'],
-  // List pages whose add/edit/delete controls were open to anyone who could
-  // open the page.
-  ports: ['ports.manage'],
-  'router-models': ['router-models.manage'],
-  'status-remarks-list': ['status-remarks-list.manage'],
   'soa-generation': ['soa-generation.manage'],
+
+  // ── Configurations ─────────────────────────────────────────────────────────
+  // Every page in this group is a list with Add, Edit and Delete controls, and
+  // until now holding the page granted all three. They follow the standard
+  // verbs in CRUD_VERBS below.
+  'promo-list': ['promo-list.create', 'promo-list.edit', 'promo-list.delete'],
+  'plan-list': ['plan-list.create', 'plan-list.edit', 'plan-list.delete'],
+  'location-list': ['location-list.create', 'location-list.edit', 'location-list.delete'],
+  lcp: ['lcp.create', 'lcp.edit', 'lcp.delete'],
+  nap: ['nap.create', 'nap.edit', 'nap.delete'],
+  ports: ['ports.create', 'ports.edit', 'ports.delete'],
+  'router-models': ['router-models.create', 'router-models.edit', 'router-models.delete'],
+  'status-remarks-list': [
+    'status-remarks-list.create', 'status-remarks-list.edit', 'status-remarks-list.delete',
+  ],
+  'usage-type': ['usage-type.create', 'usage-type.edit', 'usage-type.delete'],
+  'vlan-config': ['vlan-config.create', 'vlan-config.edit', 'vlan-config.delete'],
+  'payment-method': ['payment-method.create', 'payment-method.edit', 'payment-method.delete'],
+  'work-category': ['work-category.create', 'work-category.edit', 'work-category.delete'],
+  'radius-config': ['radius-config.create', 'radius-config.edit', 'radius-config.delete'],
+  'smart-olt': ['smart-olt.create', 'smart-olt.edit', 'smart-olt.delete'],
+  'sms-config': ['sms-config.create', 'sms-config.edit', 'sms-config.delete'],
+  'sms-template': ['sms-template.create', 'sms-template.edit', 'sms-template.delete'],
+  'email-templates': ['email-templates.create', 'email-templates.edit', 'email-templates.delete'],
+  'pppoe-setup': ['pppoe-setup.create', 'pppoe-setup.edit', 'pppoe-setup.delete'],
+  'concern-config': ['concern-config.create', 'concern-config.edit', 'concern-config.delete'],
+  'billing-config': ['billing-config.create', 'billing-config.edit', 'billing-config.delete'],
+
+  // ── Users ──────────────────────────────────────────────────────────────────
+  'user-management': ['user-management.create', 'user-management.edit', 'user-management.delete'],
+  'tech-users': ['tech-users.create', 'tech-users.edit', 'tech-users.delete'],
+  organization: ['organization.create', 'organization.edit', 'organization.delete'],
+  roles: ['roles.create', 'roles.edit', 'roles.delete'],
+  'group-management': [
+    'group-management.create', 'group-management.edit', 'group-management.delete',
+  ],
+};
+
+/**
+ * The standard verbs, in the order Role Management shows them.
+ *
+ * A page whose controls are the ordinary "Add / Edit / Delete" three declares
+ * exactly these, named `<page>.<verb>`. Anything a page does that is not one of
+ * the three keeps its own descriptive verb.
+ *
+ * Kept in step with Permissions::CRUD_VERBS on the server.
+ */
+export const CRUD_VERBS = ['create', 'edit', 'delete'] as const;
+
+/** How each standard verb is written on a checkbox. */
+const CRUD_VERB_LABELS: Record<string, string> = {
+  create: 'Add',
+  edit: 'Edit',
+  delete: 'Delete',
 };
 
 /** Every valid key. */
@@ -339,13 +388,25 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'agent-invoices.generate': 'Generate',
   'agent-invoices.status': 'Set Status',
   'agent-invoices.payout': 'Pay Out',
-  'ports.manage': 'Manage',
-  'router-models.manage': 'Manage',
-  'status-remarks-list.manage': 'Manage',
   'soa-generation.manage': 'Manage',
 };
 
-export const labelFor = (key: string): string => PERMISSION_LABELS[key] ?? key;
+/**
+ * How a key is written on screen.
+ *
+ * A standard verb is answered from CRUD_VERB_LABELS rather than needing its own
+ * line in PERMISSION_LABELS: there is one label for "Add" however many pages
+ * declare `<page>.create`. An explicit entry still wins, for the handful of
+ * pages that want to name a verb differently.
+ */
+export const labelFor = (key: string): string => {
+  const explicit = PERMISSION_LABELS[key];
+  if (explicit) return explicit;
+
+  const verb = key.includes('.') ? key.slice(key.indexOf('.') + 1) : '';
+
+  return CRUD_VERB_LABELS[verb] ?? key;
+};
 
 /**
  * The order and grouping Role Management presents the pages in.
@@ -534,9 +595,12 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'service-order', 'service-order.admin-edit',
     'work-order', 'work-order.manage',
     'lcp-nap-location',
-    'location-list',
-    'lcp',
-    'nap',
+    // The head technician maintains the outside-plant records, so the three
+    // verbs are spelled out rather than left to the server's grandfathering
+    // rule, which only covers stored custom roles.
+    'location-list', 'location-list.create', 'location-list.edit', 'location-list.delete',
+    'lcp', 'lcp.create', 'lcp.edit', 'lcp.delete',
+    'nap', 'nap.create', 'nap.edit', 'nap.delete',
     // The two network tools. Xendit Reconciliation is deliberately NOT here:
     // it settles real money against real accounts, which is an Administrator
     // and SuperAdmin concern rather than a field-operations one.

@@ -67,6 +67,8 @@ interface ServiceOrderDetailsProps {
     concern: string;
     concernRemarks: string;
     visitStatus: string;
+    /** The day a technician last moved visitStatus, "YYYY-MM-DD", or ''. */
+    visitStatusDate?: string;
     visitBy: string;
     visitWith: string;
     visitWithOther: string;
@@ -212,6 +214,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
     'concern',
     'concernRemarks',
     'visitStatus',
+    'visitStatusDate',
     'visitBy',
     'visitWith',
     'visitWithOther',
@@ -475,6 +478,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
       concern: 'Concern',
       concernRemarks: 'Concern Remarks',
       visitStatus: 'Visit Status',
+      visitStatusDate: 'Visit Status Date',
       visitBy: 'Visit By',
       visitWith: 'Visit With',
       visitWithOther: 'Visit With Other',
@@ -844,6 +848,11 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
             </div>
           </div>
         );
+      case 'visitStatusDate':
+        // Stamped by the API the day a technician moves the Visit Status, and
+        // only then. renderField drops the row when it is absent, which is
+        // every ticket no technician has touched.
+        return renderField('Visit Status Date', serviceOrder.visitStatusDate);
       case 'visitBy':
       case 'visitWith':
       case 'visitWithOther':

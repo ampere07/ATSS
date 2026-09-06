@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Gift, Plus, RefreshCw, Search, Loader2 } from 'lucide-react';
+import { Gift, Plus, RefreshCw, Search, Loader2, CalendarRange, X } from 'lucide-react';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { commissionService } from '../services/commissionService';
 import { usePermissions } from '../hooks/usePermissions';
@@ -52,6 +52,10 @@ const typeLabel = (type?: string | null): string => (type ? TYPE_LABELS[type] ||
 
 const PAGE_SIZE = 50;
 
+// What the mobile card leads with: the amount, and where the record stands.
+// The remaining columns follow underneath as label/value pairs.
+const CARD_HEADLINE_KEYS = ['total_amount', 'status'];
+
 /**
  * The agent history screen, and the administrator's Bonus History.
  *
@@ -101,6 +105,10 @@ const BonusHistory: React.FC = () => {
     const [currentPage, setCurrentPage] = useState(1);
 
     const [showBonusModal, setShowBonusModal] = useState(false);
+
+    // The date range lives in the sidebar, which is hidden below md. Without a
+    // second way in, an agent on a phone could search but never narrow by date.
+    const [showMobileFilters, setShowMobileFilters] = useState(false);
 
     const [sidebarWidth, setSidebarWidth] = useState(256);
     const [isResizingSidebar, setIsResizingSidebar] = useState(false);
@@ -362,8 +370,10 @@ const BonusHistory: React.FC = () => {
             <div className="flex-1 flex flex-col min-w-0">
                 {/* Header: search only. Add and the date range live in the sidebar. */}
                 <div className={`p-4 border-b flex-shrink-0 ${surface}`}>
-                    <div className="flex items-center space-x-3 w-full">
-                        <div className="relative flex-1 min-w-[200px]">
+                    <div className="flex items-center gap-2 sm:gap-3 w-full">
+                        {/* min-w-0 rather than a 200px floor: on a 360px screen the
+                            floor plus the buttons beside it overflows the row. */}
+                        <div className="relative flex-1 min-w-0">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
                             <input
                                 type="text"
@@ -375,6 +385,22 @@ const BonusHistory: React.FC = () => {
                                 style={searchTerm ? { borderColor: colorPalette?.primary || '#7c3aed' } : {}}
                             />
                         </div>
+
+                        {/* The sidebar's date range, reachable where the sidebar is not. */}
+                        <button
+                            onClick={() => setShowMobileFilters(prev => !prev)}
+                            title="Date range"
+                            className={`md:hidden relative p-2 rounded border transition-colors flex-shrink-0 ${isDarkMode
+                                ? 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+                        >
+                            <CalendarRange size={18} />
+                            {(dateFrom || dateTo) && (
+                                <span
+                                    className="absolute right-1 top-1 h-2 w-2 rounded-full"
+                                    style={{ backgroundColor: colorPalette?.primary || '#7c3aed' }}
+                                />
+                            )}
+                        </button>
 
                         {/* On mobile the sidebar is hidden, so Add has nowhere
                             else to live. */}
@@ -399,6 +425,48 @@ const BonusHistory: React.FC = () => {
                             <RefreshCw size={18} className={isLoading ? 'animate-spin' : ''} />
                         </button>
                     </div>
+
+                    {showMobileFilters && (
+                        <div className={`md:hidden mt-3 pt-3 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+                            <div className="flex items-center justify-between mb-2">
+                                <span className={`text-[10px] font-bold uppercase tracking-wider ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                                    DATE RANGE
+                                </span>
+                                {(dateFrom || dateTo) && (
+                                    <button
+                                        onClick={() => { setDateFrom(''); setDateTo(''); }}
+                                        className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider"
+                                        style={{ color: colorPalette?.primary || '#7c3aed' }}
+                                    >
+                                        <X size={12} />
+                                        Clear
+                                    </button>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label className={`text-[10px] mb-1 block ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>From</label>
+                                    <input
+                                        type="date"
+                                        value={dateFrom}
+                                        onChange={(e) => setDateFrom(e.target.value)}
+                                        className={`w-full px-2 py-2 rounded text-xs focus:outline-none border ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                                        style={dateFrom ? { borderColor: colorPalette?.primary || '#7c3aed' } : {}}
+                                    />
+                                </div>
+                                <div>
+                                    <label className={`text-[10px] mb-1 block ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>To</label>
+                                    <input
+                                        type="date"
+                                        value={dateTo}
+                                        onChange={(e) => setDateTo(e.target.value)}
+                                        className={`w-full px-2 py-2 rounded text-xs focus:outline-none border ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
+                                        style={dateTo ? { borderColor: colorPalette?.primary || '#7c3aed' } : {}}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
 
             <div className="flex-1 overflow-auto">
@@ -410,7 +478,49 @@ const BonusHistory: React.FC = () => {
                 ) : error ? (
                     <div className="py-16 text-center text-red-500">{error}</div>
                 ) : (
-                    <table className="w-full text-sm">
+                    <>
+                    {/* Eight columns of nowrap text do not fit a phone, and a
+                        sideways scroll hides the amount — the one figure the
+                        row is read for. Below md each record is a card instead,
+                        laid out from the same column list so the two views can
+                        never describe different fields. */}
+                    <div className="md:hidden p-3 space-y-3">
+                        {pageRows.length === 0 ? (
+                            <div className={`rounded border p-6 text-center ${isDarkMode
+                                ? 'bg-gray-900 border-gray-800 text-gray-400' : 'bg-white border-gray-200 text-gray-600'}`}>
+                                No matching records found
+                            </div>
+                        ) : pageRows.map((row: any, i: number) => {
+                            const rest = columns.filter(col => !CARD_HEADLINE_KEYS.includes(col.key));
+
+                            return (
+                                <div
+                                    key={row.id ?? i}
+                                    className={`rounded-lg border p-4 ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'}`}
+                                >
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className={`text-lg font-bold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                                            {renderCell(row, 'total_amount')}
+                                        </div>
+                                        <div className="flex-shrink-0">{renderCell(row, 'status')}</div>
+                                    </div>
+
+                                    <div className={`mt-3 pt-3 space-y-2 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`}>
+                                        {rest.map(col => (
+                                            <div key={col.key} className="flex items-start justify-between gap-3 text-sm">
+                                                <span className={`flex-shrink-0 ${textMuted}`}>{col.label}</span>
+                                                <span className={`min-w-0 break-words text-right ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
+                                                    {renderCell(row, col.key)}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+
+                    <table className="hidden md:table w-full text-sm">
                         <thead className={isDarkMode ? 'bg-gray-900' : 'bg-gray-100'}>
                             <tr>
                                 {columns.map(col => (
@@ -451,12 +561,13 @@ const BonusHistory: React.FC = () => {
                             ))}
                         </tbody>
                     </table>
+                    </>
                 )}
             </div>
 
             {filtered.length > 0 && (
-                <div className={`flex items-center justify-between px-4 py-3 border-t text-sm ${surface} ${textMuted}`}>
-                    <span>
+                <div className={`flex flex-col sm:flex-row items-center justify-between gap-2 px-4 py-3 border-t text-sm ${surface} ${textMuted}`}>
+                    <span className="text-center sm:text-left">
                         Showing <span className="font-medium">{(currentPage - 1) * PAGE_SIZE + 1}</span> to{' '}
                         <span className="font-medium">{Math.min(currentPage * PAGE_SIZE, filtered.length)}</span> of{' '}
                         <span className="font-medium">{filtered.length}</span> records

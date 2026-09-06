@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { ChevronDown, ChevronRight, Columns3, ArrowUp, ArrowDown, Menu, X, RefreshCw, ChevronLeft ,Filter, ChevronsLeft, ChevronsRight, Globe, Calendar, Download } from 'lucide-react';
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import JobOrderDetails from '../components/JobOrderDetails';
@@ -261,7 +261,20 @@ const JobOrderPage: React.FC = () => {
   const { role: userRole, roleId, id: agentUserId, fullName: agentName, email: agentEmail } = useMemo(storedAuth, []);
   const [users, setUsers] = useState<User[]>([]);
   const [isLoadingUsers, setIsLoadingUsers] = useState<boolean>(true);
-  const [displayMode, setDisplayMode] = useState<DisplayMode>('table');
+  // Card on a phone, table on a desktop — and whatever was last chosen after
+  // that. The table is `w-max`, so opening it on a phone put the whole list
+  // behind a sideways scroll; the card view carries the same rows in a column
+  // that fits. Kept in localStorage the way Work Order keeps its own.
+  const [displayMode, setDisplayMode] = useState<DisplayMode>(() => {
+    const saved = localStorage.getItem('jobOrderDisplayMode');
+    if (saved === 'card' || saved === 'table') return saved;
+    return window.innerWidth < 768 ? 'card' : 'table';
+  });
+
+  const chooseDisplayMode = useCallback((mode: DisplayMode) => {
+    setDisplayMode(mode);
+    localStorage.setItem('jobOrderDisplayMode', mode);
+  }, []);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState<string[]>(() => {
@@ -2308,7 +2321,7 @@ const JobOrderPage: React.FC = () => {
                       }`}>
                       <button
                         onClick={() => {
-                          setDisplayMode('card');
+                          chooseDisplayMode('card');
                           setDropdownOpen(false);
                         }}
                         className={`block w-full text-left px-4 py-2 text-sm transition-colors ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}
@@ -2322,7 +2335,7 @@ const JobOrderPage: React.FC = () => {
                       </button>
                       <button
                         onClick={() => {
-                          setDisplayMode('table');
+                          chooseDisplayMode('table');
                           setDropdownOpen(false);
                         }}
                         className={`block w-full text-left px-4 py-2 text-sm transition-colors ${isDarkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-100'}`}

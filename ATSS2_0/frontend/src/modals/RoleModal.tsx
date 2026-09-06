@@ -155,18 +155,22 @@ const RoleForm: React.FC<{
 
         <div>
           <div className="flex items-baseline justify-between mb-1.5">
-            <label className={labelClass.replace('mb-1.5', '')}>Permissions (Page Access)</label>
+            <label className={labelClass.replace('mb-1.5', '')}>Permissions</label>
             {baseRoleId !== NO_BASE && (
               <span className={`text-[11px] ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                 Locked ticks come from <span className="font-semibold">{baseLabel}</span>
               </span>
             )}
           </div>
+          <p className={`text-xs mb-2 ml-1 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+            View opens the page. Each action beside it is a button on that page —
+            leave one unticked and it is hidden for this role.
+          </p>
           <div className={`border rounded-lg overflow-hidden ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
-            <div className={`grid grid-cols-[1.5fr_80px_2fr] px-4 py-2 text-xs font-bold uppercase tracking-wider border-b ${isDarkMode ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
+            <div className={`grid grid-cols-[minmax(0,1.4fr)_72px_minmax(0,2.2fr)] px-4 py-2 text-xs font-bold uppercase tracking-wider border-b ${isDarkMode ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
               <div>Page Name</div>
-              <div className="text-center">Access</div>
-              <div></div>
+              <div className="text-center">View</div>
+              <div>Actions</div>
             </div>
             <div className="max-h-[360px] overflow-y-auto divide-y divide-gray-200 dark:divide-gray-700">
               {PERMISSION_GROUPS.map((group) => (
@@ -178,7 +182,7 @@ const RoleForm: React.FC<{
                   </div>
 
                   {group.pages.map((pageId) => (
-                    <div key={pageId} className="grid grid-cols-[1.5fr_80px_2fr] px-4 py-3 items-center transition-colors">
+                    <div key={pageId} className="grid grid-cols-[minmax(0,1.4fr)_72px_minmax(0,2.2fr)] px-4 py-3 items-center transition-colors">
                       <div className={`text-sm flex items-center gap-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
                         <span>{labelFor(pageId)}</span>
                         {isInherited(pageId) && (
@@ -197,7 +201,11 @@ const RoleForm: React.FC<{
                           className={checkboxClass(pageId)}
                         />
                       </div>
-                      <div className="flex items-center gap-x-6">
+                      {/* Wraps: most pages now declare Add, Edit and Delete,
+                          and a job order declares six. A single row of them
+                          overflowed the column rather than moving to a second
+                          line. */}
+                      <div className="flex flex-wrap items-start gap-x-5 gap-y-2">
                         {(ACTIONS[pageId] || []).map((actionId) => (
                           <div key={actionId} className="flex flex-col items-center gap-1.5">
                             <span className={`text-[10px] font-bold uppercase tracking-tight leading-none whitespace-nowrap ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
@@ -268,9 +276,20 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
 
         setBaseRoleId(Number(role.base_role_id) || NO_BASE);
 
-        // Array from Laravel's cast, or a JSON / comma-separated string on a
-        // row written before that cast existed.
-        setSelectedPermissions(parsePermissions(role.permissions));
+        // What the role effectively holds, which for one saved before the
+        // per-action keys existed includes the buttons its pages used to carry.
+        // Seeding from the stored column instead would show Add, Edit and
+        // Delete unticked for a role that has them, and the save below would
+        // then revoke them from a screen that never showed them.
+        //
+        // Falls back to the column for a caller that has not been given the
+        // resolved list — an array from Laravel's cast, or a JSON /
+        // comma-separated string on a row written before that cast existed.
+        setSelectedPermissions(
+          Array.isArray(role.effective_permissions)
+            ? role.effective_permissions
+            : parsePermissions(role.permissions)
+        );
       } else {
         setFormData({
           role_name: '',
@@ -397,7 +416,18 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
         setErrors({ general: response.message || 'Something went wrong' });
       }
     } catch (error: any) {
-      setErrors({ general: error.message || 'An unexpected error occurred' });
+      // Prefer what the server said over axios's "Request failed with status
+      // code 500", which names the status and nothing about the cause. A 422
+      // body carries the per-field messages; a 500 carries the exception.
+      const body = error?.response?.data;
+      const fieldErrors: string[] = body?.errors
+        ? Object.values(body.errors as Record<string, string[]>).flat()
+        : [];
+      const detail = [body?.message, ...fieldErrors, body?.error]
+        .filter(Boolean)
+        .join(' — ');
+
+      setErrors({ general: detail || error.message || 'An unexpected error occurred' });
     } finally {
       setLoading(false);
     }

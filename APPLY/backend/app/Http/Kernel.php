@@ -19,6 +19,10 @@ class Kernel extends HttpKernel
         \Illuminate\Http\Middleware\HandleCors::class,
         \App\Http\Middleware\PreventRequestsDuringMaintenance::class,
         \Illuminate\Foundation\Http\Middleware\ValidatePostSize::class,
+        // Styled "fancy font" text is folded back to plain characters before
+        // anything reads the input, so validation, the controllers and the
+        // database all see the same normalized value.
+        \App\Http\Middleware\NormalizeUnicodeText::class,
         \App\Http\Middleware\TrimStrings::class,
         \Illuminate\Foundation\Http\Middleware\ConvertEmptyStringsToNull::class,
     ];

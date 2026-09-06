@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Role;
 use App\Support\Permissions;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 
 class RoleController extends Controller
@@ -25,7 +26,8 @@ class RoleController extends Controller
                 });
             }
 
-            $roles = $query->get();
+            $roles = $query->get()->map(fn (Role $role) => $this->withEffectivePermissions($role));
+
             return response()->json([
                 'success' => true,
                 'data' => $roles
@@ -69,10 +71,13 @@ class RoleController extends Controller
             $user = auth()->user();
             $organizationId = $user ? $user->organization_id : null;
 
-            $role = Role::create($request->all() + [
+            $role = Role::create($request->except('permissions_version') + [
                 'created_by_user_id' => $user->id ?? 1,
                 'updated_by_user_id' => $user->id ?? 1,
-                'organization_id' => $organizationId
+                'organization_id' => $organizationId,
+                // Saved with the per-action checkboxes on screen, so the list
+                // below is exactly what was chosen and is read as written.
+                'permissions_version' => Permissions::CURRENT_VERSION,
             ]);
 
             return response()->json([
@@ -81,6 +86,15 @@ class RoleController extends Controller
                 'data' => $role
             ], 201);
         } catch (\Exception $e) {
+            // The response carries the message, but nothing reaches the log
+            // otherwise — a create that 500s server-side left no trace to read
+            // back afterwards, only a status code in the browser.
+            Log::error('Role create failed', [
+                'role_name' => $request->input('role_name'),
+                'base_role_id' => $request->input('base_role_id'),
+                'exception' => $e,
+            ]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to create role',
@@ -89,13 +103,43 @@ class RoleController extends Controller
         }
     }
 
+    /**
+     * A role row plus the keys it effectively holds.
+     *
+     * `permissions` is the column as stored, which for a role saved before the
+     * per-action keys existed lists only its pages. The Role modal seeds its
+     * checkboxes from a role, and seeding from that column would show Add, Edit
+     * and Delete unticked for a role that has them — so the first save would
+     * revoke them, silently, from a screen that never showed them ticked.
+     *
+     * `effective_permissions` is what App\Support\Permissions actually grants,
+     * grandfathering included, so the modal opens showing the truth. Its own
+     * keys are what the save then writes, which is how a role stops being
+     * grandfathered without anything changing underneath it.
+     *
+     * The inherited half of a hybrid is excluded: those keys are resolved live
+     * from the base role and the modal shows them locked, from its own copy of
+     * the table, rather than as ticks belonging to this role.
+     */
+    private function withEffectivePermissions(Role $role): Role
+    {
+        $inherited = Permissions::inheritedKeys($role->base_role_id ?? null);
+
+        $role->setAttribute('effective_permissions', array_values(array_diff(
+            Permissions::roleKeys($role),
+            $inherited
+        )));
+
+        return $role;
+    }
+
     public function show($id)
     {
         try {
             $role = Role::with(['users'])->findOrFail($id);
             return response()->json([
                 'success' => true,
-                'data' => $role
+                'data' => $this->withEffectivePermissions($role)
             ]);
         } catch (\Exception $e) {
             return response()->json([
@@ -149,11 +193,17 @@ class RoleController extends Controller
                 ], 403);
             }
 
-            // Don't allow organization_id to be changed via update
-            $updateData = $request->except('organization_id');
+            // Don't allow organization_id to be changed via update, and don't
+            // let a caller set its own permissions_version: it records that the
+            // save went through the modal, which only this method can attest.
+            $updateData = $request->except(['organization_id', 'permissions_version']);
 
             $role->update($updateData + [
-                'updated_by_user_id' => $user->id ?? 1
+                'updated_by_user_id' => $user->id ?? 1,
+                // Whatever generation this row was saved under before, it has
+                // now been through the modal that shows every action, so the
+                // stored list stops being grandfathered.
+                'permissions_version' => Permissions::CURRENT_VERSION,
             ]);
 
             return response()->json([
@@ -162,6 +212,8 @@ class RoleController extends Controller
                 'data' => $role
             ]);
         } catch (\Exception $e) {
+            Log::error('Role update failed', ['role_id' => $id, 'exception' => $e]);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to update role',

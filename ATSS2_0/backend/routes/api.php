@@ -1188,19 +1188,47 @@ Route::post('/login', function (Request $request) {
         // Verify password
         $passwordMatches = Hash::check($password, $user->password_hash);
 
-        // For customers (role_id 3), allow variations of the leading '0' if the primary check fails
-        if (!$passwordMatches && $user->role_id == 3) {
-            $altPassword = null;
-            if (str_starts_with($password, '0')) {
-                $altPassword = substr($password, 1); // Try without leading '0'
-            }
-            else {
-                $altPassword = '0' . $password; // Try with leading '0'
-            }
+        // A customer's password is their mobile number, and a mobile number has
+        // more than one spelling. Accept any of them.
+        //
+        // This replaces a retry that bolted a '0' onto the front of the typed
+        // password: it covered one spelling out of several and missed "+63…",
+        // spaced and dashed numbers, and anything with a stray space around it.
+        // App\Support\PortalPassword normalises rather than guesses, so the same
+        // subscriber's number unlocks the account however it is written, and a
+        // hybrid customer role counts as a customer instead of being turned away
+        // by a check against the literal role_id 3.
+        //
+        // Accounts written before that class existed hold whatever spelling was
+        // typed at the time. Signing in through one of those legacy spellings
+        // rehashes the account to the canonical form, so it repairs itself once
+        // and never takes the slow path again. That is what removes the need to
+        // edit a customer's contact number purely to force a rehash.
+        if (!$passwordMatches && \App\Support\PortalPassword::isCustomer($user)) {
+            $matchedCanonically = false;
 
-            if ($altPassword && Hash::check($altPassword, $user->password_hash)) {
+            // The number of record, for the one legacy case the typed password
+            // cannot reconstruct on its own: a hash made from a punctuated
+            // spelling such as "0917-123-4567". username is the billing account
+            // number, which is how the rest of the system reaches the customer.
+            $storedNumber = \DB::table('billing_accounts')
+                ->join('customers', 'customers.id', '=', 'billing_accounts.customer_id')
+                ->where('billing_accounts.account_no', $user->username)
+                ->value('customers.contact_number_primary') ?? $user->contact_number;
+
+            if (\App\Support\PortalPassword::matchesWithStoredNumber($password, $user->password_hash, $storedNumber, $matchedCanonically)) {
                 $passwordMatches = true;
-                \Log::info('Customer login: Password matched using variation', ['user_id' => $user->id]);
+
+                if (!$matchedCanonically) {
+                    // Assigning through the model runs setPasswordHashAttribute,
+                    // so this stores Hash::make() of the canonical number.
+                    $user->password_hash = \App\Support\PortalPassword::normalize($password);
+                    $user->save();
+
+                    \Log::info('Customer login: rehashed legacy password spelling', [
+                        'user_id' => $user->id,
+                    ]);
+                }
             }
         }
 

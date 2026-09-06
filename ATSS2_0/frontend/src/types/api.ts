@@ -131,6 +131,15 @@ export interface Role {
   base_role_id?: number | null;
   /** Only the keys ticked against this role; a hybrid's inherited keys are not here. */
   permissions?: string;
+  /**
+   * What the role effectively holds, as the server resolves it.
+   *
+   * The same list as `permissions` for a role saved from the current modal. For
+   * one saved before the per-action keys existed it also carries the buttons
+   * that page used to grant, so Role Management can show them ticked rather
+   * than revoking them on the next save. Seed the modal from this.
+   */
+  effective_permissions?: string[] | null;
   created_at: string;
   updated_at: string;
   organization_id?: number | null;

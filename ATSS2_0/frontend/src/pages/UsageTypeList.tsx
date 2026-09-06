@@ -6,6 +6,7 @@ import AddUsageTypeModal from '../modals/AddUsageTypeModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { authFetch } from '../config/api';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface UsageType {
   id: number;
@@ -18,6 +19,11 @@ interface UsageType {
 }
 
 const UsageTypeList: React.FC = () => {
+  // Add, Edit and Delete are granted separately. The same keys the API
+  // demands, so a control is only drawn when the request behind it would
+  // succeed.
+  const actions = usePageActions('usage-type');
+
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [usageTypes, setUsageTypes] = useState<UsageType[]>([]);
@@ -174,6 +180,7 @@ const UsageTypeList: React.FC = () => {
   };
 
   const handleDelete = (usageType: UsageType) => {
+    if (!actions.canDelete) return;
     showGlobalModal(
       'confirm',
       'Confirm Deletion',
@@ -223,11 +230,13 @@ const UsageTypeList: React.FC = () => {
   };
 
   const handleEdit = (usageType: UsageType) => {
+    if (!actions.canEdit) return;
     setEditingUsageType(usageType);
     setShowAddModal(true);
   };
 
   const handleAddNew = () => {
+    if (!actions.canCreate) return;
     setEditingUsageType(null);
     setShowAddModal(true);
   };
@@ -326,6 +335,7 @@ const UsageTypeList: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          {actions.canEdit && (
           <button
             onClick={(e) => { e.stopPropagation(); handleEdit(usageType); }}
             className={`p-2 rounded transition-colors ${isDarkMode
@@ -335,6 +345,8 @@ const UsageTypeList: React.FC = () => {
           >
             <Edit2 size={16} />
           </button>
+          )}
+          {actions.canDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); handleDelete(usageType); }}
             disabled={deletingItems.has(usageType.id)}
@@ -349,6 +361,7 @@ const UsageTypeList: React.FC = () => {
               <Trash2 size={16} />
             )}
           </button>
+          )}
         </div>
       </div>
     );
@@ -369,6 +382,7 @@ const UsageTypeList: React.FC = () => {
               colorPalette={colorPalette}
               placeholder="Search Usage Types"
             />
+            {actions.canCreate && (
             <button
               onClick={handleAddNew}
               className="px-4 py-2.5 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm"
@@ -389,6 +403,7 @@ const UsageTypeList: React.FC = () => {
               <Plus className="h-4 w-4" />
               <span className="hidden md:inline">Add Usage Type</span>
             </button>
+            )}
             <button
               onClick={() => loadUsageTypes()}
               className="p-2.5 rounded-lg flex items-center justify-center transition-colors shadow-sm active:rotate-180 duration-500"

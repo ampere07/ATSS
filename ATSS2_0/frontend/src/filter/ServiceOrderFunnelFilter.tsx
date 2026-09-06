@@ -66,6 +66,10 @@ export const allColumns: Column[] = [
   { key: 'visitWith', label: 'Visit With', dataType: 'varchar' },
   { key: 'visitWithOther', label: 'Visit With Other', dataType: 'varchar' },
   { key: 'visitStatus', label: 'Visit Status', dataType: 'checklist' },
+  // A DATE column, not a datetime — the API stores the day a technician moved the
+  // visit status and nothing finer, so a from/to pair of plain dates is the whole
+  // range anyone can ask for.
+  { key: 'visitStatusDate', label: 'Visit Status Date', dataType: 'date' },
   { key: 'routerModel', label: 'Router Model', dataType: 'checklist' },
   { key: 'dateInstalled', label: 'Date Installed', dataType: 'date' },
   { key: 'ipAddress', label: 'IP', dataType: 'varchar' },

@@ -3,12 +3,12 @@ import { Search, Plus, Edit2, Trash2, Loader2 } from 'lucide-react';
 import { getAllPorts, deletePort, Port } from '../services/portService';
 import AddPortModal from '../modals/AddPortModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
-import { currentUserCan } from '../hooks/usePermissions';
+import { usePageActions } from '../hooks/usePageActions';
 
 const Ports: React.FC = () => {
-  // Add/edit/delete on this list. The same key the API demands, so a
-  // control is only drawn when the request behind it would succeed.
-  const canManagePorts = currentUserCan('ports.manage');
+  // Add, Edit and Delete are granted separately. The same keys the API demands,
+  // so a control is only drawn when the request behind it would succeed.
+  const actions = usePageActions('ports');
   const [ports, setPorts] = useState<Port[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -60,13 +60,13 @@ const Ports: React.FC = () => {
   };
 
   const handleAddClick = () => {
-    if (!canManagePorts) return;
+    if (!actions.canCreate) return;
     setEditingPort(null);
     setShowAddModal(true);
   };
 
   const handleEditClick = (port: Port) => {
-    if (!canManagePorts) return;
+    if (!actions.canEdit) return;
     setEditingPort(port);
     setShowAddModal(true);
   };
@@ -81,7 +81,7 @@ const Ports: React.FC = () => {
   };
 
   const handleDelete = async (id: number) => {
-    if (!canManagePorts) return;
+    if (!actions.canDelete) return;
     if (!window.confirm('Are you sure you want to delete this port?')) {
       return;
     }
@@ -189,7 +189,7 @@ const Ports: React.FC = () => {
             />
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
           </div>
-          {canManagePorts && (
+          {actions.canCreate && (
             <button
               onClick={handleAddClick}
               className="text-white px-4 py-2 rounded text-sm flex items-center space-x-2 transition-colors ml-4"
@@ -234,7 +234,7 @@ const Ports: React.FC = () => {
                     <td className="px-6 py-4 text-gray-400 text-sm">{formatDateTime(port.updated_at)}</td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
-                        {canManagePorts && (
+                        {actions.canEdit && (
                           <button
                             onClick={() => handleEditClick(port)}
                             className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition-colors"
@@ -243,7 +243,7 @@ const Ports: React.FC = () => {
                             <Edit2 className="h-4 w-4" />
                           </button>
                         )}
-                        {canManagePorts && (
+                        {actions.canDelete && (
                           <button
                             onClick={() => handleDelete(port.id)}
                             disabled={deletingId === port.id}

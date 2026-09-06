@@ -119,7 +119,14 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
 
   const handleSubmit = async () => {
-    if (!accountNo || !mobileNo) {
+    // Trimmed before anything looks at them. A mobile keyboard's autocomplete
+    // and a pasted account number both bring a trailing space along, and the
+    // server compares the password character for character - so an untrimmed
+    // space reads as a wrong password against a number that looks correct.
+    const account = accountNo.trim();
+    const mobile = mobileNo.trim();
+
+    if (!account || !mobile) {
       setError('Please enter your account number and mobile number');
       return;
     }
@@ -128,7 +135,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
     setError('');
 
     try {
-      const response = await loginUser(accountNo, mobileNo);
+      const response = await loginUser(account, mobile);
       if (response.status === 'success') {
         const userData: UserData = {
           id: response.data.user.id,

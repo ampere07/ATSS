@@ -43,6 +43,16 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
 
   const activeColor = colorPalette?.primary || '#7c3aed';
 
+  // The day a technician last moved this ticket's Visit Status, as the API
+  // stored it. A DATE column, but MySQL drivers and JSON casting between them
+  // can hand it back as "2026-09-05", "2026-09-05 00:00:00" or an ISO string,
+  // so keep the leading date and drop whatever follows.
+  const visitStatusDate = useMemo(() => {
+    const raw = serviceOrderData?.visit_status_date ?? serviceOrderData?.visitStatusDate;
+    const match = String(raw ?? '').match(/^\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : '';
+  }, [serviceOrderData]);
+
   const renderInput = useCallback((
     field: keyof ServiceOrderEditFormData,
     label: string,
@@ -197,6 +207,20 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                   {formData.supportStatus === 'For Visit' && (
                     <>
                       {renderPickerTrigger('visitStatus', 'Visit Status', formData.visitStatus, 'Select Visit Status', true)}
+
+                      {/* Stamped by the API the day a technician moves the Visit
+                          Status, and only then. Read-only here: the column is
+                          derived server-side, so it is never sent back up. */}
+                      {visitStatusDate && (
+                        <View style={styles.inputGroup}>
+                          <Text style={[styles.label, { color: isDarkMode ? '#d1d5db' : '#374151' }]}>Visit Status Date</Text>
+                          <TextInput
+                            style={[styles.textInput, { backgroundColor: isDarkMode ? '#374151' : '#f3f4f6', color: isDarkMode ? '#9ca3af' : '#6b7280' }]}
+                            value={visitStatusDate}
+                            editable={false}
+                          />
+                        </View>
+                      )}
 
                       <SearchablePickerTrigger
                         label="Assigned Email"

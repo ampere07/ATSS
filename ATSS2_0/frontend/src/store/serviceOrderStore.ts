@@ -1,6 +1,15 @@
 import { create } from 'zustand';
 import { getServiceOrders, ServiceOrderData } from '../services/serviceOrderService';
 
+// visit_status_date is a DATE column, but the driver and JSON casting between
+// here and it can hand it back as "2026-09-05", "2026-09-05 00:00:00" or a full
+// ISO string. Keep the leading date and drop whatever follows, so the table and
+// the details panel never show a midnight that is really just an absent time.
+const toDateOnly = (value?: string | null): string => {
+  const match = String(value ?? '').match(/^\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : '';
+};
+
 export interface ServiceOrder {
     id: string;
     ticketId: string;
@@ -26,6 +35,8 @@ export interface ServiceOrder {
     concern: string;
     concernRemarks: string;
     visitStatus: string;
+    /** The day a technician last moved visitStatus, "YYYY-MM-DD", or ''. */
+    visitStatusDate: string;
     visitBy: string;
     visitWith: string;
     visitWithOther: string;
@@ -107,6 +118,7 @@ export const transformServiceOrder = (order: ServiceOrderData): ServiceOrder => 
         concern: order.concern || '',
         concernRemarks: order.concern_remarks || '',
         visitStatus: order.visit_status || '',
+        visitStatusDate: toDateOnly(order.visit_status_date),
         visitBy: order.visit_by_user || '',
         visitWith: order.visit_with || '',
         visitWithOther: '',

@@ -6,6 +6,7 @@ import PromoFormModal from '../modals/PromoFormModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { authFetch } from '../config/api';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface Promo {
   id: number;
@@ -27,6 +28,11 @@ interface GlobalModalState {
 }
 
 const PromoList: React.FC = () => {
+  // Add, Edit and Delete are granted separately. The same keys the API
+  // demands, so a control is only drawn when the request behind it would
+  // succeed.
+  const actions = usePageActions('promo-list');
+
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [promos, setPromos] = useState<Promo[]>([]);
@@ -179,6 +185,7 @@ const PromoList: React.FC = () => {
   };
 
   const handleDelete = (promo: Promo) => {
+    if (!actions.canDelete) return;
     showGlobalModal(
       'confirm',
       'Confirm Deletion',
@@ -240,6 +247,7 @@ const PromoList: React.FC = () => {
   };
 
   const handleEdit = (promo: Promo) => {
+    if (!actions.canEdit) return;
     setEditingPromo(promo);
     setShowAddPanel(true);
   };
@@ -353,6 +361,7 @@ const PromoList: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+            {actions.canEdit && (
             <button
               onClick={() => handleEdit(promo)}
               className={`p-2 rounded transition-colors ${isDarkMode
@@ -363,6 +372,8 @@ const PromoList: React.FC = () => {
             >
               <Edit2 className="h-4 w-4" />
             </button>
+            )}
+            {actions.canDelete && (
             <button
               onClick={() => handleDelete(promo)}
               disabled={deletingItems.has(promo.id)}
@@ -378,6 +389,7 @@ const PromoList: React.FC = () => {
                 <Trash2 className="h-4 w-4" />
               )}
             </button>
+            )}
           </div>
         </div>
       </div>
@@ -399,6 +411,7 @@ const PromoList: React.FC = () => {
               colorPalette={colorPalette}
               placeholder="Search Promo List"
             />
+            {actions.canCreate && (
             <button
               onClick={() => {
                 setEditingPromo(null);
@@ -422,6 +435,7 @@ const PromoList: React.FC = () => {
               <Plus className="h-4 w-4" />
               <span className="hidden md:inline">Add Promo</span>
             </button>
+            )}
             <button
               onClick={() => loadPromos()}
               className="p-2.5 rounded-lg flex items-center justify-center transition-colors shadow-sm active:rotate-180 duration-500"

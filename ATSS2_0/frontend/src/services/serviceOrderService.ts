@@ -38,6 +38,9 @@ export interface ServiceOrderData {
   assigned_email?: string;
   repair_category?: string;
   visit_status?: string;
+  // Stamped by the API the day a technician moves visit_status. A DATE column,
+  // so "YYYY-MM-DD" — null on every ticket no technician has moved.
+  visit_status_date?: string | null;
   priority_level?: string;
   visit_by_user?: string;
   visit_with?: string;

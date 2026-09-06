@@ -188,6 +188,19 @@ class CronLog
         $this->record('SKIPPED', $identifier);
     }
 
+    /**
+     * A record the run brought into existence, as opposed to one it acted upon.
+     *
+     * Kept distinct from processed() because the two answer different questions:
+     * "which accounts did this run touch" and "what did it create". A stage that
+     * creates rows is the one most often accused of having done nothing, so the
+     * things it created are worth listing on their own line.
+     */
+    public function created(?string $identifier): void
+    {
+        $this->record('CREATED', $identifier);
+    }
+
     public function failed(?string $identifier): void
     {
         $this->record('FAILED', $identifier);

@@ -112,6 +112,16 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
   const [activeImageSize, setActiveImageSize] = useState<ImageSizeSetting | null>(null);
   const sigCanvas = useRef<SignatureCanvas>(null);
 
+  // The day a technician last moved this ticket's Visit Status, as the API
+  // stored it. A DATE column, but MySQL drivers and JSON casting between them
+  // can hand it back as "2026-09-05", "2026-09-05 00:00:00" or an ISO string,
+  // so keep the leading date and drop whatever follows.
+  const visitStatusDate = (() => {
+    const raw = serviceOrderData?.visit_status_date ?? serviceOrderData?.visitStatusDate;
+    const match = String(raw ?? '').match(/^\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : '';
+  })();
+
   const getCurrentUser = (): UserData | null => {
     try {
       const authData = localStorage.getItem('authData');
@@ -1772,6 +1782,14 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                       <div className="flex items-center justify-center w-4 h-4 rounded-full text-white text-xs mr-2" style={{ backgroundColor: colorPalette?.primary || '#7c3aed' }}>!</div>
                       <p className="text-xs" style={{ color: colorPalette?.primary || '#7c3aed' }}>This entry is required</p>
                     </div>
+                  )}
+                  {/* Stamped by the API the day a technician moves the Visit
+                      Status, and only then. Read-only here: the column is
+                      derived server-side, so it is never sent back up. */}
+                  {visitStatusDate && (
+                    <p className={`text-xs mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                      Visit Status Date: {visitStatusDate}
+                    </p>
                   )}
                 </div>
 

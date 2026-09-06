@@ -230,7 +230,7 @@ class AutoDisconnectService
                 $this->writeLog("");
             }
 
-            $this->writeRunSummary();
+            $this->writeRunSummary('DC');
 
             $this->releaseLock();
             return [
@@ -254,8 +254,14 @@ class AutoDisconnectService
             $this->writeLog("[TRACE] " . $e->getTraceAsString());
             $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
             $this->writeLog("Duration: {$duration} second(s)");
+
+            // Whatever was already committed before the crash still happened, and the
+            // buckets are the only record of it. Flushing here also stops those accounts
+            // from leaking into the pullout stage's summary, which runs next on the same
+            // CronLog instance.
+            $this->writeRunSummary('DC');
             $this->writeLog("");
-            
+
             $this->releaseLock();
             return [
                 'success' => false,
@@ -279,6 +285,31 @@ class AutoDisconnectService
             return ['success' => false, 'reason' => 'Billing account not found'];
         }
 
+        // Validate account balance.
+        //
+        // Checked before anything else acts on the account: a paid-up balance means this
+        // is not a disconnection candidate at all, so it must not be charged, cut off, or
+        // given a pullout order. Everything below assumes money is owed.
+        $currentBalance = floatval($billingAccount->account_balance);
+        $this->writeLog("  [INFO] Current Balance: ₱" . number_format($currentBalance, 2));
+
+        if ($currentBalance <= 0.00) {
+            $this->writeLog("  [SKIP] Balance is zero or negative (already paid)");
+            return ['success' => false, 'reason' => 'Balance already paid'];
+        }
+
+        // Raise the pullout service order before any of the skip conditions below.
+        //
+        // Cutting the customer off and telling the field team to collect the equipment
+        // are two different jobs, and only the first one was being done here. An account
+        // already restricted earlier today, or already sitting at Disconnected, would
+        // return at one of the guards below having never had a service order raised —
+        // so it stayed restricted forever with nothing dispatched against it. The order
+        // is what the field team actually works from, so it is created for every account
+        // that owes money on a disconnection-day invoice, whether or not the RADIUS and
+        // status side of the disconnect still has anything left to do.
+        $this->ensurePulloutServiceOrder($billingAccount, "System Auto Generated (Auto DC, Overdue {$dcActualOffset} Days)");
+
         // Check if already disconnected today
         $alreadyDisconnected = DB::table('disconnected_logs')
             ->where('account_id', $billingAccount->id)
@@ -288,15 +319,6 @@ class AutoDisconnectService
         if ($alreadyDisconnected) {
             $this->writeLog("  [SKIP] Already disconnected today");
             return ['success' => false, 'reason' => 'Already disconnected today'];
-        }
-
-        // Validate account balance
-        $currentBalance = floatval($billingAccount->account_balance);
-        $this->writeLog("  [INFO] Current Balance: ₱" . number_format($currentBalance, 2));
-
-        if ($currentBalance <= 0.00) {
-            $this->writeLog("  [SKIP] Balance is zero or negative (already paid)");
-            return ['success' => false, 'reason' => 'Balance already paid'];
         }
 
         // Check if already inactive or pullout
@@ -489,6 +511,10 @@ class AutoDisconnectService
             
             if ($pulloutOffset <= 0) {
                 $this->writeLog("[INFO] Auto Pullout is disabled (pullout_day = 0)");
+                // Carries the » marker so it survives the errors-only filter. Without it
+                // a disabled pullout and a pullout that ran clean look identical in the
+                // file: nothing at all.
+                $this->writeLog("» PULLOUT DISABLED (pullout_day = 0) — no service orders created");
                 return [
                     'success' => true,
                     'created' => 0,
@@ -518,6 +544,7 @@ class AutoDisconnectService
             if ($totalCount === 0) {
                 $this->writeLog("[INFO] No invoices to process for pullout today.");
                 $this->writeLog("[INFO] Criteria: Status IN ('Unpaid', 'Partial') AND Due Date = {$targetDate}");
+                $this->writeLog("» PULLOUT NONE (0 candidates with due date {$targetDate}, offset {$pulloutOffset} days) — no service orders created");
                 $endTime = Carbon::now();
                 $duration = $endTime->diffInSeconds($startTime);
                 $this->writeLog("");
@@ -554,9 +581,33 @@ class AutoDisconnectService
                 $this->writeLog("[ACCOUNT] {$accountNo}");
                 
                 try {
+                    // One pullout per account per day, whatever became of it since.
+                    //
+                    // Deliberately blind to support_status, unlike the monthly guard
+                    // below: a pullout raised today and then closed or cancelled has
+                    // still been generated for today, and raising a second one would
+                    // duplicate work that has already been dispatched rather than
+                    // resume it. That gap is what let a re-run of the cron regenerate
+                    // an order it had created earlier the same day.
+                    //
+                    // Mirrors the "already disconnected today" guard the disconnect
+                    // stage keeps against disconnected_logs.
+                    $generatedToday = ServiceOrder::where('account_no', $accountNo)
+                        ->whereIn('concern', self::PULLOUT_CONCERNS)
+                        ->whereDate('created_at', Carbon::today())
+                        ->exists();
+
+                    if ($generatedToday) {
+                        $this->writeLog("  [SKIP] Pullout service order already generated for {$accountNo} today (" . Carbon::today()->format('Y-m-d') . ")");
+                        $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $this->runLog->skipped($accountNo);
+                        $skippedCount++;
+                        continue;
+                    }
+
                     // Check if pullout request already exists for this month
                     $existingPullout = ServiceOrder::where('account_no', $accountNo)
-                        ->whereIn('concern', ['Pullout', 'For Pullout', 'for pullout'])
+                        ->whereIn('concern', self::PULLOUT_CONCERNS)
                         ->whereNotIn('support_status', ['Closed', 'Cancelled'])
                         ->whereMonth('created_at', Carbon::now()->month)
                         ->whereYear('created_at', Carbon::now()->year)
@@ -565,6 +616,7 @@ class AutoDisconnectService
                     if ($existingPullout) {
                         $this->writeLog("  [SKIP] Pullout request already exists for this month");
                         $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $this->runLog->skipped($accountNo);
                         $skippedCount++;
                         continue;
                     }
@@ -573,6 +625,7 @@ class AutoDisconnectService
                     if (!$billingAccount) {
                         $this->writeLog("  [SKIP] Billing account not found");
                         $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $this->runLog->skipped($accountNo);
                         $skippedCount++;
                         continue;
                     }
@@ -582,6 +635,7 @@ class AutoDisconnectService
                     if (in_array($statusName, ['Pullout', 'Disconnected', 'Pullout Restricted'])) {
                         $this->writeLog("  [SKIP] Account status is already {$statusName} - no action needed");
                         $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $this->runLog->skipped($accountNo);
                         $skippedCount++;
                         continue;
                     }
@@ -591,6 +645,7 @@ class AutoDisconnectService
                     if (!$technicalDetail || empty($technicalDetail->username)) {
                         $this->writeLog("  [SKIP] PPPoE username not found");
                         $this->writeLog("[{$counter}/{$totalCount}] ⊘ SKIPPED");
+                        $this->runLog->skipped($accountNo);
                         $skippedCount++;
                         continue;
                     }
@@ -604,7 +659,7 @@ class AutoDisconnectService
                     $this->writeLog("  [CREATE] Creating pullout service order...");
                     DB::beginTransaction();
                     try {
-                        $this->createPulloutRequest($billingAccount, $pulloutOffset);
+                        $serviceOrder = $this->createPulloutRequest($billingAccount, "System Auto Generated (Overdue {$pulloutOffset} Days)");
 
                         $inactiveStatusId = DB::table('billing_status')->where('status_name', 'Inactive')->value('id') ?? 4;
                         DB::table('billing_accounts')
@@ -621,10 +676,18 @@ class AutoDisconnectService
                         $this->writeLog("  [ERROR] Pullout DB transaction rolled back for {$accountNo}: " . $e->getMessage());
                         $this->writeLog("[{$counter}/{$totalCount}] ✗ ERROR");
                         $errors[] = "Account {$accountNo}: " . $e->getMessage();
+                        $this->runLog->failed($accountNo);
                         $skippedCount++;
                         continue;
                     }
-                    $this->writeLog("  [CREATE] ✓ Pullout service order created");
+
+                    // Committed, so the service order exists whatever the RADIUS and
+                    // notification steps below go on to do. Recorded here rather than at
+                    // the end of the iteration for that reason.
+                    $this->runLog->created($accountNo);
+                    $this->runLog->record('SERVICE ORDERS', (string) $serviceOrder->id);
+
+                    $this->writeLog("  [CREATE] ✓ Pullout service order created (SO #{$serviceOrder->id})");
                     $this->writeLog("  [DB] ✓ Billing status updated to Inactive (ID: {$inactiveStatusId})");
 
                     // 2. Restrict user via RADIUS (best-effort; queued for retry if it fails).
@@ -683,6 +746,7 @@ class AutoDisconnectService
                     $this->writeLog("  [TRACE] " . $e->getTraceAsString());
                     $this->writeLog("[{$counter}/{$totalCount}] ✗ ERROR");
                     $errors[] = "Account {$accountNo}: " . $e->getMessage();
+                    $this->runLog->failed($accountNo);
                     $skippedCount++;
                 }
             }
@@ -711,6 +775,8 @@ class AutoDisconnectService
                 $this->writeLog("");
             }
 
+            $this->writeRunSummary('PULLOUT');
+
             return [
                 'success' => true,
                 'created' => $createdCount,
@@ -731,8 +797,11 @@ class AutoDisconnectService
             $this->writeLog("[TRACE] " . $e->getTraceAsString());
             $this->writeLog("End Time: " . $endTime->format('Y-m-d H:i:s'));
             $this->writeLog("Duration: {$duration} second(s)");
+
+            // Service orders created before the crash are committed and real — say so.
+            $this->writeRunSummary('PULLOUT');
             $this->writeLog("");
-            
+
             return [
                 'success' => false,
                 'error' => $e->getMessage()
@@ -741,20 +810,86 @@ class AutoDisconnectService
     }
 
     /**
-     * Create a pullout service order
+     * The concern values a pullout service order has been stored under.
+     *
+     * Casing has varied over time, so every check that asks "does this account already
+     * have a pullout order" has to allow for all of them — miss one and the answer is
+     * no, and a duplicate is raised.
      */
-    private function createPulloutRequest(BillingAccount $billingAccount, int $pulloutOffset): void
+    private const PULLOUT_CONCERNS = ['Pullout', 'For Pullout', 'for pullout'];
+
+    /**
+     * Give the account a pullout service order unless it already has one.
+     *
+     * Returns the new order, or null when one already existed and nothing was created.
+     *
+     * The rule is: nothing is raised if a pullout order is still open, or if any pullout
+     * order was raised for this account today whatever became of it since. The second
+     * half is what makes re-running the command safe — an order raised this morning and
+     * closed by lunchtime still counts, because the work has been dispatched and raising
+     * a second one would duplicate it rather than resume it.
+     *
+     * Deliberately says nothing about the account's billing status. A restricted or
+     * disconnected account is precisely the one that needs its equipment collected, so
+     * status is the reason to raise the order, never the reason to withhold it.
+     */
+    private function ensurePulloutServiceOrder(BillingAccount $billingAccount, string $remark): ?ServiceOrder
+    {
+        $accountNo = $billingAccount->account_no;
+
+        $openOrder = ServiceOrder::where('account_no', $accountNo)
+            ->whereIn('concern', self::PULLOUT_CONCERNS)
+            ->where(function ($query) {
+                $query->whereNull('support_status')
+                    ->orWhereNotIn('support_status', ['Closed', 'Cancelled']);
+            })
+            ->exists();
+
+        if ($openOrder) {
+            $this->writeLog("  [SO] Pullout service order already open for {$accountNo} — not raising another");
+            return null;
+        }
+
+        $raisedToday = ServiceOrder::where('account_no', $accountNo)
+            ->whereIn('concern', self::PULLOUT_CONCERNS)
+            ->whereDate('created_at', Carbon::today())
+            ->exists();
+
+        if ($raisedToday) {
+            $this->writeLog("  [SO] Pullout service order already raised for {$accountNo} today — not raising another");
+            return null;
+        }
+
+        $serviceOrder = $this->createPulloutRequest($billingAccount, $remark);
+
+        $this->runLog->created($accountNo);
+        $this->runLog->record('SERVICE ORDERS', (string) $serviceOrder->id);
+        $this->writeLog("  [SO] ✓ Pullout service order created for {$accountNo} (SO #{$serviceOrder->id})");
+
+        return $serviceOrder;
+    }
+
+    /**
+     * Create a pullout service order.
+     *
+     * Returns the saved row so the caller can name it in the run summary — the
+     * id is the only thing that leads back to the record itself, and without it
+     * the log can say a service order was created but not which one.
+     */
+    private function createPulloutRequest(BillingAccount $billingAccount, string $remark): ServiceOrder
     {
         $serviceOrder = new ServiceOrder();
         $serviceOrder->Timestamp = Carbon::now();
         $serviceOrder->account_no = $billingAccount->account_no;
         $serviceOrder->support_status = 'For Visit';
         $serviceOrder->concern = 'for pullout';
-        $serviceOrder->concern_remarks = "System Auto Generated (Overdue {$pulloutOffset} Days)";
+        $serviceOrder->concern_remarks = $remark;
         $serviceOrder->requested_by = 'System';
         $serviceOrder->created_by_user = 'System';
         $serviceOrder->updated_by_user = 'System';
         $serviceOrder->save();
+
+        return $serviceOrder;
     }
 
     /**
@@ -1037,9 +1172,17 @@ class AutoDisconnectService
      * not. Cleared afterwards so a second run on the same instance cannot inherit the
      * first one's accounts.
      */
-    private function writeRunSummary(): void
+    /**
+     * Flush the outcome buckets to the log and clear them for the next stage.
+     *
+     * $stage is what separates the two runs that share this file. Both used to be
+     * unlabelled, and since only the disconnect stage wrote a summary at all, a bare
+     * "PROCESSED (50)" was read as the whole cron's output — including by the pullout
+     * stage's absence, which looked like the disconnect stage having created nothing.
+     */
+    private function writeRunSummary(string $stage): void
     {
-        foreach ($this->runLog->summaryLines() as $line) {
+        foreach ($this->runLog->summaryLines($stage) as $line) {
             $this->writeLog($line);
         }
 
@@ -1048,12 +1191,18 @@ class AutoDisconnectService
 
     private function writeLog(string $message): void
     {
-        // Errors and run summaries only - see App\Support\CronLog. This is a raw
-        // file write, so LOG_LEVEL never reached it and the narration accumulated
-        // no matter how the channels were configured.
-        if (!CronLog::shouldWrite($message)) {
-            return;
-        }
+        // Every line is written, deliberately.
+        //
+        // This used to run through CronLog::shouldWrite(), which kept faults and run
+        // summaries and dropped the rest. That trimmed the file, but it also removed the
+        // step-by-step account of what the run decided — the config it read, the target
+        // date it computed, the balance and status it saw per account — which is the only
+        // thing that answers "why did nothing happen today". A run reporting 44 skips
+        // gave no clue which guard produced them.
+        //
+        // The cost is a large log file, so it needs rotating; that is the accepted trade
+        // for being able to reconstruct a run. The run summaries CronLog collects are
+        // still emitted, and still mark the accounts by outcome at the end.
 
         $timestamp = Carbon::now()->format('Y-m-d H:i:s');
         $logMessage = "[{$timestamp}] [{$this->logName}] {$message}";

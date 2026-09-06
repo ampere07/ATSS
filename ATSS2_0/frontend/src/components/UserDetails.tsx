@@ -4,7 +4,6 @@ import { User as UserType } from '../types/api';
 import { ColorPalette } from '../services/settingsColorPaletteService';
 import { userService } from '../services/userService';
 import { useUserStore } from '../store/userStore';
-import { usePermissions } from '../hooks/usePermissions';
 
 interface ModalConfig {
   isOpen: boolean;
@@ -19,6 +18,8 @@ interface UserDetailsProps {
   user: UserType;
   onClose: () => void;
   onEdit?: (user: UserType) => void;
+  /** Whether the viewer may delete this user. Users Management decides. */
+  canDelete?: boolean;
   isMobile: boolean;
   isDarkMode: boolean;
   colorPalette: ColorPalette | null;
@@ -28,6 +29,7 @@ const UserDetails: React.FC<UserDetailsProps> = ({
   user,
   onClose,
   onEdit,
+  canDelete = true,
   isMobile,
   isDarkMode,
   colorPalette
@@ -65,10 +67,11 @@ const UserDetails: React.FC<UserDetailsProps> = ({
 
   const isAgent = displayUser.role_id === 4 || displayUser.role?.id === 4 || displayUser.role?.role_name?.toLowerCase() === 'agent';
 
-  // Editing a user and changing an agent's commission rate are SuperAdmin-only.
-  // An administrator reaches the same panel and reads the same fields, but the
-  // two buttons that write to them are not offered.
-  const { isSuperAdmin } = usePermissions();
+  // Whether this panel offers Edit and Delete is Users Management's decision,
+  // passed in as `onEdit` and `canDelete`: it is the page that knows which
+  // section drew the panel, and so which keys apply. The panel used to read the
+  // role itself and offer Edit to a SuperAdmin alone, which meant a role granted
+  // user-management.edit still could not use it.
 
 
   const getFullName = (u: UserType): string => {
@@ -584,7 +587,9 @@ const UserDetails: React.FC<UserDetailsProps> = ({
                   </>
                 )}
               </button>
-              {onEdit && isSuperAdmin && (
+              {/* Users Management passes onEdit only when the role holds
+                  user-management.edit, so this needs no key of its own. */}
+              {onEdit && (
                 <button
                   onClick={() => onEdit(displayUser)}
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium text-white transition-opacity hover:opacity-90 active:scale-95 shadow-sm"
@@ -594,6 +599,7 @@ const UserDetails: React.FC<UserDetailsProps> = ({
                   <span className="hidden sm:inline">Edit</span>
                 </button>
               )}
+              {canDelete && (
               <button
                 onClick={() => {
                   setModal({
@@ -610,6 +616,7 @@ const UserDetails: React.FC<UserDetailsProps> = ({
                 <Trash2 className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Delete</span>
               </button>
+              )}
 
               <div className="relative">
                 <button

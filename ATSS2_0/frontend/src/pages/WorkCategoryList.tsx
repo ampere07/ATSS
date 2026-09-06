@@ -6,6 +6,7 @@ import AddWorkCategoryModal from '../modals/AddWorkCategoryModal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { authFetch } from '../config/api';
+import { usePageActions } from '../hooks/usePageActions';
 
 interface WorkCategory {
   id: number;
@@ -18,6 +19,11 @@ interface WorkCategory {
 }
 
 const WorkCategoryList: React.FC = () => {
+  // Add, Edit and Delete are granted separately. The same keys the API
+  // demands, so a control is only drawn when the request behind it would
+  // succeed.
+  const actions = usePageActions('work-category');
+
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [workCategorys, setWorkCategorys] = useState<WorkCategory[]>([]);
@@ -174,6 +180,7 @@ const WorkCategoryList: React.FC = () => {
   };
 
   const handleDelete = (workCategory: WorkCategory) => {
+    if (!actions.canDelete) return;
     showGlobalModal(
       'confirm',
       'Confirm Deletion',
@@ -223,11 +230,13 @@ const WorkCategoryList: React.FC = () => {
   };
 
   const handleEdit = (workCategory: WorkCategory) => {
+    if (!actions.canEdit) return;
     setEditingWorkCategory(workCategory);
     setShowAddModal(true);
   };
 
   const handleAddNew = () => {
+    if (!actions.canCreate) return;
     setEditingWorkCategory(null);
     setShowAddModal(true);
   };
@@ -326,6 +335,7 @@ const WorkCategoryList: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          {actions.canEdit && (
           <button
             onClick={(e) => { e.stopPropagation(); handleEdit(wc); }}
             className={`p-2 rounded transition-colors ${isDarkMode
@@ -335,6 +345,8 @@ const WorkCategoryList: React.FC = () => {
           >
             <Edit2 size={16} />
           </button>
+          )}
+          {actions.canDelete && (
           <button
             onClick={(e) => { e.stopPropagation(); handleDelete(wc); }}
             disabled={deletingItems.has(wc.id)}
@@ -349,6 +361,7 @@ const WorkCategoryList: React.FC = () => {
               <Trash2 size={16} />
             )}
           </button>
+          )}
         </div>
       </div>
     );
@@ -369,6 +382,7 @@ const WorkCategoryList: React.FC = () => {
               colorPalette={colorPalette}
               placeholder="Search Work Categories"
             />
+            {actions.canCreate && (
             <button
               onClick={handleAddNew}
               className="px-4 py-2.5 text-white rounded-lg flex items-center gap-2 transition-all font-medium text-xs active:scale-95 shadow-sm"
@@ -389,6 +403,7 @@ const WorkCategoryList: React.FC = () => {
               <Plus className="h-4 w-4" />
               <span className="hidden md:inline">Add Category</span>
             </button>
+            )}
             <button
               onClick={() => loadWorkCategorys()}
               className="p-2.5 rounded-lg flex items-center justify-center transition-colors shadow-sm active:rotate-180 duration-500"

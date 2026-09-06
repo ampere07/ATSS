@@ -349,9 +349,23 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         }
     };
 
-    // Speedometer gauge geometry
-    const gaugeWidth = 220;
-    const gaugeR = (gaugeWidth - 30) / 2;
+    // Speedometer gauge geometry.
+    //
+    // Sized from the card it sits in rather than fixed at 220: a 320pt phone
+    // leaves roughly 240pt inside the card's padding, so a fixed gauge all but
+    // touches both edges, and on a tablet it sat marooned in the middle of a
+    // card several times its width. Clamped at both ends — small enough that
+    // the figure inside stays legible, large enough that it never dominates.
+    // The fallback subtracts the ScrollView's own padding as well, so the first
+    // frame is already the size the measurement will confirm and the gauge does
+    // not visibly resize once the card has been laid out.
+    const gaugeWidth = Math.round(
+        Math.min(260, Math.max(150, (contentWidth > 0 ? contentWidth : width - (isMobile ? 32 : 48)) - 80))
+    );
+    // The band scales with the gauge, so the ring keeps its proportions instead
+    // of closing over the figure in the middle at the small end.
+    const gaugeStroke = Math.round(gaugeWidth * (30 / 220));
+    const gaugeR = (gaugeWidth - gaugeStroke) / 2;
     const gaugeCx = gaugeWidth / 2;
     const gaugeCy = gaugeWidth / 2;
     const gaugeCircumference = 2 * Math.PI * gaugeR;
@@ -734,7 +748,19 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
         <View style={styles.container}>
             <ScrollView
                 showsVerticalScrollIndicator={false}
-                contentContainerStyle={{ paddingTop: !isMobile ? 16 : (isShort ? 20 : 60), paddingHorizontal: isMobile ? 16 : 24, paddingBottom: 100, gap: isShort ? 16 : 24 }}
+                contentContainerStyle={{
+                    paddingTop: !isMobile ? 16 : (isShort ? 20 : 60),
+                    paddingHorizontal: isMobile ? 16 : 24,
+                    paddingBottom: 100,
+                    gap: isShort ? 16 : 24,
+                    // On a tablet the cards otherwise run the full width of the
+                    // screen, which leaves the balance figure at one edge and
+                    // its button at the other. Held to a phone-like column and
+                    // centred, the layout reads the same at every size.
+                    width: '100%',
+                    maxWidth: 640,
+                    alignSelf: 'center',
+                }}
                 refreshControl={
                     <RefreshControl
                         refreshing={refreshing}
@@ -972,7 +998,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
                                                                         cy={gaugeCy}
                                                                         r={gaugeR}
                                                                         stroke="#e2e8f0"
-                                                                        strokeWidth={30}
+                                                                        strokeWidth={gaugeStroke}
                                                                         strokeDasharray={`${gaugeArcLength}, ${gaugeCircumference}`}
                                                                         fill="none"
                                                                         strokeLinecap="round"
@@ -985,7 +1011,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
                                                                             cy={gaugeCy}
                                                                             r={gaugeR}
                                                                             stroke={colorPalette?.primary || '#ef4444'}
-                                                                            strokeWidth={30}
+                                                                            strokeWidth={gaugeStroke}
                                                                             strokeDasharray={`${gaugeArcLength}, ${gaugeCircumference}`}
                                                                             strokeDashoffset={gaugeDashoffset}
                                                                             fill="none"
@@ -997,7 +1023,7 @@ const DashboardAgent: React.FC<DashboardAgentProps> = ({ onNavigate }) => {
                                                                             cy={gaugeCy}
                                                                             r={gaugeR}
                                                                             stroke={colorPalette?.primary || '#ef4444'}
-                                                                            strokeWidth={30}
+                                                                            strokeWidth={gaugeStroke}
                                                                             strokeDasharray={`${gaugeArcLength}, ${gaugeCircumference}`}
                                                                             strokeDashoffset={gaugeArcLength * (1 - progress.ratio)}
                                                                             fill="none"
