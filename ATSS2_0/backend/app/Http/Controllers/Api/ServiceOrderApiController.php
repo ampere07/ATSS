@@ -23,6 +23,16 @@ use App\Support\CustomerScope;
 
 class ServiceOrderApiController extends Controller
 {
+    /**
+     * `service_orders.service_charge_status`: whether this order's service
+     * charge has reached the customer's account balance.
+     *
+     * 'pending' — nothing posted. 'added' — the charge is on the balance, and
+     * must not be posted again however many times the ticket is saved.
+     */
+    private const CHARGE_PENDING = 'pending';
+    private const CHARGE_ADDED   = 'added';
+
     /** True when at least one failed RADIUS operation was successfully queued for retry. */
     private bool $radiusQueued = false;
 
@@ -602,6 +612,10 @@ class ServiceOrderApiController extends Controller
             $oldBilling = DB::selectOne("SELECT * FROM billing_accounts WHERE account_no = ?", [$accountRef]);
             $oldTechnical = DB::selectOne("SELECT * FROM technical_details WHERE account_no = ?", [$accountRef]);
 
+            // `service_charge_status` is deliberately absent: it is the server's
+            // record of whether this order's charge has reached a balance, and a
+            // client that could set it could reset it to 'pending' — which is
+            // precisely how the same charge gets posted to a customer twice.
             $allowedFields = [
                 'account_no',
                 'timestamp',
@@ -899,9 +913,21 @@ class ServiceOrderApiController extends Controller
             // or the visit marked Done). It is keyed to the service order rather
             // than to the moment the status flips, so a charge entered — or
             // corrected — on a ticket that is *already* Resolved still reaches the
-            // balance. Only the difference between the charge now and what has
-            // already been posted for this order is applied, so re-saving the same
-            // ticket never charges it twice.
+            // balance.
+            //
+            // A ticket finishes twice, though: the technician marks the visit
+            // Done, and support marks it Resolved. Both mean "bill this job", so
+            // both reach here, and the charge must land once across the two.
+            //
+            // Two things stop it landing twice, because they fail in different
+            // ways. `service_charge_logs` records every amount posted for this
+            // order, so a later save applies only the difference — that handles
+            // the saves arriving one after the other, and handles a charge
+            // corrected after the fact. It does not handle the two saves
+            // overlapping: both read the same empty ledger and both conclude the
+            // whole charge is owing. `service_charge_status` handles that one —
+            // the first posting has to win a conditional UPDATE off 'pending'
+            // before it may touch the balance, and only one request can.
             $effectiveSupportStatus = strtolower(trim((string) ($request->has('support_status')
                 ? $request->input('support_status')
                 : ($serviceOrder->support_status ?? ''))));
@@ -917,22 +943,46 @@ class ServiceOrderApiController extends Controller
                 : ($serviceOrder->service_charge ?? 0)), 2);
 
             if ($chargeIsDue) {
+                $alreadyAdded = strtolower(trim((string) ($serviceOrder->service_charge_status ?? '')))
+                    === self::CHARGE_ADDED;
+
                 $chargeLogs = DB::table('service_charge_logs')
                     ->where('service_order_id', $serviceOrder->id)
                     ->get();
 
                 // What has already been posted for this order. Charges applied
-                // before they were logged left only status = 'used' behind, so for
-                // those the stored charge stands in as the amount already posted.
+                // before they were logged left only status = 'used' behind — and,
+                // on a ticket the backfill marked, only service_charge_status —
+                // so for those the stored charge stands in as the amount already
+                // posted. Without that, an old ticket's first save under this
+                // code would read an empty ledger and post its charge again.
                 if ($chargeLogs->isNotEmpty()) {
                     $postedSoFar = round((float) $chargeLogs->sum('service_charge'), 2);
-                } elseif (strtolower(trim((string) ($serviceOrder->status ?? ''))) === 'used') {
+                } elseif ($alreadyAdded || strtolower(trim((string) ($serviceOrder->status ?? ''))) === 'used') {
                     $postedSoFar = round(floatval($serviceOrder->service_charge ?? 0), 2);
                 } else {
                     $postedSoFar = 0.0;
                 }
 
                 $chargeDelta = round($serviceChargeTotal - $postedSoFar, 2);
+
+                // The first posting has to claim the order before it may move the
+                // balance. Two saves racing — the visit marked Done and the ticket
+                // marked Resolved, arriving together — both get this far with the
+                // same delta; only one wins the UPDATE, and the other stops here.
+                //
+                // A correction on an order already marked 'added' skips the claim:
+                // there is nothing left to win, and the ledger delta above is what
+                // keeps it honest.
+                if (abs($chargeDelta) >= 0.01 && !$alreadyAdded && !$this->claimServiceCharge($serviceOrder->id)) {
+                    Log::info('Service charge already posted by a concurrent save; skipping', [
+                        'service_order_id' => $serviceOrder->id,
+                        'account_no'       => $serviceOrder->account_no,
+                        'charge'           => $serviceChargeTotal,
+                    ]);
+
+                    $chargeDelta = 0.0;
+                }
 
                 if (abs($chargeDelta) >= 0.01) {
                     $billingAccount = DB::table('billing_accounts')
@@ -989,9 +1039,24 @@ class ServiceOrderApiController extends Controller
 
                         $data['status'] = $serviceChargeTotal > 0 ? 'used' : 'unused';
 
+                        // A charge corrected back down to nothing has been taken
+                        // off the balance again, so the order is owed a posting
+                        // once more if a charge is entered later. Written through
+                        // $data, which is applied below, so it takes effect after
+                        // the claim rather than fighting it.
+                        $data['service_charge_status'] = $serviceChargeTotal > 0
+                            ? self::CHARGE_ADDED
+                            : self::CHARGE_PENDING;
+
                         Log::info("Updated account balance from {$currentBalance} to {$newBalance} (service order #{$serviceOrder->id} charge: {$serviceChargeTotal}, already posted: {$postedSoFar}, applied now: {$chargeDelta}).");
                     }
                     else {
+                        // The claim was taken above but nothing reached a balance,
+                        // because there is no billing account to reach. Give it
+                        // back: left at 'added' the order would be treated as paid
+                        // for ever after and the charge would never be posted.
+                        $data['service_charge_status'] = self::CHARGE_PENDING;
+
                         Log::warning('Billing account not found for account_no: ' . $serviceOrder->account_no);
                     }
                 }
@@ -1739,6 +1804,43 @@ class ServiceOrderApiController extends Controller
     private function isTechnician($currentUser): bool
     {
         return $currentUser !== null && (int) $currentUser->role_id === Role::TECHNICIAN;
+    }
+
+    /**
+     * Claim the right to post this order's service charge to a balance.
+     *
+     * True when the caller may post it, false when someone else already has.
+     *
+     * The UPDATE is the lock. A ticket finishes twice — the visit marked Done
+     * and support marking it Resolved — and when those two saves overlap, both
+     * read a service order that has not been charged yet and both work out the
+     * full charge as owing. Reading the column and then writing it would not
+     * help: both would read 'pending' before either wrote.
+     *
+     * Writing it conditionally does. MySQL takes a row lock for the UPDATE, so
+     * the two run one after the other whatever order they arrived in, and the
+     * WHERE clause is then false for the second — it matches no rows, gets 0
+     * back, and posts nothing. No transaction is needed for this, because the
+     * single statement is the whole of the critical section.
+     *
+     * Matched loosely — null, '', 'pending', any casing — so a row that predates
+     * the column, or one a hand-run UPDATE left empty, is claimable rather than
+     * silently stuck. Only the exact string 'added' blocks a claim.
+     */
+    private function claimServiceCharge(int $serviceOrderId): bool
+    {
+        $claimed = DB::table('service_orders')
+            ->where('id', $serviceOrderId)
+            ->whereRaw(
+                "LOWER(TRIM(COALESCE(service_charge_status, ''))) <> ?",
+                [self::CHARGE_ADDED]
+            )
+            ->update([
+                'service_charge_status' => self::CHARGE_ADDED,
+                'updated_at'            => now(),
+            ]);
+
+        return $claimed > 0;
     }
 
     /**

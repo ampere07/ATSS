@@ -79,6 +79,12 @@ class ServiceOrder extends Model
         // be settable through the generic update endpoint a technician also
         // calls. ServiceOrderApiController::enableForTechnician() sets it
         // directly.
+        //
+        // service_charge_status is NOT fillable for the same reason: it records
+        // whether this order's charge has already reached the customer's
+        // balance, and anything able to reset it to 'pending' can have the same
+        // charge posted to the customer twice. ServiceOrderApiController's
+        // claimServiceCharge() is the only thing that sets it.
     ];
 
     /**
