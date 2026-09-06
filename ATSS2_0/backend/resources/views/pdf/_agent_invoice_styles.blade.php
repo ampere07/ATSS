@@ -14,12 +14,14 @@
                      artwork on page one is pulled back up into this band by an
                      equal negative margin, so page one still opens flush with
                      the top edge exactly as before.
-              bottom the footer artwork's own height plus a little air. Without
-                     it the table would run on beneath the artwork and those
+              bottom the footer artwork's own height, plus a little air above it
+                     and the gap it now stands off the bottom edge. Without the
+                     band the table would run on beneath the artwork and those
                      rows would vanish rather than move to the next page.
 
-            The footer band is 108pt: the artwork is 791x134px drawn at the full
-            595.28pt page width, so it stands 100.8pt tall.
+            The footer band is 118pt: the artwork is 791x134px drawn at the full
+            595.2756pt page width, so it stands 100.8pt tall, and it carries 8pt
+            of air above it and a 10pt lift below.
         */
         @page { margin: {{ $pageTopBand }} 0 {{ $pageBottomBand }} 0; }
 
@@ -231,8 +233,9 @@
         /* ── Footer ─────────────────────────────────────────────────────── */
         /* The supplied artwork carries the angled bars and the contact strip.
            Repeated on every page by being fixed. The offset reaches back down
-           through the reserved bottom band so the artwork still finishes flush
-           with the paper edge; the band's only job is to keep the flow off it. */
+           through the reserved bottom band, but stops short of the paper edge
+           so the artwork sits on a little white rather than looking trimmed;
+           the band's only job is to keep the flow off it. */
         .footer {
             position: fixed;
             left: 0; right: 0; bottom: {{ $footerOffset }};

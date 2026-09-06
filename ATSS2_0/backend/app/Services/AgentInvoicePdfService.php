@@ -67,11 +67,24 @@ class AgentInvoicePdfService
      *      reduced — and the page number reads "Page 1 of 2"
      *   5  page one holds 15 rows on a solo invoice and 10 on a team one,
      *      whose rows are taller for the "referred by" line
+     *   6  the sheet is exactly A4 — 21.0cm wide by 29.7cm tall — rather than
+     *      Dompdf's rounded-off stand-in for it, and the footer artwork lifted
+     *      clear of the bottom edge instead of finishing flush against it
      */
-    private const LAYOUT_VERSION = 5;
+    private const LAYOUT_VERSION = 6;
 
-    /** A4 portrait, in points — what setPaper('A4') gives Dompdf. */
-    private const PAGE_WIDTH_PT = 595.28;
+    /**
+     * The sheet: A4 portrait, 21.0cm x 29.7cm, in points.
+     *
+     * Given explicitly rather than as setPaper('A4') because Dompdf's own A4
+     * is rounded to two decimals — 595.28 x 841.89pt, which measures 209.998mm
+     * by 296.999mm. Near enough to look right, and far enough off to be
+     * reported as "not A4" by anything that reads the page box.
+     *
+     * 210mm / 25.4 * 72 and 297mm / 25.4 * 72, to four decimal places.
+     */
+    private const PAGE_WIDTH_PT  = 595.2756;
+    private const PAGE_HEIGHT_PT = 841.8898;
 
     /**
      * The band reserved at the top of every page for the page number.
@@ -85,9 +98,24 @@ class AgentInvoicePdfService
     /**
      * Air between the footer artwork and the last line of flowing content.
      *
-     * The reserved bottom band is the artwork's own height plus this.
+     * The reserved bottom band is the artwork's own height plus this and the
+     * lift below.
      */
     private const FOOTER_CLEARANCE_PT = 8.0;
+
+    /**
+     * How far the footer artwork stands off the bottom paper edge.
+     *
+     * The artwork used to finish flush with the edge, which left it looking
+     * like it had been cropped by the trim rather than placed. 10pt is about
+     * 3.5mm of white beneath it.
+     *
+     * The reserved bottom band grows by the same amount, so lifting the art
+     * does not eat into the clearance above it — it costs flowing content this
+     * much height instead. Raise it far and page one stops holding the rows
+     * `first_page_rows` promises it; the two are tuned against each other.
+     */
+    private const FOOTER_LIFT_PT = 10.0;
 
     /** Fallback footer height when the artwork cannot be measured. */
     private const FOOTER_FALLBACK_PT = 101.0;
@@ -239,7 +267,7 @@ class AgentInvoicePdfService
      *
      * One place for the Dompdf settings, so a single invoice and a bundle are
      * rendered by identical options — remote loading off, the fonts folder
-     * inside the chroot, 96dpi.
+     * inside the chroot, 96dpi, and an exactly-A4 sheet.
      */
     private function htmlToPdf(string $html): string
     {
@@ -254,7 +282,7 @@ class AgentInvoicePdfService
 
         $dompdf = new Dompdf($options);
         $dompdf->loadHtml($html, 'UTF-8');
-        $dompdf->setPaper('A4', 'portrait');
+        $dompdf->setPaper([0.0, 0.0, self::PAGE_WIDTH_PT, self::PAGE_HEIGHT_PT], 'portrait');
         $dompdf->render();
 
         $this->stampPageNumbers($dompdf);
@@ -514,7 +542,7 @@ class AgentInvoicePdfService
     private function pageGeometry(): array
     {
         $footerHeight = $this->imageHeightAtPageWidth(self::FOOTER_IMAGE) ?? self::FOOTER_FALLBACK_PT;
-        $bottomBand   = $footerHeight + self::FOOTER_CLEARANCE_PT;
+        $bottomBand   = $footerHeight + self::FOOTER_CLEARANCE_PT + self::FOOTER_LIFT_PT;
 
         return [
             'pageTopBand'    => $this->pt(self::TOP_BAND_PT),
@@ -522,9 +550,14 @@ class AgentInvoicePdfService
 
             // Dompdf places a fixed box against the content box, not the paper,
             // so both offsets reach back out through their own band: the number
-            // up into the top band, the artwork down to the paper's edge.
+            // up into the top band, the artwork down towards the paper's edge.
+            //
+            // The artwork stops FOOTER_LIFT_PT short of that edge, so it reaches
+            // back through the band by everything except the lift. Written as
+            // (lift - band) rather than -(height + clearance), which is the same
+            // number, because it says what it is doing.
             'pageNumberTop'  => $this->pt(-(self::TOP_BAND_PT - 16.0)),
-            'footerOffset'   => $this->pt(-$bottomBand),
+            'footerOffset'   => $this->pt(self::FOOTER_LIFT_PT - $bottomBand),
         ];
     }
 
