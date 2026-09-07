@@ -1432,6 +1432,7 @@ const Discounts: React.FC = () => {
             discountRecord={selectedDiscount}
             onClose={handleCloseDetails}
             onApproveSuccess={handleRefresh}
+            onEditSuccess={handleRefresh}
             onPrevious={currentDiscountIndex > 0 ? handlePreviousRecord : undefined}
             onNext={currentDiscountIndex < filteredDiscountRecords.length - 1 ? handleNextRecord : undefined}
           />
