@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Events\OnlineStatusBatchUpdated;
 use App\Models\OnlineStatus;
 use App\Models\BillingAccount;
 use App\Models\TechnicalDetail;
@@ -145,11 +146,46 @@ class RadiusStatusSyncService
     ];
 
     /**
+     * The columns a watching operator is actually looking at.
+     *
+     * A run rewrites a row when any synced column moves — a counter ticking up is enough. Those are
+     * not worth a WebSocket frame; a subscriber going from Online to Offline, or picking up a new
+     * address, is. Narrowing the broadcast to these two is what keeps a quiet estate silent.
+     */
+    private const BROADCAST_COLUMNS = ['session_status', 'ip_address'];
+
+    /** Accounts per broadcast frame. */
+    private const BROADCAST_CHUNK = 250;
+
+    /**
+     * Above this many changed accounts, broadcast nothing.
+     *
+     * A change set this size is not subscribers coming and going — it is a seeding run, a RADIUS
+     * server that just came back, or a mass regrade. Pushing it would put hundreds of frames
+     * through Soketi and make every open tab re-render for minutes to deliver news the operator
+     * cannot read anyway. The client refreshes anything older than a minute on its own, so the
+     * screens converge regardless; only the live nudge is dropped.
+     */
+    private const BROADCAST_MAX = 2000;
+
+    /**
+     * Accounts whose broadcast columns moved during this run, keyed by account number so a batch
+     * that is replayed after a failed transaction records each account once.
+     *
+     * @var array<string, array>
+     */
+    private array $changedStatuses = [];
+
+    /**
      * @param  int|null  $batchSize  Accounts per batch for this run; null uses the configured size.
      */
     public function syncRadiusStatus(?int $batchSize = null, bool $refreshUsers = false): array
     {
         $batchSize = RadiusStatusSyncPolicy::batchSize($batchSize);
+
+        // Cleared per run: the service is resolved from the container and one instance can be asked
+        // to sync more than once, which would otherwise re-broadcast the previous run's changes.
+        $this->changedStatuses = [];
 
         $stats = [
             'synced' => 0,
@@ -250,6 +286,11 @@ class RadiusStatusSyncService
             if ($radiusConfigs->first()) {
                 $radiusConfigs->first()->touch();
             }
+
+            // After the batches, so a subscriber is only announced once its new status is
+            // committed — a frame sent from inside the loop could arrive before the row it
+            // describes, and a tab that then re-read the account would show the old value.
+            $stats['broadcast'] = $this->broadcastStatusChanges();
 
             Log::info('[STATUS SYNC] Complete', [
                 'unique_records' => $stats['unique_records'],
@@ -844,6 +885,7 @@ class RadiusStatusSyncService
                         $payload + ['created_at' => now()]
                     );
 
+                    $this->recordStatusChange(null, $payload);
                     $stats['updated']++;
                     continue;
                 }
@@ -858,6 +900,10 @@ class RadiusStatusSyncService
                     ->where('account_id', $accountId)
                     ->update($payload);
 
+                // Compared here rather than inferred from "we wrote it": with skipUnchanged off
+                // every row is written every run, so a write on its own says nothing about whether
+                // anything an operator watches actually moved.
+                $this->recordStatusChange($current, $payload);
                 $stats['updated']++;
 
             } catch (\Exception $e) {
@@ -912,6 +958,94 @@ class RadiusStatusSyncService
         }
 
         return false;
+    }
+
+    /**
+     * Note an account whose session status or address moved, for the end-of-run broadcast.
+     *
+     * $current is null for a row this run inserted, which counts as a change: the account had no
+     * status at all a moment ago.
+     */
+    private function recordStatusChange(?object $current, array $payload): void
+    {
+        if ($current !== null) {
+            $moved = false;
+
+            foreach (self::BROADCAST_COLUMNS as $column) {
+                if ($this->comparable($current->{$column} ?? null) !== $this->comparable($payload[$column] ?? null)) {
+                    $moved = true;
+                    break;
+                }
+            }
+
+            if (!$moved) {
+                return;
+            }
+        }
+
+        $accountNo = (string) ($payload['account_no'] ?? '');
+
+        if ($accountNo === '') {
+            return;
+        }
+
+        $this->changedStatuses[$accountNo] = [
+            'account_no'      => $accountNo,
+            'session_status'  => $payload['session_status'] ?? null,
+            // Named session_ip, as the billing API reports it — the client applies this payload to
+            // records it loaded from there, so the two have to agree.
+            'session_ip'      => $payload['ip_address'] ?? null,
+            'active_sessions' => (int) ($payload['active_sessions'] ?? 0),
+        ];
+    }
+
+    /**
+     * Push this run's changes to every open browser, in frames of BROADCAST_CHUNK.
+     *
+     * Failure here is never allowed to fail the sync. The database is already correct at this
+     * point; a Soketi that is down costs the operator a live update, not a status, and throwing
+     * would roll a completed run back into the error path and have it logged as a failed sync.
+     *
+     * @return int accounts announced
+     */
+    private function broadcastStatusChanges(): int
+    {
+        $changed = array_values($this->changedStatuses);
+        $this->changedStatuses = [];
+
+        if ($changed === []) {
+            return 0;
+        }
+
+        if (count($changed) > self::BROADCAST_MAX) {
+            Log::info('[STATUS SYNC] Too many status changes to broadcast; clients will refresh on their own', [
+                'changed' => count($changed),
+                'limit'   => self::BROADCAST_MAX,
+            ]);
+
+            return 0;
+        }
+
+        $sent = 0;
+
+        foreach (array_chunk($changed, self::BROADCAST_CHUNK) as $chunk) {
+            try {
+                event(new OnlineStatusBatchUpdated($chunk));
+                $sent += count($chunk);
+            } catch (\Throwable $e) {
+                Log::warning('[STATUS SYNC] Failed to broadcast online status changes', [
+                    'accounts' => count($chunk),
+                    'error'    => $e->getMessage(),
+                ]);
+            }
+        }
+
+        Log::info('[STATUS SYNC] Broadcast online status changes', [
+            'changed' => count($changed),
+            'sent'    => $sent,
+        ]);
+
+        return $sent;
     }
 
     /**

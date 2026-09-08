@@ -202,7 +202,7 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [selectedLocation, setSelectedLocation] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>(initialSearchQuery || '');
-  const { billingRecords, totalCount, isLoading: isTableLoading, error: contextError, fetchBillingRecords, refreshLatestData } = useBillingStore();
+  const { billingRecords, totalCount, isLoading: isTableLoading, error: contextError, fetchBillingRecords, refreshLatestData, applyOnlineStatusBatch } = useBillingStore();
   const isFullyLoaded = totalCount === 0 || billingRecords.length >= totalCount;
   const [selectedCustomer, setSelectedCustomer] = useState<CustomerDetailData | null>(null);
   const selectedCustomerRef = useRef<CustomerDetailData | null>(null);
@@ -451,6 +451,22 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
       }
     };
 
+    /**
+     * RADIUS session changes, straight from the sync that just wrote them.
+     *
+     * Handled apart from handleDataChange because it must NOT re-fetch: the payload already carries
+     * the new values, and re-reading the table once a minute for every subscriber that connected or
+     * dropped is exactly the load this broadcast exists to avoid. It is applied to the store in
+     * place, so every screen reading these records updates without anyone refreshing.
+     */
+    const handleOnlineStatus = (payload: any) => {
+      const statuses = Array.isArray(payload) ? payload : (payload?.statuses ?? []);
+
+      if (Array.isArray(statuses) && statuses.length > 0) {
+        applyOnlineStatusBatch(statuses);
+      }
+    };
+
     const appChannel = pusher.subscribe('applications');
     const jobChannel = pusher.subscribe('job-orders');
     const customerChannel = pusher.subscribe('customers');
@@ -472,6 +488,7 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
     appChannel.bind('new-application', handleDataChange);
     jobChannel.bind('job-order-done', handleDataChange);
     customerChannel.bind('customer-updated', handleDataChange);
+    customerChannel.bind('online-status-updated', handleOnlineStatus);
 
     // Re-subscribe on reconnection
     const stateHandler = (states: { previous: string; current: string }) => {
@@ -491,12 +508,13 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
       appChannel.unbind('new-application', handleDataChange);
       jobChannel.unbind('job-order-done', handleDataChange);
       customerChannel.unbind('customer-updated', handleDataChange);
+      customerChannel.unbind('online-status-updated', handleOnlineStatus);
       pusher.connection.unbind('state_change', stateHandler);
       pusher.unsubscribe('applications');
       pusher.unsubscribe('job-orders');
       pusher.unsubscribe('customers');
     };
-  }, [refreshLatestData]);
+  }, [refreshLatestData, applyOnlineStatusBatch]);
 
   // Presence channel for knowing who's viewing what
   useEffect(() => {

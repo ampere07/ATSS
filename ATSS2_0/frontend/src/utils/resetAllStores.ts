@@ -51,6 +51,7 @@ export const resetAllStores = () => {
     isLoading: false,
     error: null,
     lastFetchTimestamp: null,
+    lastFetchAt: null,
   });
 
   useCommissionStore.setState({

@@ -15,6 +15,9 @@ class SmsBlastLog extends Model
 
     protected $fillable = [
         'message',
+        // One key per compose session, UNIQUE. Lets a resubmitted blast resolve to the blast it
+        // already created instead of queueing a second copy to every subscriber.
+        'idempotency_key',
         'barangay_id',
         'billing_day',
         'lcpnap_id',
