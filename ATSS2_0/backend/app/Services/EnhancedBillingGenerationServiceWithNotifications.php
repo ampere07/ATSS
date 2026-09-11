@@ -436,8 +436,10 @@ class EnhancedBillingGenerationServiceWithNotifications
 
             $amountDue = $monthlyServiceFee + $vat + $charges['staggered_install_fees'] + $charges['service_fees'] - $charges['rebates'] - $charges['discounts'] - $charges['advanced_payments'];
             
-            $previousBalance = $this->getPreviousBalance($account, $statementDate);
+            // Payment first: the previous balance is reconstructed from it, because
+            // account_balance has already had the payment taken off.
             $paymentReceived = $charges['payment_received_previous'];
+            $previousBalance = $this->getPreviousBalance($account, $statementDate, $paymentReceived);
             $remainingBalance = $previousBalance - $paymentReceived;
             $totalAmountDue = $remainingBalance + $amountDue;
 
@@ -1436,19 +1438,72 @@ class EnhancedBillingGenerationServiceWithNotifications
         return round($total, 2);
     }
 
+    /**
+     * What the customer paid against the previous bill.
+     *
+     * The window is the billing cycle that just closed: everything after the
+     * previous statement's date, up to and including this statement's date.
+     *
+     * It used to be the calendar month before the statement date, which almost
+     * never contains the payment. A bill dated the 25th falls due after month
+     * end, so the payment for it lands in the SAME calendar month as the next
+     * statement — outside a "previous calendar month" window — and the column
+     * read 0.00 for every account that pays on time.
+     *
+     * Only Security Deposit is excluded, matching TransactionController::approve:
+     * every other approved transaction type moves account_balance, so every other
+     * type has to be counted here or the three previous-bill columns stop adding up.
+     */
     protected function calculatePaymentReceived(BillingAccount $account, Carbon $date): float
     {
-        $lastMonth = $date->copy()->subMonth();
-        
+        $windowStart = $this->previousCycleStart($account, $date);
+        $windowEnd = $date->copy()->endOfDay();
+
         $transactions = DB::table('transactions')
             ->where('account_no', $account->account_no)
             ->where('status', 'Done')
-            ->whereNotIn('transaction_type', ['Security Deposit', 'Installation Fee'])
-            ->whereMonth('payment_date', $lastMonth->month)
-            ->whereYear('payment_date', $lastMonth->year)
+            ->whereRaw("LOWER(TRIM(COALESCE(transaction_type, ''))) <> 'security deposit'")
+            ->whereNotNull('payment_date')
+            ->where('payment_date', '>', $windowStart)
+            ->where('payment_date', '<=', $windowEnd)
             ->sum('received_payment');
 
+        $this->log('info', 'Payment received on previous bill', [
+            'account_no' => $account->account_no,
+            'window_start' => $windowStart->format('Y-m-d H:i:s'),
+            'window_end' => $windowEnd->format('Y-m-d H:i:s'),
+            'payment_received' => floatval($transactions),
+        ]);
+
         return floatval($transactions);
+    }
+
+    /**
+     * The instant the cycle being reported on opened: the end of the previous
+     * statement's day, so payments already shown on that statement are not
+     * counted twice.
+     *
+     * The current statement row is created before the charges are calculated, so
+     * it is excluded by date rather than by id.
+     *
+     * With no earlier statement (a first bill), one month back is the best
+     * available window. subMonthNoOverflow keeps a statement dated the 31st from
+     * landing on the 2nd or 3rd of the following month.
+     */
+    protected function previousCycleStart(BillingAccount $account, Carbon $date): Carbon
+    {
+        $previousStatementDate = StatementOfAccount::where('account_no', $account->account_no)
+            ->whereNotNull('statement_date')
+            ->whereDate('statement_date', '<', $date->copy()->startOfDay())
+            ->orderByDesc('statement_date')
+            ->orderByDesc('id')
+            ->value('statement_date');
+
+        if ($previousStatementDate) {
+            return Carbon::parse($previousStatementDate, 'Asia/Manila')->endOfDay();
+        }
+
+        return $date->copy()->subMonthNoOverflow()->endOfDay();
     }
 
     protected function extractPlanName(string $desiredPlan): string
@@ -1468,17 +1523,35 @@ class EnhancedBillingGenerationServiceWithNotifications
         return trim($desiredPlan);
     }
 
-    protected function getPreviousBalance(BillingAccount $account, Carbon $currentDate): float
+    /**
+     * What the previous bill left owing, BEFORE the customer paid against it.
+     *
+     * account_balance is already net of payments — TransactionController::approve
+     * subtracts each approved payment from it — so returning it raw made the SOA
+     * subtract the same payment a second time in
+     * `remaining = previousBalance - paymentReceived`, understating both the
+     * remaining balance and total_amount_due by the amount paid.
+     *
+     * Adding the cycle's payments back recovers the pre-payment figure, which
+     * makes the three columns reconcile:
+     *   balance_from_previous_bill - payment_received_previous
+     *     = remaining_balance_previous
+     *     = the account's live balance.
+     */
+    protected function getPreviousBalance(BillingAccount $account, Carbon $currentDate, float $paymentReceived = 0.0): float
     {
         $accountBalance = floatval($account->account_balance);
-        
+        $previousBalance = $accountBalance + $paymentReceived;
+
         $this->log('info', 'Getting previous balance for SOA', [
             'account_no' => $account->account_no,
             'account_balance' => $accountBalance,
+            'payment_received' => $paymentReceived,
+            'previous_balance' => $previousBalance,
             'current_date' => $currentDate->format('Y-m-d')
         ]);
-        
-        return $accountBalance;
+
+        return $previousBalance;
     }
 
     protected function markDiscountsAsUsed(BillingAccount $account, int $userId, string $invoiceId): void
