@@ -1130,12 +1130,16 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({ serviceOrder,
         ? 'bg-gray-800 border-gray-700'
         : 'bg-gray-100 border-gray-200'
         }`}>
-        <div className="flex items-center">
+        {/* Account number and name only. The address used to be here too and was
+            long enough to push the action buttons — the close button included —
+            off the edge of the panel. min-w-0 lets the title shrink so truncate
+            can do its job instead of the flex row overflowing. */}
+        <div className="flex items-center min-w-0 flex-1 mr-2">
           <h2 className={`font-medium truncate ${activeIsMobile ? 'max-w-[200px] text-sm' : 'max-w-md'} ${isDarkMode ? 'text-white' : 'text-gray-900'
-            }`}>{serviceOrder.accountNumber} | {serviceOrder.fullName} | {serviceOrder.contactAddress}</h2>
+            }`}>{serviceOrder.accountNumber} | {serviceOrder.fullName}</h2>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-3 flex-shrink-0">
 
           {shouldShowEnableTechnicianButton() && (
             <button

@@ -58,6 +58,15 @@ const allColumns = [
   { key: 'visitStatusDate', label: 'Visit Status Date', width: 'min-w-36' }
 ];
 
+// Export-only column, deliberately absent from allColumns.
+//
+// The table does not show an account number and the column picker cannot turn
+// one on, but an exported row is read away from the app — in a spreadsheet, or
+// by someone matching it against billing — where the account number is the only
+// thing that identifies the subscriber. So the export always leads with it,
+// whatever the picker is set to.
+const EXPORT_ACCOUNT_COLUMN = { key: 'accountNumber', label: 'Account No' };
+
 // Columns the table starts with unticked. Timing detail most desks do not want
 // in the way; the column picker turns them on.
 const DEFAULT_HIDDEN_COLUMNS = ['startTime', 'endTime', 'duration'];
@@ -1417,7 +1426,7 @@ const ServiceOrderPage: React.FC = () => {
   const handleExport = () => {
     if (!filteredServiceOrders || filteredServiceOrders.length === 0) return;
 
-    const exportColumns = allColumns
+    const pickedColumns = allColumns
       .filter(col => visibleColumns.includes(col.key))
       .sort((a, b) => {
         const indexA = columnOrder.indexOf(a.key);
@@ -1425,8 +1434,19 @@ const ServiceOrderPage: React.FC = () => {
         return indexA - indexB;
       });
 
+    // Account No first, then the picked columns in the order the table shows
+    // them. Filtered rather than blindly prepended so the column cannot appear
+    // twice if it is ever added to allColumns.
+    const exportColumns = [
+      EXPORT_ACCOUNT_COLUMN,
+      ...pickedColumns.filter(col => col.key !== EXPORT_ACCOUNT_COLUMN.key),
+    ];
+
     const getExportValue = (so: ServiceOrder, columnKey: string) => {
       switch (columnKey) {
+        // The API has been seen sending either spelling, so both are read —
+        // the same fallback getVal() uses for the rest of the page.
+        case 'accountNumber': return so.accountNumber || (so as any).account_no || '-';
         case 'timestamp': return so.timestamp || '-';
         case 'supportStatus': return so.supportStatus || '-';
         case 'visitStatus': return so.visitStatus || '-';
