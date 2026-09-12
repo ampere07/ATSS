@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { X, ChevronDown, Minus, Plus, Loader2 } from 'lucide-react';
 import * as discountService from '../services/discountService';
 import { userService } from '../services/userService';
@@ -44,6 +44,16 @@ const toDateTimeLocal = (value: string | null | undefined): string => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
+const getAuthUser = (): any | null => {
+  try {
+    const authData = localStorage.getItem('authData');
+    return authData ? JSON.parse(authData) : null;
+  } catch (error) {
+    console.error('Error parsing auth data:', error);
+    return null;
+  }
+};
+
 const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
   isOpen,
   onClose,
@@ -57,13 +67,17 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
     return now.toISOString().slice(0, 16);
   };
 
+  const authUser = useMemo(() => getAuthUser(), []);
+  const currentUserId: number | null = authUser?.id ?? null;
+  const currentUserEmail: string = authUser?.email_address || authUser?.email || '';
+
   const [formData, setFormData] = useState<DiscountFormData>(() => ({
     accountNo: null,
     discountAmount: '0.00',
     remaining: '0.00',
     status: 'Pending',
     processedDate: getCurrentDateTime(),
-    processedByUserId: null,
+    processedByUserId: currentUserId,
     approvedByUserId: null,
     remarks: ''
   }));
@@ -151,7 +165,7 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
         remaining: '0.00',
         status: 'Pending',
         processedDate: getCurrentDateTime(),
-        processedByUserId: null,
+        processedByUserId: currentUserId,
         approvedByUserId: null,
         remarks: ''
       });
@@ -170,16 +184,16 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
 
         const status = discount.status || 'Pending';
         prevStatusRef.current = status;
-        setFormData({
+        setFormData(prev => ({
           accountNo: discount.account_no || null,
           discountAmount: (parseFloat(discount.discount_amount) || 0).toFixed(2),
           remaining: String(discount.remaining ?? 0),
           status,
           processedDate: toDateTimeLocal(discount.processed_date) || getCurrentDateTime(),
-          processedByUserId: discount.processed_by_user_id ?? null,
+          processedByUserId: currentUserId ?? prev.processedByUserId ?? discount.processed_by_user_id ?? null,
           approvedByUserId: discount.approved_by_user_id ?? null,
           remarks: discount.remarks || ''
-        });
+        }));
         setErrors({});
       } catch (error) {
         console.error('Error loading discount:', error);
@@ -216,11 +230,12 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
             const currentUser = response.data.find(
               (user: any) => user.email_address === userData.email || user.email === userData.email
             );
-            if (currentUser && !isEditMode) {
-              setFormData(prev => ({
-                ...prev,
-                processedByUserId: currentUser.id
-              }));
+            if (currentUser) {
+              setFormData(prev => (
+                prev.processedByUserId
+                  ? prev
+                  : { ...prev, processedByUserId: currentUser.id }
+              ));
             }
           }
         }
@@ -238,7 +253,7 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
       fetchBillingAccounts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, isEditMode]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (prevStatusRef.current === formData.status) return;
@@ -406,6 +421,11 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
 
     return searchText.includes(accountSearchQuery.toLowerCase());
   });
+
+  const processorOptions = (() => {
+    if (!currentUserId || users.some(user => user.id === currentUserId)) return users;
+    return [{ id: currentUserId, email_address: currentUserEmail || 'Current user' }, ...users];
+  })();
 
   const approverOptions = (() => {
     const eligible = users.filter(user => user.role_id === 1 || user.role_id === 7);
@@ -645,6 +665,7 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
                   <option value="Unused" className={isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}>Unused</option>
                   <option value="Permanent" className={isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}>Permanent</option>
                   <option value="Monthly" className={isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}>Monthly</option>
+                  <option value="Used" className={isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}>Used</option>
                 </select>
                 <ChevronDown className="absolute right-3 top-2.5 text-gray-400 pointer-events-none" size={20} />
               </div>
@@ -711,7 +732,7 @@ const DiscountFormModal: React.FC<DiscountFormModalProps> = ({
                   style={{ WebkitAppearance: 'none', MozAppearance: 'none', appearance: 'none' }}
                 >
                   <option value="" className={isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}>Select Processor</option>
-                  {users.map((user) => (
+                  {processorOptions.map((user) => (
                     <option key={user.id} value={user.id} className={isDarkMode ? 'bg-gray-800 text-white' : 'bg-white text-gray-900'}>
                       {user.email_address || user.username}
                     </option>
