@@ -288,8 +288,8 @@ class AutoDisconnectService
         // Validate account balance.
         //
         // Checked before anything else acts on the account: a paid-up balance means this
-        // is not a disconnection candidate at all, so it must not be charged, cut off, or
-        // given a pullout order. Everything below assumes money is owed.
+        // is not a disconnection candidate at all, so it must not be charged or cut off.
+        // Everything below assumes money is owed.
         $currentBalance = floatval($billingAccount->account_balance);
         $this->writeLog("  [INFO] Current Balance: ₱" . number_format($currentBalance, 2));
 
@@ -297,18 +297,6 @@ class AutoDisconnectService
             $this->writeLog("  [SKIP] Balance is zero or negative (already paid)");
             return ['success' => false, 'reason' => 'Balance already paid'];
         }
-
-        // Raise the pullout service order before any of the skip conditions below.
-        //
-        // Cutting the customer off and telling the field team to collect the equipment
-        // are two different jobs, and only the first one was being done here. An account
-        // already restricted earlier today, or already sitting at Disconnected, would
-        // return at one of the guards below having never had a service order raised —
-        // so it stayed restricted forever with nothing dispatched against it. The order
-        // is what the field team actually works from, so it is created for every account
-        // that owes money on a disconnection-day invoice, whether or not the RADIUS and
-        // status side of the disconnect still has anything left to do.
-        $this->ensurePulloutServiceOrder($billingAccount, "System Auto Generated (Auto DC, Overdue {$dcActualOffset} Days)");
 
         // Check if already disconnected today
         $alreadyDisconnected = DB::table('disconnected_logs')
