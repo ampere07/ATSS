@@ -206,19 +206,11 @@ class CustomerDetailUpdateController extends Controller
                 }
             }
 
-            if (!empty($changedOldDetails) || !empty($changedNewDetails)) {
-                // Log to details_update_logs
-                $logUserId = $request->input('updatedBy') ?: ($request->user() ? $request->user()->id : null);
-                DB::table('details_update_logs')->insert([
-                    'account_id' => $billingAccount->id,
-                    'old_details' => json_encode(['type' => 'customer_details', 'data' => $changedOldDetails]),
-                    'new_details' => json_encode(['type' => 'customer_details', 'data' => $changedNewDetails]),
-                    'created_at' => now(),
-                    'created_by_user_id' => $logUserId,
-                    'updated_at' => now(),
-                    'updated_by_user_id' => $logUserId,
-                ]);
-            }
+            // details_update_logs is written by App\Observers\AccountDetailsObserver
+            // when the model saves, so no entry is made here: doing both would
+            // record every edit twice. The observer sees every changed column
+            // rather than the hand-picked list above, and covers the paths that
+            // update a customer without passing through this controller.
 
             // Log Activity
             ActivityLog::log(
@@ -371,19 +363,8 @@ class CustomerDetailUpdateController extends Controller
                 }
             }
 
-            if (!empty($changedOldBillingDetails) || !empty($changedNewBillingDetails)) {
-                // Log to details_update_logs
-                $logUserId = $request->input('updatedBy') ?: ($request->user() ? $request->user()->id : null);
-                DB::table('details_update_logs')->insert([
-                    'account_id' => $billingAccount->id,
-                    'old_details' => json_encode(['type' => 'billing_details', 'data' => $changedOldBillingDetails]),
-                    'new_details' => json_encode(['type' => 'billing_details', 'data' => $changedNewBillingDetails]),
-                    'created_at' => now(),
-                    'created_by_user_id' => $logUserId,
-                    'updated_at' => now(),
-                    'updated_by_user_id' => $logUserId,
-                ]);
-            }
+            // details_update_logs is written by App\Observers\AccountDetailsObserver
+            // when the model saves — see the note in updateCustomerDetails().
 
             // Log Activity
             ActivityLog::log(
@@ -592,19 +573,10 @@ class CustomerDetailUpdateController extends Controller
                 }
             }
 
-            if (!empty($changedNewTechnicalDetails) || !empty($changedOldTechnicalDetails)) {
-                // Log to details_update_logs
-                $logUserId = $request->input('updatedBy') ?: ($request->user() ? $request->user()->id : null);
-                DB::table('details_update_logs')->insert([
-                    'account_id' => $billingAccount->id,
-                    'old_details' => json_encode(['type' => 'technical_details', 'data' => $changedOldTechnicalDetails]),
-                    'new_details' => json_encode(['type' => 'technical_details', 'data' => $changedNewTechnicalDetails]),
-                    'created_at' => now(),
-                    'created_by_user_id' => $logUserId,
-                    'updated_at' => now(),
-                    'updated_by_user_id' => $logUserId,
-                ]);
-            }
+            // details_update_logs is written by App\Observers\AccountDetailsObserver
+            // when the model saves — see the note in updateCustomerDetails(). A
+            // technical row created here for the first time is an insert, not an
+            // update, and is recorded by the creation trail rather than as an edit.
 
             // Log Activity
             ActivityLog::log(

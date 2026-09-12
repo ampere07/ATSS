@@ -511,18 +511,30 @@ class ManualRadiusOperationsService
             );
 
             // Step 2: Update RADIUS credentials
+            $radiusFailureReason = null;
             $radiusSuccess = $this->updateRadiusCredentials(
                 $radiusEndpoints,
                 $oldUsername,
                 $newUsername,
-                $newPassword
+                $newPassword,
+                $radiusFailureReason,
+                $accountNo
             );
 
             if (!$radiusSuccess) {
                 // DB username was already updated, but RADIUS could not be reached/updated.
                 // Report failure so the caller queues the RADIUS rename for automatic retry.
+                //
+                // The reason is carried through verbatim rather than flattened into
+                // "failed to connect": the queue stores this text as last_error, and it
+                // is the only record of whether the server was down, the account was
+                // missing, or the device refused the name.
                 $this->writeLog("[WARNING] Database was updated, but RADIUS update failed. Will be queued for retry.");
-                throw new Exception("Failed to connect to RADIUS server or update credentials for user '{$oldUsername}'");
+                throw new Exception(
+                    $radiusFailureReason !== null
+                        ? "RADIUS credential update failed for '{$oldUsername}': {$radiusFailureReason}"
+                        : "Failed to connect to RADIUS server or update credentials for user '{$oldUsername}'"
+                );
             }
 
             $this->writeLog("[SUCCESS] Credentials updated successfully");
@@ -671,11 +683,35 @@ class ManualRadiusOperationsService
     /**
      * Update RADIUS credentials (username and password)
      */
-    public function updateRadiusCredentials(array $radiusEndpoints, string $oldUsername, string $newUsername, ?string $newPassword = null): bool
-    {
+    public function updateRadiusCredentials(
+        array $radiusEndpoints,
+        string $oldUsername,
+        string $newUsername,
+        ?string $newPassword = null,
+        ?string &$failureReason = null,
+        ?string $accountNo = null
+    ): bool {
         $this->writeLog("[CREDENTIALS] Attempting RADIUS update: '$oldUsername' -> '$newUsername'");
 
+        // Every name this account may answer to on the device, most likely first.
+        // The queued params freeze the name as it was when the job was created,
+        // but the database rename runs before the RADIUS leg — so after a failed
+        // first attempt the device may hold the old name while the database holds
+        // the new one. Looking for only one of them is what made a retry conclude
+        // the account had vanished.
+        $candidates = $this->candidateUsernames($accountNo, $oldUsername, $newUsername);
+        $this->writeLog("[CREDENTIALS] Looking for: " . implode(', ', array_map(
+            static fn (string $name): string => "'{$name}'",
+            $candidates
+        )));
+
         $totalSuccessCount = 0;
+        $alreadyNamedCount = 0;
+        $unreachableCount = 0;
+        $absentCount = 0;
+        $rejectedCount = 0;
+        $reasons = [];
+        $failureReason = null;
 
         $api = app(RouterosApiService::class);
 
@@ -687,31 +723,73 @@ class ManualRadiusOperationsService
 
             if (!$config) {
                 $this->writeLog("[CREDENTIALS] [SKIP] No radius_config record behind $serverName");
+                $reasons[] = "$serverName: no radius_config record";
                 continue;
             }
 
-            // 1. Find the user on THIS specific server to get the correct ID
-            $findResult = $api->findUser($config, $oldUsername);
+            // 0. Reach the device FIRST, so an unreachable server is never confused
+            //    with a server that simply does not carry this account. findUser()
+            //    answers null for both, and reporting the second as the first is
+            //    what sent renames round a retry ladder they could never finish.
+            if (!$api->connect($config)) {
+                $error = $api->getLastError() !== '' ? $api->getLastError() : 'no endpoint responded';
+                $this->writeLog("[CREDENTIALS] [UNREACHABLE] $serverName - $error");
+                $reasons[] = "$serverName unreachable: $error";
+                $unreachableCount++;
+                continue;
+            }
 
+            // 1. Find the account on THIS specific server, under whichever of its
+            //    known names the device still holds, to get the correct ID.
+            $findResult = null;
+            $matchedName = '';
+
+            foreach ($candidates as $candidate) {
+                $findResult = $api->findUser($config, $candidate);
+
+                if ($findResult !== null) {
+                    $matchedName = $candidate;
+                    break;
+                }
+            }
+
+            // 2. Present under none of its names: this server does not carry the
+            //    account at all. That is a different problem from an unreachable
+            //    server, and no amount of retrying will change it.
             if ($findResult === null) {
-                $reason = $api->getLastError() !== '' ? $api->getLastError() : "user not present";
-                $this->writeLog("[CREDENTIALS] [SKIP] User '$oldUsername' not found on $serverName ($reason)");
+                $this->writeLog("[CREDENTIALS] [SKIP] Account not present on $serverName under any known name");
+                $reasons[] = "$serverName: account absent under all known names";
+                $absentCount++;
                 continue;
             }
 
             $radiusId = $findResult['.id'];
+            $deviceName = (string) ($findResult['username'] ?? '');
+            $this->writeLog("[CREDENTIALS] Found on $serverName as '$deviceName' (matched '$matchedName', id $radiusId)");
 
-            // 2. DISABLE user temporarily to prevent instant auto-reconnect during rename
+            // 3. The device already carries the target name — an earlier attempt
+            //    landed, or the rename only changes capitalisation, which the
+            //    device treats as the same name. Either way there is nothing to
+            //    rename, and only a password may still need applying.
+            if ($deviceName === $newUsername) {
+                $this->writeLog("[CREDENTIALS] [ALREADY DONE] $serverName already carries '$newUsername'");
+                $this->applyPasswordIfGiven($api, $config, $radiusId, $newPassword, $serverName);
+                $alreadyNamedCount++;
+                continue;
+            }
+
+            // 4. DISABLE user temporarily to prevent instant auto-reconnect during rename
             $this->writeLog("[CREDENTIALS] Temporarily disabling user to clear sessions...");
             $api->setUserDisabled($config, $radiusId, true);
 
-            // 3. KILL active sessions for the OLD username
-            $api->killSessionsForUser($config, $oldUsername);
+            // 5. KILL active sessions for the name the device actually holds, which
+            //    is not always the name the job was queued with.
+            $api->killSessionsForUser($config, $deviceName !== '' ? $deviceName : $matchedName);
 
             // Small pause for RADIUS to stabilize
             sleep(1);
 
-            // 4. UPDATE credentials (Rename)
+            // 6. UPDATE credentials (Rename)
             $payload = ['name' => $newUsername];
             if (!empty($newPassword)) {
                 $payload['password'] = $newPassword;
@@ -721,7 +799,7 @@ class ManualRadiusOperationsService
             $patchApplied = $api->updateUser($config, $radiusId, $payload);
             $patchError = $patchApplied ? '' : $api->getLastError();
 
-            // 5. RE-ENABLE the user. Addressed by the RADIUS id, which survives the rename,
+            // 7. RE-ENABLE the user. Addressed by the RADIUS id, which survives the rename,
             //    so the account is never left disabled because its name has moved on.
             $this->writeLog("[CREDENTIALS] Re-enabling user...");
             $api->setUserDisabled($config, $radiusId, false);
@@ -729,12 +807,187 @@ class ManualRadiusOperationsService
             if ($patchApplied) {
                 $this->writeLog("[CREDENTIALS] [SUCCESS] Updated credentials on $serverName");
                 $totalSuccessCount++;
-            } else {
-                $this->writeLog("[CREDENTIALS] [FAILED] Rename rejected on $serverName - " . $patchError);
+                continue;
+            }
+
+            // The set was refused. Ask the device what it holds now: a reply lost
+            // after the change was applied looks identical to a rejection from
+            // here, and only the device can tell the two apart.
+            $after = $api->findUser($config, $newUsername);
+
+            if ($after !== null && (string) ($after['.id'] ?? '') === (string) $radiusId) {
+                $this->writeLog("[CREDENTIALS] [SUCCESS] Rename did land on $serverName despite the error reply");
+                $totalSuccessCount++;
+                continue;
+            }
+
+            $this->writeLog("[CREDENTIALS] [FAILED] Rename rejected on $serverName - " . $patchError);
+            $reasons[] = "$serverName rejected the rename: " . ($patchError !== '' ? $patchError : 'no reason given');
+            $rejectedCount++;
+        }
+
+        if ($totalSuccessCount > 0 || $alreadyNamedCount > 0) {
+            return true;
+        }
+
+        // Name the real problem. The queue decides how long to keep trying from
+        // this text, and "could not reach the server" deserves a retry while
+        // "the account is on no server" never will.
+        if ($unreachableCount > 0) {
+            $failureReason = "could not reach any RADIUS server holding '$oldUsername' ("
+                . implode('; ', $reasons) . ')';
+        } elseif ($rejectedCount > 0) {
+            $failureReason = "RADIUS rejected the rename of '$oldUsername' to '$newUsername' ("
+                . implode('; ', $reasons) . ')';
+        } elseif ($absentCount > 0) {
+            $failureReason = "'$oldUsername' is on no RADIUS server under either its old or new name"
+                . " — nothing to rename (" . implode('; ', $reasons) . ')';
+        } else {
+            $failureReason = "no RADIUS server was usable for '$oldUsername' ("
+                . ($reasons === [] ? 'no endpoints configured' : implode('; ', $reasons)) . ')';
+        }
+
+        return false;
+    }
+
+    /**
+     * Every name this account may still be known by on a RADIUS device, ordered
+     * by how likely the device is to hold it.
+     *
+     * The queued name comes first: if the RADIUS leg failed outright, that is what
+     * the device still has. The database name comes next, because the database is
+     * renamed BEFORE the RADIUS call, so on any retry it already holds the new
+     * name — and if the device was renamed too, this is what finds it. The target
+     * name comes last as a backstop for an account whose database row never moved.
+     *
+     * Matching on the device is case-insensitive, so names differing only in case
+     * are collapsed here rather than costing a second lookup.
+     *
+     * @return array<int, string>
+     */
+    private function candidateUsernames(?string $accountNo, string $oldUsername, string $newUsername): array
+    {
+        $ordered = array_merge(
+            [$oldUsername],
+            $this->databaseUsernames($accountNo, $oldUsername),
+            [$newUsername]
+        );
+
+        $candidates = [];
+        $seen = [];
+
+        foreach ($ordered as $name) {
+            $name = trim((string) $name);
+
+            if ($name === '') {
+                continue;
+            }
+
+            $key = strtolower($name);
+
+            if (isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $candidates[] = $name;
+        }
+
+        return $candidates;
+    }
+
+    /**
+     * The PPPoE usernames the database currently holds for this account.
+     *
+     * technical_details is the record of truth and is read both by account_no and
+     * through billing_accounts, because the column is populated inconsistently.
+     * job_orders.pppoe_username is read as a last resort for accounts whose
+     * technical_details row is missing or was never filled in.
+     *
+     * @return array<int, string>
+     */
+    private function databaseUsernames(?string $accountNo, string $oldUsername): array
+    {
+        $names = [];
+
+        if (!empty($accountNo)) {
+            $technical = DB::table('technical_details')
+                ->where('account_no', $accountNo)
+                ->value('username');
+
+            if (!empty($technical)) {
+                $names[] = (string) $technical;
+                $this->writeLog("[CREDENTIALS] [DB] technical_details (account_no $accountNo) holds '{$technical}'");
+            }
+
+            $account = DB::table('billing_accounts')->where('account_no', $accountNo)->first();
+
+            if ($account) {
+                $byId = DB::table('technical_details')
+                    ->where('account_id', $account->id)
+                    ->value('username');
+
+                if (!empty($byId)) {
+                    $names[] = (string) $byId;
+                    $this->writeLog("[CREDENTIALS] [DB] technical_details (account_id {$account->id}) holds '{$byId}'");
+                }
+
+                $jobOrder = DB::table('job_orders')
+                    ->where('account_id', $account->id)
+                    ->orderByDesc('id')
+                    ->value('pppoe_username');
+
+                if (!empty($jobOrder)) {
+                    $names[] = (string) $jobOrder;
+                    $this->writeLog("[CREDENTIALS] [DB] job_orders holds '{$jobOrder}'");
+                }
             }
         }
 
-        return $totalSuccessCount > 0;
+        // No account number on the job: the queued name is the only way back to the row.
+        if ($names === [] && $oldUsername !== '') {
+            $byUsername = DB::table('technical_details')
+                ->where('username', $oldUsername)
+                ->value('username');
+
+            if (!empty($byUsername)) {
+                $names[] = (string) $byUsername;
+            }
+        }
+
+        if ($names === []) {
+            $this->writeLog('[CREDENTIALS] [DB] No stored username found; using the queued names only');
+        }
+
+        return $names;
+    }
+
+    /**
+     * Set the password on an account whose name is already correct.
+     *
+     * Reached when a rename turns out to have landed already: the name needs no
+     * work, but a password supplied with it still does.
+     *
+     * @param RadiusConfig $config
+     */
+    private function applyPasswordIfGiven(
+        RouterosApiService $api,
+        $config,
+        string $radiusId,
+        ?string $newPassword,
+        string $serverName
+    ): void {
+        if (empty($newPassword)) {
+            return;
+        }
+
+        if ($api->updateUser($config, $radiusId, ['password' => $newPassword])) {
+            $this->writeLog("[CREDENTIALS] Password applied on $serverName");
+
+            return;
+        }
+
+        $this->writeLog("[CREDENTIALS] [WARNING] Password not applied on $serverName - " . $api->getLastError());
     }
 
     /**

@@ -261,6 +261,11 @@ class RadiusQueueService
                             'updated_at'   => now(),
                         ]);
 
+                    // Only once the operation has actually landed on the device.
+                    // A queued job that is still retrying has changed nothing a
+                    // subscriber's history should show.
+                    $this->logDetailsUpdate($item, $params, $thisAttempt);
+
                     $results['succeeded']++;
                     $this->runLog->processed($item->account_no ?? ('job#' . $item->id));
                     $this->writeLog("  [RESULT] ✓ SUCCESS on attempt {$thisAttempt}/{$itemMax} — no further retries");
@@ -303,6 +308,149 @@ class RadiusQueueService
         $this->runLog->reset();
 
         return $results;
+    }
+
+    /**
+     * Record a completed queue operation in details_update_logs.
+     *
+     * The same table the Customer Details and Service Order screens write to, in
+     * the same `{type, data}` shape, so a RADIUS change made by the queue appears
+     * in an account's history beside the changes made by hand. `technical_details`
+     * is used as the type because that is the table a RADIUS credential change
+     * moves, and the Data Logs viewer already renders it as "Technical Details".
+     *
+     * Written only on success, and never allowed to break the queue: a logging
+     * failure must not turn a completed RADIUS operation into a retry, which
+     * would re-apply work already done on the device.
+     *
+     * @param object $item   The radius_operation_queue row.
+     * @param array<string, mixed>|null $params Its decoded params.
+     */
+    private function logDetailsUpdate(object $item, ?array $params, int $attempt): void
+    {
+        try {
+            $params = $params ?? [];
+            $change = $this->describeChange((string) $item->operation, $params);
+
+            if ($change === null) {
+                return;
+            }
+
+            [$old, $new] = $change;
+
+            $accountNo = $item->account_no ?? ($params['accountNumber'] ?? null);
+            $accountId = null;
+
+            if (!empty($accountNo)) {
+                $accountId = DB::table('billing_accounts')->where('account_no', $accountNo)->value('id');
+            }
+
+            $context = [
+                'type'       => 'technical_details',
+                'source'     => 'radius_queue',
+                'operation'  => $item->operation,
+                'account_no' => $accountNo,
+                'queue_id'   => $item->id,
+                'attempt'    => $attempt,
+            ];
+
+            $userId = $this->logUserId($params, $item);
+
+            DB::table('details_update_logs')->insert([
+                'organization_id'    => $item->organization_id ?? null,
+                'account_id'         => $accountId,
+                'old_details'        => json_encode($context + ['data' => $old]),
+                'new_details'        => json_encode($context + ['data' => $new]),
+                'created_by_user_id' => $userId,
+                'updated_by_user_id' => $userId,
+                'created_at'         => now(),
+                'updated_at'         => now(),
+            ]);
+
+            $this->writeLog("  [LOGGED] details_update_logs entry written for " . ($accountNo ?? 'job#' . $item->id));
+        } catch (\Throwable $e) {
+            // Deliberately swallowed. The device work is already done and the row
+            // is already marked success; losing the audit line is the smaller harm.
+            $this->writeLog("  [WARNING] Could not write details_update_logs entry: " . $e->getMessage());
+            Log::warning('RADIUS queue: details_update_logs insert failed', [
+                'queue_id' => $item->id ?? null,
+                'error'    => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * What an operation changed, as an old/new pair — or null when the operation
+     * changes nothing worth an account-history entry.
+     *
+     * A password is never written to the log, only the fact that one was set.
+     *
+     * @param array<string, mixed> $params
+     * @return array{0: array<string, mixed>, 1: array<string, mixed>}|null
+     */
+    private function describeChange(string $operation, array $params): ?array
+    {
+        switch ($operation) {
+            case 'update_credentials':
+                $oldUsername = (string) ($params['username'] ?? '');
+                $newUsername = (string) ($params['newUsername'] ?? '');
+
+                if ($oldUsername === '' && $newUsername === '') {
+                    return null;
+                }
+
+                $old = ['username' => $oldUsername];
+                $new = ['username' => $newUsername];
+
+                if (!empty($params['newPassword'])) {
+                    $old['pppoe_password'] = '(unchanged)';
+                    $new['pppoe_password'] = '(updated)';
+                }
+
+                return [$old, $new];
+
+            case 'create_user':
+                return [
+                    ['username' => null, 'group' => null],
+                    [
+                        'username' => (string) ($params['username'] ?? ''),
+                        'group'    => (string) ($params['group'] ?? ''),
+                    ],
+                ];
+
+            case 'reconnect_user':
+            case 'disconnect_user':
+            case 'restricted_user':
+                // These move the account between RADIUS groups rather than
+                // renaming it, so the group is the field that changed.
+                return [
+                    ['radius_group' => (string) ($params['oldGroup'] ?? $params['currentGroup'] ?? '(previous)')],
+                    ['radius_group' => (string) ($params['group'] ?? $params['plan'] ?? $operation)],
+                ];
+
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * The user to credit the log line to.
+     *
+     * The queued params carry whoever pressed the button; the queue row's
+     * created_by is the fallback, and is only usable when it is an id rather than
+     * an email address.
+     *
+     * @param array<string, mixed> $params
+     */
+    private function logUserId(array $params, object $item): ?int
+    {
+        foreach ([$params['updatedBy'] ?? null, $params['updated_by'] ?? null, $item->created_by ?? null] as $candidate) {
+            if (is_numeric($candidate)) {
+                return (int) $candidate;
+            }
+        }
+
+        return null;
     }
 
     private function executeOperation(string $operation, array $params, &$errorMessage = null): bool

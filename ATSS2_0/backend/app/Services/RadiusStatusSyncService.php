@@ -1078,23 +1078,75 @@ class RadiusStatusSyncService
     }
 
     /**
-     * Make sure the connection is usable before writing.
+     * Make sure the connection is usable before writing, and prove it.
      *
      * The fetch phase can outlast the server's wait_timeout, and a batch that
      * failed may have failed because the connection went away, so this runs both
      * before the first batch and before a failed batch is replayed.
+     *
+     * Every attempt ends in a real `SELECT 1`, because DB::reconnect() only
+     * installs a lazy PDO resolver — it opens no socket, so it cannot fail here
+     * and cannot prove anything either. A reconnect that was never exercised used
+     * to let the run walk straight into processAccounts(), where the deferred
+     * connect failed on the chunk query instead and surfaced as a CRITICAL
+     * carrying a 500-row SELECT rather than "the database was unreachable".
+     *
+     * Attempts are spaced, because the failure this guards against is a database
+     * that is briefly unreachable: one immediate retry is no more likely to
+     * succeed than the attempt that just failed.
      */
-    private function ensureDatabaseConnection(): void
+    private function ensureDatabaseConnection(int $attempts = 3): void
     {
-        try {
-            DB::connection()->getPdo()->query('SELECT 1');
-        } catch (\Throwable $e) {
-            Log::warning('DB connection lost during RADIUS status sync, attempting reconnect', [
-                'error' => $e->getMessage(),
-            ]);
-            $default = config('database.default');
-            DB::purge($default);
-            DB::reconnect($default);
+        $lastError = null;
+
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            try {
+                DB::connection()->getPdo()->query('SELECT 1');
+
+                if ($attempt > 1) {
+                    Log::info('DB connection restored during RADIUS status sync', [
+                        'attempt' => $attempt,
+                    ]);
+                }
+
+                return;
+            } catch (\Throwable $e) {
+                $lastError = $e;
+
+                Log::warning('DB connection lost during RADIUS status sync, attempting reconnect', [
+                    'attempt' => $attempt . '/' . $attempts,
+                    'error'   => $e->getMessage(),
+                ]);
+
+                if ($attempt === $attempts) {
+                    break;
+                }
+
+                $default = config('database.default');
+
+                try {
+                    DB::purge($default);
+                    DB::reconnect($default);
+                } catch (\Throwable $reconnectError) {
+                    // Reported, never fatal on its own: the SELECT at the top of
+                    // the next pass is what decides whether the database is back.
+                    Log::warning('Reconnect attempt itself failed during RADIUS status sync', [
+                        'attempt' => $attempt . '/' . $attempts,
+                        'error'   => $reconnectError->getMessage(),
+                    ]);
+                }
+
+                sleep(2 ** ($attempt - 1));
+            }
         }
+
+        // Out of attempts. Name the problem plainly — the run is about to abort,
+        // and "the database is unreachable" is what the operator needs to read.
+        throw new \RuntimeException(
+            'Database unreachable after ' . $attempts . ' attempts: '
+            . ($lastError !== null ? $lastError->getMessage() : 'unknown error'),
+            0,
+            $lastError instanceof \Throwable ? $lastError : null
+        );
     }
 }

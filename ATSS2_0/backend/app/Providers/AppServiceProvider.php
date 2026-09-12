@@ -83,5 +83,20 @@ class AppServiceProvider extends ServiceProvider
             // would each cost a query before failing.
             return str_contains($raw, '|') ? $raw : null;
         });
+
+        /*
+         * Audit every edit to a customer account.
+         *
+         * These three models are what an account is made of, and observing them
+         * means the history is written by the act of saving rather than by each
+         * caller remembering to write it — so a screen, an API endpoint, a cron
+         * command or a service added next year is covered the moment it saves.
+         *
+         * See App\Observers\AccountDetailsObserver for what is recorded and why
+         * a failure there can never reach the update it is describing.
+         */
+        \App\Models\Customer::observe(\App\Observers\AccountDetailsObserver::class);
+        \App\Models\BillingAccount::observe(\App\Observers\AccountDetailsObserver::class);
+        \App\Models\TechnicalDetail::observe(\App\Observers\AccountDetailsObserver::class);
     }
 }

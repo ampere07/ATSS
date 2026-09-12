@@ -1,5 +1,0 @@
-REACT_APP_API_BASE_URL=https://backend.atssfiber.ph/api
-
-# Soketi (real-time) — ATSS's own app; keep separate from AKMIIS to avoid cross-talk
-REACT_APP_SOKETI_HOST=ws.atssfiber.ph
-REACT_APP_SOKETI_KEY=8ctWR5PdV1dgM5h6RTGioI8k1hPbl8ImM3P6K3cne5v
