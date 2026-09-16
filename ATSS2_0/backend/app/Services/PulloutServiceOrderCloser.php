@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -92,14 +93,38 @@ final class PulloutServiceOrderCloser
         $this->log("[RUNNING] Pullout check for account: {$accountNo} (trigger: {$trigger})");
 
         try {
-            $balance = $knownBalance ?? $this->balanceFor($accountNo);
+            $account = $this->accountFor($accountNo);
 
-            if ($balance === null) {
+            if ($account === null) {
                 $result['skipped'] = 'no billing account';
                 $this->log("[SKIP] No billing account found for: {$accountNo}");
 
                 return $result;
             }
+
+            // Guard 1: Do not auto-close pullouts on accounts already in Pullout status.
+            if ((int) ($account->billing_status_id ?? 0) === 5) {
+                $result['skipped'] = 'account in pullout status';
+                $this->log("[SKIP] Account already in Pullout status (ID 5) - account: {$accountNo}");
+
+                return $result;
+            }
+
+            // Guard 2: Prepaid validity guard.
+            // In prepaid, account_balance is always 0.00. An expired/unrenewed prepaid account
+            // must NOT have its pullout cancelled just because balance <= 0.01.
+            // Only active/renewed prepaid accounts (prepaid_expires_at > now()) are eligible.
+            if (property_exists($account, 'prepaid_expires_at') && $account->prepaid_expires_at !== null) {
+                $expiresAt = Carbon::parse($account->prepaid_expires_at);
+                if ($expiresAt->isPast()) {
+                    $result['skipped'] = 'prepaid expired';
+                    $this->log("[SKIP] Prepaid subscription expired ({$expiresAt->toDateTimeString()}) - account: {$accountNo}");
+
+                    return $result;
+                }
+            }
+
+            $balance = $knownBalance ?? (float) ($account->account_balance ?? 0.0);
 
             if ($balance > self::SETTLED_EPSILON) {
                 $result['skipped'] = 'balance positive';
@@ -122,15 +147,15 @@ final class PulloutServiceOrderCloser
             $closed = DB::table('service_orders')
                 ->whereIn('id', $ids)
                 ->update([
-                    'support_status'  => 'Failed',
-                    'visit_status'    => 'Failed',
+                    'support_status' => 'Failed',
+                    'visit_status' => 'Failed',
                     'support_remarks' => $this->remarkFor($paymentReference),
                     'updated_by_user' => 'System',
-                    'updated_at'      => now(),
+                    'updated_at' => now(),
                 ]);
 
             $result['closed'] = $closed;
-            $result['ids']    = $ids;
+            $result['ids'] = $ids;
 
             $this->log("[SUCCESS] Marked {$closed} pullout service order(s) Failed - account: {$accountNo} (IDs: " . implode(', ', $ids) . ')');
         } catch (Throwable $e) {
@@ -166,14 +191,12 @@ final class PulloutServiceOrderCloser
             : self::REMARK_BASE . ' reference no: ' . $reference;
     }
 
-    /** The account's balance, or null when there is no such account. */
-    private function balanceFor(string $accountNo): ?float
+    /** The account row, or null when there is no such account. */
+    private function accountFor(string $accountNo): ?object
     {
-        $value = DB::table('billing_accounts')
+        return DB::table('billing_accounts')
             ->where('account_no', $accountNo)
-            ->value('account_balance');
-
-        return $value === null ? null : (float) $value;
+            ->first();
     }
 
     /**
@@ -188,14 +211,19 @@ final class PulloutServiceOrderCloser
             ->whereIn(DB::raw('LOWER(TRIM(concern))'), self::CONCERNS)
             // A completed pullout stays completed.
             ->whereRaw("LOWER(TRIM(COALESCE(support_status, ''))) <> 'resolved'")
-            // Already Failed on both columns: nothing to change.
+            // Already Failed on both columns: nothing to do.
             ->whereRaw(
                 "NOT (LOWER(TRIM(COALESCE(support_status, ''))) = 'failed'
                   AND LOWER(TRIM(COALESCE(visit_status, ''))) = 'failed')"
             )
+            // Never auto-fail voluntary disconnects or asset retrievals on balance settlement
+            ->where(function ($query) {
+                $query->whereNull('concern_remarks')
+                    ->orWhereRaw("LOWER(TRIM(concern_remarks)) NOT REGEXP 'asset retrieval|account closed|surrendered|lilipat|wala na titira|papacut|magpapadisconnect'");
+            })
             ->orderBy('id')
             ->pluck('id')
-            ->map(fn ($id) => (int) $id)
+            ->map(fn($id) => (int) $id)
             ->all();
     }
 

@@ -252,6 +252,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, onLog
         { id: 'sms-logs', label: 'SMS Logs', icon: MessageSquare },
         { id: 'email-logs', label: 'Email Logs', icon: FileText },
         { id: 'data-logs', label: 'Data Logs', icon: FileText },
+        { id: 'modem-router-logs', label: 'Modem/Router Logs', icon: Router },
         { id: 'smart-olt-logs', label: 'Smart OLT Logs', icon: Network },
         { id: 'radius-logs', label: 'Radius Logs', icon: Activity },
         { id: 'system-logs', label: 'System Logs', icon: FileText }

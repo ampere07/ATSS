@@ -1033,7 +1033,11 @@ class ServiceOrderController extends Controller
 
             $isAlreadyResolvedReconnect = (($originalConcern === 'Reconnect' || $originalConcern === 'Upgrade/Downgrade Plan') && $originalSupportStatus === 'resolved');
             $isAlreadyResolvedRestrict = (($originalConcern === 'Restrict' || $originalConcern === 'Disconnect') && $originalSupportStatus === 'resolved');
-            $isAlreadyPulloutDone = ($originalRepairCategory === 'pullout' && $originalVisitStatus === 'done');
+            $pulloutCategories = ['pullout', 'for pullout'];
+            $isAlreadyPulloutDone = (
+                    in_array(strtolower(trim($originalRepairCategory)), $pulloutCategories, true)
+                    || in_array(strtolower(trim($originalConcern)), $pulloutCategories, true)
+                ) && $originalVisitStatus === 'done';
             $isAlreadyMigrationDone = (in_array($originalRepairCategory, ['migrate', 'relocate', 'relocate router', 'transfer lcp/nap/port']) && $originalVisitStatus === 'done');
             // Was the ONU handover already earned before this write? If so this save
             // is a re-save of a finished replacement and must not run it again.
@@ -1212,15 +1216,16 @@ class ServiceOrderController extends Controller
             $pulloutRow = DB::table('service_orders')->where('id', $id)->first();
             $pulloutVisitStatus = strtolower(trim((string) ($pulloutRow->visit_status ?? '')));
             $pulloutRepairCategory = strtolower(trim((string) ($pulloutRow->repair_category ?? '')));
+            $pulloutConcern = strtolower(trim((string) ($pulloutRow->concern ?? '')));
 
             // 'for pullout' is accepted next to 'pullout' because the two spellings are
-            // used interchangeably for these tickets. Only 'Pullout' ever reaches
-            // repair_category today (the auto-generated requests put 'For Pullout' in
-            // `concern` and leave the category empty), so this widens nothing on
-            // existing data — it just stops the spelling from mattering later.
+            // used interchangeably for these tickets. Auto-generated requests put 'for pullout'
+            // in `concern` while technicians may set either `repair_category` or `concern`.
             $pulloutCategories = ['pullout', 'for pullout'];
-            $isPulloutVisitDone = in_array($pulloutRepairCategory, $pulloutCategories, true)
-                && $pulloutVisitStatus === 'done';
+            $isPulloutVisitDone = (
+                    in_array($pulloutRepairCategory, $pulloutCategories, true)
+                    || in_array($pulloutConcern, $pulloutCategories, true)
+                ) && $pulloutVisitStatus === 'done';
 
             if ($isPulloutVisitDone && !$isAlreadyPulloutDone) {
                 $billingAccount = BillingAccount::where('account_no', $order->account_no)->first();
@@ -1228,7 +1233,7 @@ class ServiceOrderController extends Controller
                     \Log::info('Triggering auto-pullout for Service Order with Pullout repair category', [
                         'account_no' => $order->account_no
                     ]);
-                    $pulloutStatus = $this->attemptPullout($billingAccount, $updatedByUser, $organizationId);
+                    $pulloutStatus = $this->attemptPullout($billingAccount, $updatedByUser, $organizationId, (int) ($pulloutRow->id ?? $id));
                 }
             }
 
@@ -1931,7 +1936,7 @@ class ServiceOrderController extends Controller
         }
     }
 
-    private function attemptPullout($billingAccount, $updatedByUser = 'System', ?int $organizationId = null): string
+    private function attemptPullout($billingAccount, $updatedByUser = 'System', ?int $organizationId = null, ?int $serviceOrderId = null): string
     {
         try {
             // Reload billing account
@@ -2006,14 +2011,32 @@ class ServiceOrderController extends Controller
 
             \Log::info('[SERVICE ORDER PULLOUT DB] Updated billing_status_id to 5 (Pullout) for Account: ' . $accountNo);
 
-            // Clear the ONU name in SmartOLT before wiping the SN from technical_details (best-effort)
+            // Preserve the hardware serial on the pullout service order before clearing technical_details
+            // so downstream reconciliation (SmartOLT unprovisioning after 2 weeks) can identify the device.
             if (!empty($routerModemSn)) {
-                $smartOltStatus = app(\App\Services\SmartOltService::class)->clearOnuNameBySn($routerModemSn);
-                \Log::info('[SERVICE ORDER PULLOUT SMARTOLT] Clear ONU name result: ' . $smartOltStatus, [
-                    'account_no' => $accountNo,
-                    'router_modem_sn' => $routerModemSn,
+                $soUpdateQuery = DB::table('service_orders')
+                    ->where('account_no', $accountNo)
+                    ->where(function ($q) {
+                        $q->whereNull('old_router_modem_sn')->orWhere('old_router_modem_sn', '');
+                    });
+
+                if ($serviceOrderId) {
+                    $soUpdateQuery->where('id', $serviceOrderId);
+                } else {
+                    $soUpdateQuery->where(function ($q) {
+                        $q->whereIn(DB::raw("LOWER(TRIM(COALESCE(concern, '')))"), ['pullout', 'for pullout'])
+                          ->orWhere(DB::raw("LOWER(TRIM(COALESCE(repair_category, '')))"), '=', 'pullout');
+                    });
+                }
+
+                $soUpdateQuery->update([
+                    'old_router_modem_sn' => $routerModemSn,
+                    'updated_at' => now(),
                 ]);
             }
+
+            // Do NOT delete or modify the ONU on SmartOLT during Service Order pullout.
+            // ONU unprovisioning is deferred for 2 weeks (14 days) and handled by cron:smartolt-daily-automation.
 
             // Clear technical details
             DB::table('technical_details')

@@ -141,6 +141,7 @@ final class Permissions
         'radius-logs',
         'radius-queue',
         'system-logs',
+        'modem-router-logs',
 
         // Tools. Each reconciles what the system believes against what a
         // downstream actually holds — SmartOLT's ONUs, the RADIUS server's
@@ -484,6 +485,7 @@ final class Permissions
             'email-logs',
             'data-logs',
             'expenses-log',
+            'modem-router-logs',
             // The RADIUS retry queue. Read-only, and an operational screen
             // rather than a configuration one, so it sits with the roles that
             // chase failed disconnects rather than with Settings.
@@ -544,6 +546,7 @@ final class Permissions
         Role::INVENTORY_STAFF => [
             'inventory',
             'inventory-category-list',
+            'modem-router-logs',
         ],
 
         // Outside plant: work orders and the fibre map.
@@ -578,6 +581,7 @@ final class Permissions
             // field-operations one.
             'smartolt-tool',
             'mikrotik-radius-tool',
+            'modem-router-logs',
         ],
     ];
 

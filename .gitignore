@@ -64,3 +64,4 @@ storage/*.key
 *.jks
 *.keystore
 upload_certificate.pem
+proposals/CLIENT_NAME_proposal.md

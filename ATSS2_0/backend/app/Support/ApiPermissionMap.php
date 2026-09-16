@@ -477,6 +477,7 @@ final class ApiPermissionMap
         ['disconnected-logs*',           'disconnected-logs', 'disconnected-logs'],
         ['disconnection-logs',           'disconnected-logs', 'disconnected-logs'],
         ['reconnection-logs*',           'reconnection-logs', 'reconnection-logs'],
+        ['modem-router-logs*',           'modem-router-logs', 'modem-router-logs'],
         // Read-only: the queue is written by the workers, never from the UI.
         ['radius-queue',                 'radius-queue', 'radius-queue'],
         ['expenses-logs',                'expenses-log', 'expenses-log'],

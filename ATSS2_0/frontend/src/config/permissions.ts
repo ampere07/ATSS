@@ -147,6 +147,7 @@ export const PAGES = [
   'radius-logs',
   'radius-queue',
   'system-logs',
+  'modem-router-logs',
 
   // Tools. Each reconciles what the system believes against what a downstream
   // actually holds, and can write the difference back. They had sidebar entries
@@ -350,6 +351,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'radius-logs': 'Radius Logs',
   'radius-queue': 'Radius Queue',
   'system-logs': 'System Logs',
+  'modem-router-logs': 'Modem/Router Logs',
   'smartolt-tool': 'SmartOLT Tool',
   'mikrotik-radius-tool': 'Mikrotik Radius Tool',
   'xendit-reconcile-tool': 'Xendit Reconciliation',
@@ -463,7 +465,7 @@ export const PERMISSION_GROUPS: Array<{ label: string; pages: string[] }> = [
     pages: [
       'disconnected-logs', 'reconnection-logs', 'sms-logs', 'sms-blast-logs',
       'email-logs', 'data-logs', 'expenses-log', 'smart-olt-logs',
-      'radius-logs', 'system-logs',
+      'radius-logs', 'system-logs', 'modem-router-logs',
     ],
   },
   { label: 'Customer Portal', pages: ['customer-dashboard', 'customer-bills', 'customer-support', 'agent-application'] },
@@ -535,6 +537,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'email-logs',
     'data-logs',
     'expenses-log',
+    'modem-router-logs',
     // The RADIUS retry queue. Read-only, and an operational screen rather than
     // a configuration one.
     'radius-queue',
@@ -581,6 +584,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
   [ROLE.INVENTORY_STAFF]: [
     'inventory',
     'inventory-category-list',
+    'modem-router-logs',
   ],
 
   [ROLE.OSP]: [
@@ -608,6 +612,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     // and SuperAdmin concern rather than a field-operations one.
     'smartolt-tool',
     'mikrotik-radius-tool',
+    'modem-router-logs',
   ],
 };
 

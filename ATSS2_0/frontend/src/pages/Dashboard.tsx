@@ -19,6 +19,7 @@ import ReconnectionLogs from './ReconnectionLogs';
 import SmsLogs from './SmsLogs';
 import EmailLogs from './EmailLogs';
 import DataLogs from './DataLogs';
+import ModemRouterLogs from './ModemRouterLogs';
 import RadiusQueue from './radiusqueue';
 import FileLogViewer from './FileLogViewer';
 import Sidebar from './Sidebar';
@@ -358,6 +359,8 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <EmailLogs />;
             case 'data-logs':
                 return <DataLogs />;
+            case 'modem-router-logs':
+                return <ModemRouterLogs isDarkMode={isDarkMode} />;
             case 'smart-olt-logs':
                 return <FileLogViewer type="smartolt" title="Smart OLT Logs" />;
             case 'radius-logs':

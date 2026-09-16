@@ -75,6 +75,21 @@ class SmartOltReconciliationService
      */
     public const JOB_SN_ALIGNMENT = 'sn_alignment';
 
+    /**
+     * Swap the physical device behind a batch of provisioned ONUs.
+     *
+     * The batched form of replaceOnuSn(). A single replacement is a synchronous call
+     * from the operator's modal, because they are standing there waiting for the
+     * answer; a batch of them - a truckroll that swapped forty modems in a morning -
+     * is a sweep, and sweeps belong in `tool_jobs` where progress is checkpointed and
+     * `cron:tool-jobs-drain` can finish them with no browser attached.
+     *
+     * Each item carries its own target serial. Nothing here derives one: SmartOLT is
+     * the source of truth for what serial is on a port, so a replacement is only ever
+     * something a human observed in the field and entered.
+     */
+    public const JOB_SN_REPLACE = 'sn_replace';
+
     public const JOB_TYPES = [
         self::JOB_SMARTOLT_SYNC,
         self::JOB_RADIUS_SCAN,
@@ -83,6 +98,7 @@ class SmartOltReconciliationService
         self::JOB_RENAME,
         self::JOB_PROFILE_SYNC,
         self::JOB_SN_ALIGNMENT,
+        self::JOB_SN_REPLACE,
         self::JOB_DELETE,
     ];
 
@@ -108,14 +124,57 @@ class SmartOltReconciliationService
     /** Job order statuses that no longer block a decommission. */
     public const CLOSED_JOB_STATUSES = ['done', 'completed', 'cancelled', 'canceled'];
 
+    /**
+     * Service Order concerns that mean the subscriber's equipment is being collected.
+     *
+     * Both spellings are live in service_orders: the Service Order forms write
+     * "Pullout", and AutoDisconnectService raises "for pullout". Compared lowercased.
+     */
+    public const PULLOUT_CONCERNS = ['pullout', 'for pullout'];
+
+    /** The Service Order repair category that means the same thing as a pullout concern. */
+    public const PULLOUT_REPAIR_CATEGORY = 'pullout';
+
+    /**
+     * Service Order status / visit_status values that mean the pullout was carried out.
+     *
+     * Nothing short of these clears an ONU for deletion - see pulloutVerdict().
+     */
+    public const PULLOUT_DONE_STATUSES = ['done', 'completed'];
+
     public const DEFAULT_OFFLINE_DAYS = 30;
 
     /**
      * Consecutive offline/LOS/PwrFail days before the unattended daily sweep will
-     * consider an ONU for removal. Deliberately far tighter than the operator-driven
-     * default above, and overridable per run — see runDailyAutomation().
+     * consider an ONU for removal. Set to 14 days (2 weeks) so that pulled-out
+     * or disconnected equipment is retained for 2 weeks before unprovisioning.
+     * Overridable per run — see runDailyAutomation().
      */
-    public const AUTOMATION_OFFLINE_DAYS = 3;
+    public const AUTOMATION_OFFLINE_DAYS = 14;
+
+    /**
+     * Per-ONU bridge-MAC reads the unattended pass may spend in one run.
+     *
+     * `get_onu_full_status_info` is the hardest-throttled call on this API and costs
+     * one request per ONU. Discovery only ever queues ONUs with no stored MAC, so on
+     * a settled estate this ceiling is never approached; it exists so the morning
+     * after a hundred installs the sweep takes a bounded bite rather than burning the
+     * whole hourly quota and parking every other phase behind a cooldown.
+     *
+     * Referenced by cron:smartolt-daily-automation. It was referenced before it was
+     * declared, which made every scheduled run die on an undefined-constant Error
+     * before it reached the first phase.
+     */
+    public const AUTOMATION_MAX_DISCOVERY = 300;
+
+    /**
+     * Billing router/modem SN writes the unattended pass may apply in one run.
+     *
+     * Higher than the rename ceiling because these are local database writes, not
+     * throttled API calls - the only reason to bound them at all is so one run cannot
+     * rewrite the whole estate's serials before anybody has read the log.
+     */
+    public const AUTOMATION_MAX_SN_UPDATES = 500;
 
     private const LOG_CHANNEL = 'smartoltrelated';
     private const LOG_PREFIX = 'SmartOLT_Reconciliation';
@@ -199,6 +258,30 @@ class SmartOltReconciliationService
 
     /** Fields update_location_details is proven to accept. */
     private const PUSHABLE_FIELDS = ['name', 'address_or_comment', 'contact', 'latitude', 'longitude'];
+
+    /**
+     * The SmartOLT endpoint that swaps the hardware behind a provisioned ONU.
+     *
+     * Distinct from everything else this service writes. `update_location_details`
+     * edits the labels on a provisioning record; this one re-points that record at a
+     * different physical device, keeping the ONU's slot, zone, VLAN, profile and name
+     * and changing only which serial answers on it. That is what a field technician
+     * has actually done when they hand over a replacement modem, and doing it any
+     * other way - delete and re-provision - loses the configuration.
+     *
+     * @see replaceOnuSn()
+     */
+    private const REPLACE_SN_ENDPOINT = 'onu/replace_onu_sn';
+
+    /**
+     * The form field `replace_onu_sn` reads the incoming serial from.
+     *
+     * Sent under both this name and the bare `sn` alias, because SmartOLT has shipped
+     * both spellings across API revisions and an unrecognised extra form field is
+     * ignored rather than rejected. The cost of sending one spare key is nothing; the
+     * cost of guessing wrong is a replacement that silently does not happen.
+     */
+    private const REPLACE_SN_FIELD = 'new_sn';
 
     // ---- MAC alignment row states -------------------------------------------
 
@@ -399,12 +482,15 @@ class SmartOltReconciliationService
      * @param array<int, string> $externalIds
      * @return array{success: bool, checked: int, remaining: int, items: array<int, array<string, mixed>>, errors: array<int, string>}
      */
-    public function discoverBridgeMacs(array $externalIds = [], int $limit = 25): array
-    {
+    public function discoverBridgeMacs(
+        array $externalIds = [],
+        int $limit = 25,
+        bool $stopOnRateLimit = false
+    ): array {
         $config = $this->smartOltConfig();
 
         if ($config === null) {
-            return ['success' => false, 'checked' => 0, 'remaining' => 0, 'items' => [], 'errors' => ['SmartOLT is not configured.']];
+            return ['success' => false, 'checked' => 0, 'remaining' => 0, 'items' => [], 'errors' => ['SmartOLT is not configured.'], 'rate_limited' => false];
         }
 
         $inventory = $this->cachedInventory();
@@ -420,6 +506,7 @@ class SmartOltReconciliationService
 
         $errors = [];
         $checked = 0;
+        $rateLimited = false;
 
         foreach ($targets as $externalId) {
             try {
@@ -427,6 +514,23 @@ class SmartOltReconciliationService
 
                 if (!$response['success']) {
                     $errors[] = $externalId . ': ' . $response['error'];
+
+                    // Every remaining target would be refused by the same quota, and
+                    // each refusal still costs a request. The unattended sweep asks to
+                    // stop here and keep what it has; the interactive endpoint carries
+                    // on, because an operator watching a crawl would rather see the
+                    // ONUs that did answer than a truncated list.
+                    if ($response['rate_limited']) {
+                        $rateLimited = true;
+
+                        if ($stopOnRateLimit) {
+                            $this->log('warning', 'Bridge MAC discovery stopped on the SmartOLT rate limit.', [
+                                'checked' => $checked,
+                            ]);
+                            break;
+                        }
+                    }
+
                     continue;
                 }
 
@@ -466,9 +570,12 @@ class SmartOltReconciliationService
         return [
             'success' => true,
             'checked' => $checked,
-            'remaining' => $remaining,
+            // Targets this call did not reach: the ones past the limit, plus any it
+            // abandoned when the quota stopped it.
+            'remaining' => $remaining + max(0, count($targets) - $checked - count($errors)),
             'items' => $items,
             'errors' => $errors,
+            'rate_limited' => $rateLimited,
         ];
     }
 
@@ -1106,8 +1213,11 @@ class SmartOltReconciliationService
 
             $summary['total']++;
 
-            $reasons = $this->cleanupBlockers((string) ($onu['sn'] ?? ''), $safety);
+            $reasons = $this->cleanupBlockers((string) ($onu['sn'] ?? ''), $safety, $onu['name'] ?? null);
             $eligible = $reasons === [];
+            // Carried apart from `eligible`: it is the one guard the tool does not let
+            // an operator select past, so the screen needs it as its own flag.
+            $pulloutCleared = $this->pulloutVerdict($this->normalizeSerial((string) ($onu['sn'] ?? '')), $safety, $onu['name'] ?? null)['cleared'];
 
             if ($eligible) {
                 $summary['eligible']++;
@@ -1136,6 +1246,9 @@ class SmartOltReconciliationService
                 // gate: an operator who has selected a row has already made the call.
                 'eligible' => $eligible,
                 'reasons' => $reasons,
+                // The exception to the above, and binding in both paths: no Done
+                // pullout Service Order, no deletion. Additive key.
+                'pullout_cleared' => $pulloutCleared,
             ];
         }
 
@@ -1152,8 +1265,11 @@ class SmartOltReconciliationService
      * The preview can be minutes old by the time an operator confirms; this is what
      * makes a stale preview unable to delete a record that has come back to life.
      *
+     * `pullout_cleared` is reported apart from `eligible` because it is the one guard
+     * stepDelete() will not let an operator override. See pulloutVerdict().
+     *
      * @param array<string, mixed> $safety
-     * @return array{eligible: bool, reasons: array<int, string>}
+     * @return array{eligible: bool, pullout_cleared: bool, reasons: array<int, string>}
      */
     private function revalidateCleanup(string $externalId, int $offlineDays, array $safety): array
     {
@@ -1162,31 +1278,154 @@ class SmartOltReconciliationService
         $onu = $inventory['items'][$externalId] ?? null;
 
         if (!is_array($onu)) {
-            return ['eligible' => false, 'reasons' => ['The ONU is no longer in the cached inventory.']];
+            // No serial left to look a pullout up by, so the pullout cannot be cleared.
+            return ['eligible' => false, 'pullout_cleared' => false, 'reasons' => ['The ONU is no longer in the cached inventory.']];
         }
+
+        // Decided before the early returns below, not after them: an operator override
+        // is precisely the case where the status or offline-days check has stopped
+        // passing, and the pullout gate still has to hold there.
+        $pulloutCleared = $this->pulloutVerdict($this->normalizeSerial((string) ($onu['sn'] ?? '')), $safety, $onu['name'] ?? null)['cleared'];
 
         $status = $this->resolveStatus($onu, $statuses);
         if (!in_array($status, self::CLEANUP_STATUSES, true)) {
-            return ['eligible' => false, 'reasons' => ["The ONU status is no longer eligible ({$status})."]];
+            return ['eligible' => false, 'pullout_cleared' => $pulloutCleared, 'reasons' => ["The ONU status is no longer eligible ({$status})."]];
         }
 
         $days = $this->daysOffline($onu, $statuses);
         if ($days === null || $days < $offlineDays) {
-            return ['eligible' => false, 'reasons' => ['The ONU no longer meets the offline-days threshold.']];
+            return ['eligible' => false, 'pullout_cleared' => $pulloutCleared, 'reasons' => ['The ONU no longer meets the offline-days threshold.']];
         }
 
-        $reasons = $this->cleanupBlockers((string) ($onu['sn'] ?? ''), $safety);
+        $reasons = $this->cleanupBlockers((string) ($onu['sn'] ?? ''), $safety, $onu['name'] ?? null);
 
-        return ['eligible' => $reasons === [], 'reasons' => $reasons];
+        return ['eligible' => $reasons === [], 'pullout_cleared' => $pulloutCleared, 'reasons' => $reasons];
     }
 
     /**
-     * Every billing reason an ONU must not be deleted.
+     * Whether the subscriber equipment behind this serial has been collected.
+     *
+     * An ONU may only be unprovisioned once a pullout Service Order - concern "pullout"
+     * or "for pullout", or repair category "pullout" - exists for its serial or for an
+     * account on it, and at least one such order is Done. No order at all, or only
+     * orders still pending, holds the ONU back. Service Orders are the record of work
+     * on an existing subscriber; a Done pullout is the field team saying the device has
+     * physically come back, which nothing on the OLT side can tell us.
+     *
+     * Unlike every other guard here this one is never advisory: stepDelete() refuses an
+     * operator's own selection on it even with `enforce_safety` off, and the unattended
+     * pass meets it through cleanupBlockers().
+     *
+     * @param string $serial already normalized
+     * @param array<string, mixed> $safety
+     * @return array{cleared: bool, reason: string|null} `reason` is null when cleared, and
+     *   also when no verdict can be reached (no serial, safety map unavailable) - those
+     *   conditions are already reported by cleanupBlockers() in their own words.
+     */
+    private function pulloutVerdict(string $serial, array $safety, ?string $onuName = null): array
+    {
+        if ($serial === '' || ($safety['available'] ?? false) !== true) {
+            return ['cleared' => false, 'reason' => null];
+        }
+
+        // Keyed by service order id: one ticket can match on its serial and on its
+        // account at once, and must count once.
+        $orders = [];
+
+        foreach ($safety['pullouts_by_serial'][$serial] ?? [] as $order) {
+            $orders[(int) $order['id']] = $order;
+        }
+
+        foreach ($safety['accounts'][$serial] ?? [] as $account) {
+            $accountNo = trim((string) ($account['account_no'] ?? ''));
+
+            if ($accountNo === '') {
+                continue;
+            }
+
+            foreach ($safety['pullouts_by_account'][$accountNo] ?? [] as $order) {
+                $orders[(int) $order['id']] = $order;
+            }
+        }
+
+        if ($orders === []) {
+            // Unassigned / placeholder name check:
+            // If the ONU has a placeholder name (e.g. 'not set') and has no billing accounts
+            // attached to this serial, it is an unassigned or orphaned device rather than a subscriber.
+            // It is cleared for unprovisioning once dark for the required offline threshold.
+            if ($onuName !== null && $this->isPlaceholderName($onuName) && empty($safety['accounts'][$serial])) {
+                return ['cleared' => true, 'reason' => null];
+            }
+
+            return ['cleared' => false, 'reason' => 'No pullout service order found for this serial/account.'];
+        }
+
+        foreach ($orders as $order) {
+            if (($order['is_done'] ?? false) === true) {
+                return ['cleared' => true, 'reason' => null];
+            }
+        }
+
+        // The newest open ticket is the one an operator will go and chase.
+        $latest = $orders[max(array_keys($orders))];
+        $status = trim((string) ($latest['status'] ?? ''));
+        $visit = trim((string) ($latest['visit_status'] ?? ''));
+
+        return [
+            'cleared' => false,
+            'reason' => sprintf(
+                'Pullout service order exists but is not marked Done (status: %s%s).',
+                $status !== '' ? $status : 'Pending',
+                $visit !== '' ? " (visit: {$visit})" : ''
+            ),
+        ];
+    }
+
+    /**
+     * File one pullout service_orders row under its account number and its serials.
+     *
+     * Both router/modem SN columns are indexed: a pullout raised on a subscriber whose
+     * modem was swapped may name the ONU's serial in either one. A ticket whose two
+     * columns name the same device is filed under it once.
+     *
+     * @param array<string, array<int, array<string, mixed>>> $byAccount
+     * @param array<string, array<int, array<string, mixed>>> $bySerial
+     */
+    private function indexPulloutOrder(object $row, array &$byAccount, array &$bySerial): void
+    {
+        $isDone = in_array(strtolower(trim((string) ($row->status ?? ''))), self::PULLOUT_DONE_STATUSES, true)
+            || in_array(strtolower(trim((string) ($row->visit_status ?? ''))), self::PULLOUT_DONE_STATUSES, true);
+
+        $entry = [
+            'id' => (int) $row->id,
+            'is_done' => $isDone,
+            'status' => $row->status ?? null,
+            'visit_status' => $row->visit_status ?? null,
+        ];
+
+        $accountNo = trim((string) ($row->account_no ?? ''));
+
+        if ($accountNo !== '') {
+            $byAccount[$accountNo][] = $entry;
+        }
+
+        $serials = array_unique(array_filter([
+            $this->normalizeSerial((string) ($row->old_router_modem_sn ?? '')),
+            $this->normalizeSerial((string) ($row->new_router_modem_sn ?? '')),
+        ], static fn (string $serial): bool => $serial !== ''));
+
+        foreach ($serials as $serial) {
+            $bySerial[$serial][] = $entry;
+        }
+    }
+
+    /**
+     * Every billing reason an ONU must not be deleted, the pullout gate included.
      *
      * @param array<string, mixed> $safety
      * @return array<int, string>
      */
-    private function cleanupBlockers(string $serialRaw, array $safety): array
+    private function cleanupBlockers(string $serialRaw, array $safety, ?string $onuName = null): array
     {
         $reasons = [];
         $serial = $this->normalizeSerial($serialRaw);
@@ -1224,6 +1463,12 @@ class SmartOltReconciliationService
             if (isset($safety['online'][strtolower((string) $username)])) {
                 $reasons[] = "'{$username}' holds a live RADIUS session on this serial.";
             }
+        }
+
+        $pullout = $this->pulloutVerdict($serial, $safety, $onuName);
+
+        if ($pullout['reason'] !== null) {
+            $reasons[] = $pullout['reason'];
         }
 
         return array_values(array_unique($reasons));
@@ -1529,6 +1774,7 @@ class SmartOltReconciliationService
                     self::JOB_RENAME => $this->stepRename($job),
                     self::JOB_PROFILE_SYNC => $this->stepProfileSync($job),
                     self::JOB_SN_ALIGNMENT => $this->stepSnAlignment($job),
+                    self::JOB_SN_REPLACE => $this->stepReplaceSn($job),
                     self::JOB_DELETE => $this->stepDelete($job),
                     default => $this->finishJob($job, self::STATUS_FAILED, "Unknown job type '{$job['type']}'."),
                 };
@@ -2396,11 +2642,22 @@ class SmartOltReconciliationService
         // it. It defaults to false here and is not set by the tool. The unattended
         // nightly pass does not come through this step at all — automateCleanup()
         // keeps its own hard guards, because nothing there was reviewed by a person.
+        //
+        // The pullout guard is the exception and nobody overrides it. An ONU with no
+        // Done pullout Service Order for its serial or account still has subscriber
+        // equipment in the field, so no selection and no flag deletes it. A parked
+        // delete job that the nightly drain resumes meets the same refusal here.
         $enforceSafety = (bool) ($context['enforce_safety'] ?? false);
 
         $check = $this->revalidateCleanup($externalId, $offlineDays, $safety);
 
-        if ($enforceSafety && !$check['eligible']) {
+        if (($check['pullout_cleared'] ?? false) !== true) {
+            $context['blocked'] = (int) ($context['blocked'] ?? 0) + 1;
+            $this->log('warning', 'Deletion refused: no Done pullout service order for this ONU.', [
+                'external_id' => $externalId,
+                'reasons' => $check['reasons'],
+            ]);
+        } elseif ($enforceSafety && !$check['eligible']) {
             $context['blocked'] = (int) ($context['blocked'] ?? 0) + 1;
             $this->log('warning', 'Deletion blocked at final revalidation.', [
                 'external_id' => $externalId,
@@ -2554,6 +2811,47 @@ class SmartOltReconciliationService
                     'message' => 'Starting router/modem SN alignment for ' . count($queue) . ' subscriber(s).',
                 ];
 
+            case self::JOB_SN_REPLACE:
+                $queue = [];
+                foreach (is_array($options['items'] ?? null) ? $options['items'] : [] as $item) {
+                    if (!is_array($item)) {
+                        continue;
+                    }
+
+                    $externalId = trim((string) ($item['external_id'] ?? ''));
+                    $newSn = trim((string) ($item['new_sn'] ?? ''));
+
+                    if ($externalId === '' || $newSn === '') {
+                        continue;
+                    }
+
+                    $queue[] = [
+                        'external_id' => $externalId,
+                        'new_sn' => $newSn,
+                        // Optional: present when the caller also wants the serial
+                        // carried into the subscriber's billing record.
+                        'technical_detail_id' => (int) ($item['technical_detail_id'] ?? 0) ?: null,
+                    ];
+                }
+
+                return [
+                    // The caller's scope is checkpointed with the queue, exactly as the
+                    // SN alignment job does it: the ids came from a request, and a
+                    // scoped operator must not reach another organization's billing row
+                    // by posting its id.
+                    'context' => [
+                        'queue' => $queue,
+                        'index' => 0,
+                        'replaced' => 0,
+                        'skipped' => 0,
+                        'blocked' => 0,
+                        'failed' => 0,
+                        'organization_id' => $organizationId,
+                    ],
+                    'total' => count($queue),
+                    'message' => 'Starting ONU serial replacement for ' . count($queue) . ' ONU(s).',
+                ];
+
             case self::JOB_PROFILE_SYNC:
                 $queue = [];
                 foreach (is_array($options['items'] ?? null) ? $options['items'] : [] as $item) {
@@ -2598,15 +2896,526 @@ class SmartOltReconciliationService
     }
 
     // =========================================================================
+    // Replace ONU serial
+    // =========================================================================
+
+    /**
+     * Everything about a replacement that can be decided without calling SmartOLT.
+     *
+     * Split out of replaceOnuSn() so the single operator action and the batched
+     * `sn_replace` job reach the same verdict for the same ONU. A guard that lived in
+     * only one of the two paths is a guard an operator can walk around by choosing the
+     * other button, which is exactly how a serial ends up on two ONUs.
+     *
+     * @return array{
+     *     ok: bool,
+     *     skip: bool,
+     *     message: string,
+     *     current_sn: string
+     * } `skip` means the ONU already carries this serial - the answer to a retry, and
+     *   not a failure.
+     */
+    private function checkReplacement(string $externalId, string $newSn): array
+    {
+        $verdict = ['ok' => false, 'skip' => false, 'message' => '', 'current_sn' => ''];
+
+        if ($externalId === '' || $newSn === '') {
+            $verdict['message'] = 'Both the ONU and the replacement serial are required.';
+
+            return $verdict;
+        }
+
+        if ($this->smartOltConfig() === null) {
+            $verdict['message'] = 'SmartOLT is not configured - set the sub-domain and token in SmartOLT Config first.';
+
+            return $verdict;
+        }
+
+        $inventory = $this->cachedInventory();
+        $onu = $inventory['items'][$externalId] ?? null;
+
+        if ($onu === null) {
+            $verdict['message'] = "ONU {$externalId} is not in the cached inventory. Run Sync SmartOLT Inventory first.";
+
+            return $verdict;
+        }
+
+        $currentSn = trim((string) ($onu['sn'] ?? ''));
+        $verdict['current_sn'] = $currentSn;
+
+        // Already done. The commonest way to reach this is a retry - a double-clicked
+        // modal, a re-run batch, a drain pass replaying an item it is not sure landed -
+        // so it answers as a skip rather than calling SmartOLT to set a serial it holds.
+        if ($currentSn !== '' && $this->normalizeSerial($currentSn) === $this->normalizeSerial($newSn)) {
+            $verdict['ok'] = true;
+            $verdict['skip'] = true;
+            $verdict['message'] = "ONU {$externalId} already carries serial {$newSn}.";
+
+            return $verdict;
+        }
+
+        // A serial provisioned elsewhere cannot be moved here without orphaning that
+        // ONU, and SmartOLT's own answer to it is an opaque rejection. Refusing locally
+        // names the conflicting ONU instead.
+        $normalized = $this->normalizeSerial($newSn);
+
+        foreach ($inventory['items'] as $otherId => $other) {
+            if ((string) $otherId === $externalId) {
+                continue;
+            }
+
+            if ($this->normalizeSerial((string) ($other['sn'] ?? '')) === $normalized) {
+                $verdict['message'] = sprintf(
+                    'Serial %s is already provisioned on ONU %s (%s). Unprovision that ONU first.',
+                    $newSn,
+                    $otherId,
+                    (string) ($other['name'] ?? 'unnamed')
+                );
+
+                return $verdict;
+            }
+        }
+
+        $verdict['ok'] = true;
+
+        return $verdict;
+    }
+
+    /**
+     * Point one ONU's provisioning record at a different physical device.
+     *
+     * The SmartOLT half of a replacement, and nothing else: no database write, and no
+     * transaction anywhere near it, because this is an HTTP call to a third party.
+     *
+     * The cached inventory is corrected on success rather than left until the next
+     * full sync. Every matching pass in this service binds on that cached serial, so a
+     * stale copy would have the next SN-alignment batch write the *old* serial straight
+     * back onto the subscriber it was just moved off.
+     *
+     * @return array{success: bool, rate_limited: bool, error: string}
+     */
+    private function pushReplacementToOlt(string $externalId, string $newSn, string $currentSn): array
+    {
+        $response = $this->callSmartOlt(
+            'POST',
+            self::REPLACE_SN_ENDPOINT . '/' . rawurlencode($externalId),
+            [
+                self::REPLACE_SN_FIELD => $newSn,
+                // Alias for the API revisions that name the field `sn`; an unknown
+                // extra form key is ignored, a missing expected one is a failure.
+                'sn' => $newSn,
+            ]
+        );
+
+        if (!$response['success']) {
+            $this->log('warning', 'SmartOLT rejected an ONU serial replacement.', [
+                'external_id' => $externalId,
+                'rate_limited' => $response['rate_limited'],
+                'error' => $response['error'],
+            ]);
+
+            return [
+                'success' => false,
+                'rate_limited' => (bool) $response['rate_limited'],
+                'error' => $response['rate_limited']
+                    ? 'SmartOLT is rate limiting right now - the replacement was not applied.'
+                    : 'SmartOLT rejected the replacement: ' . $response['error'],
+            ];
+        }
+
+        $inventory = $this->cachedInventory();
+
+        if (isset($inventory['items'][$externalId])) {
+            $inventory['items'][$externalId]['sn'] = $newSn;
+            $this->putCache('inventory', $inventory);
+        }
+
+        $this->recordLog(
+            'replace_onu_sn',
+            "Replaced the serial on ONU {$externalId}: '{$currentSn}' -> '{$newSn}'.",
+            $externalId,
+            ['sn' => $currentSn],
+            ['sn' => $newSn]
+        );
+
+        return ['success' => true, 'rate_limited' => false, 'error' => ''];
+    }
+
+    /**
+     * Carry a replacement serial into the subscriber's billing record.
+     *
+     * Its own narrow transaction, taken *after* the SmartOLT call rather than around
+     * it, so a slow OLT never holds this row lock. Re-read and compared under
+     * `lockForUpdate` rather than trusted from the preview, which is what makes a
+     * re-run of a finished batch a skip instead of a second write.
+     *
+     * @return string|null the previous serial when a write happened; null when the row
+     *                     already carried this serial and nothing was done
+     * @throws \DomainException the row belongs to another organization
+     * @throws \RuntimeException the row no longer exists
+     */
+    private function writeReplacementToBilling(
+        int $technicalDetailId,
+        string $newSn,
+        ?int $organizationId,
+        string $externalId,
+        string $reason = 'replacement'
+    ): ?string {
+        $previousSn = DB::transaction(function () use ($technicalDetailId, $newSn, $organizationId): ?string {
+            $current = DB::table('technical_details')
+                ->where('id', $technicalDetailId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($current === null) {
+                throw new \RuntimeException("technical_details #{$technicalDetailId} no longer exists.");
+            }
+
+            if ($organizationId !== null) {
+                $rowOrg = $current->organization_id === null ? null : (int) $current->organization_id;
+                if ($rowOrg !== null && $rowOrg !== (int) $organizationId) {
+                    throw new \DomainException("technical_details #{$technicalDetailId} belongs to another organization.");
+                }
+            }
+
+            $stored = trim((string) ($current->router_modem_sn ?? ''));
+
+            if ($stored !== '' && $this->normalizeSerial($stored) === $this->normalizeSerial($newSn)) {
+                return null;
+            }
+
+            DB::table('technical_details')
+                ->where('id', $technicalDetailId)
+                ->update([
+                    'router_modem_sn' => $newSn,
+                    'updated_at' => now(),
+                ]);
+
+            return $stored;
+        });
+
+        if ($previousSn !== null) {
+            $this->recordLog(
+                'align_router_sn',
+                "Adopted SmartOLT serial '{$newSn}' as the router/modem SN for technical_details #{$technicalDetailId} ({$reason}).",
+                $externalId,
+                ['technical_detail_id' => $technicalDetailId, 'router_modem_sn' => $previousSn],
+                ['technical_detail_id' => $technicalDetailId, 'router_modem_sn' => $newSn],
+                true,
+                ['reason' => $reason]
+            );
+        }
+
+        return $previousSn;
+    }
+
+    /**
+     * Swap the physical device behind a provisioned ONU.
+     *
+     * The operator-facing half of a modem replacement: the technician has fitted new
+     * hardware, and the ONU record in SmartOLT - its slot, zone, VLAN, speed profile
+     * and name - has to follow the new serial rather than be rebuilt around it.
+     *
+     * Ordered so that no failure can leave the two systems disagreeing in the
+     * dangerous direction:
+     *
+     *  1. every guard that can be answered locally runs first, so a rejected request
+     *     never reaches SmartOLT at all;
+     *  2. the SmartOLT call happens next, outside any transaction - it is HTTP, and
+     *     HTTP inside a transaction holds a row lock open across a network round trip;
+     *  3. only once SmartOLT has accepted is the billing record updated, in its own
+     *     narrow transaction under `lockForUpdate`.
+     *
+     * Billing therefore never claims a serial the OLT refused. The reverse gap - the
+     * OLT swapped and the billing write failing after it - is reported explicitly and
+     * is recoverable from the SN alignment tab, which exists precisely to reconcile
+     * `technical_details.router_modem_sn` against what SmartOLT reports.
+     *
+     * Idempotent. An ONU that already carries the requested serial is a skip, not a
+     * second call: re-submitting the same replacement - a double-clicked modal, a
+     * retried request, an operator repeating a step they were not sure landed - costs
+     * one cache read and changes nothing.
+     *
+     * For a batch, start a {@see JOB_SN_REPLACE} job instead: it applies the same three
+     * steps per item, checkpointed in `tool_jobs` so `cron:tool-jobs-drain` can finish
+     * the run with no browser attached.
+     *
+     * @param string   $externalId         SmartOLT's own ONU id.
+     * @param string   $newSn              The serial of the replacement device.
+     * @param int|null $technicalDetailId  Billing row to carry the new serial, if any.
+     * @param int|null $organizationId     Caller's scope; null for SuperAdmin.
+     * @return array{success: bool, skipped: bool, message: string, data: array<string, mixed>}
+     */
+    public function replaceOnuSn(
+        string $externalId,
+        string $newSn,
+        ?int $technicalDetailId = null,
+        ?int $organizationId = null
+    ): array {
+        $externalId = trim($externalId);
+        $newSn = trim($newSn);
+
+        $result = [
+            'success' => false,
+            'skipped' => false,
+            'message' => '',
+            'data' => [
+                'external_id' => $externalId,
+                'previous_sn' => null,
+                'new_sn' => $newSn,
+                'billing_updated' => false,
+                'technical_detail_id' => $technicalDetailId,
+            ],
+        ];
+
+        $verdict = $this->checkReplacement($externalId, $newSn);
+        $result['data']['previous_sn'] = $verdict['current_sn'];
+
+        if (!$verdict['ok']) {
+            return array_replace($result, ['message' => $verdict['message']]);
+        }
+
+        if ($verdict['skip']) {
+            $this->log('info', 'ONU already carries the requested serial.', ['external_id' => $externalId]);
+
+            return array_replace($result, [
+                'success' => true,
+                'skipped' => true,
+                'message' => $verdict['message'],
+            ]);
+        }
+
+        $pushed = $this->pushReplacementToOlt($externalId, $newSn, $verdict['current_sn']);
+
+        if (!$pushed['success']) {
+            return array_replace($result, [
+                'message' => $pushed['rate_limited']
+                    ? $pushed['error'] . ' Try again shortly.'
+                    : $pushed['error'],
+            ]);
+        }
+
+        $result['success'] = true;
+        $result['message'] = "ONU {$externalId} now carries serial {$newSn}.";
+
+        if ($technicalDetailId === null || $technicalDetailId <= 0) {
+            return $result;
+        }
+
+        try {
+            $previousSn = $this->writeReplacementToBilling($technicalDetailId, $newSn, $organizationId, $externalId);
+
+            if ($previousSn === null) {
+                $result['message'] .= ' The subscriber record already held this serial.';
+            } else {
+                $result['data']['billing_updated'] = true;
+                $result['message'] .= ' The subscriber record was updated to match.';
+            }
+        } catch (\DomainException $e) {
+            $this->log('warning', 'Replacement target is outside the caller organization.', [
+                'external_id' => $externalId,
+                'technical_detail_id' => $technicalDetailId,
+                'organization_id' => $organizationId,
+            ]);
+            $result['message'] .= ' The subscriber record was NOT updated: it belongs to another organization.';
+        } catch (Throwable $e) {
+            // The OLT swap stands. Saying so plainly is the point - the SN alignment
+            // tab is where the leftover difference is picked up and settled.
+            $this->log('error', 'Replacement serial could not be written to billing.', [
+                'external_id' => $externalId,
+                'technical_detail_id' => $technicalDetailId,
+                'error' => $e->getMessage(),
+            ]);
+            $result['message'] .= ' The ONU was replaced, but the subscriber record could not be updated - reconcile it from the Router/Modem SN tab.';
+        }
+
+        return $result;
+    }
+
+    /**
+     * One item of a batched ONU serial replacement.
+     *
+     * The same three ordered steps replaceOnuSn() applies, one queue entry per tick, so
+     * a truckroll's worth of modem swaps runs unattended through
+     * `cron:tool-jobs-drain` with its progress checkpointed in `tool_jobs`.
+     *
+     * A quota stop parks the job on the item that was refused rather than failing it -
+     * the checkpoint is the queue index, which is not advanced - so the resume applies
+     * that item and continues. A per-item failure is counted and the sweep moves on:
+     * one ONU SmartOLT will not accept must not strand the other thirty-nine.
+     *
+     * @param array<string, mixed> $job
+     * @return array<string, mixed>
+     */
+    private function stepReplaceSn(array $job): array
+    {
+        $context = $job['context'];
+        $queue = is_array($context['queue'] ?? null) ? $context['queue'] : [];
+        $index = (int) ($context['index'] ?? 0);
+
+        if ($index >= count($queue)) {
+            return $this->finishJob($job, self::STATUS_COMPLETED, 'ONU serial replacement completed.', [
+                'replaced' => (int) ($context['replaced'] ?? 0),
+                'skipped' => (int) ($context['skipped'] ?? 0),
+                'blocked' => (int) ($context['blocked'] ?? 0),
+                'failed' => (int) ($context['failed'] ?? 0),
+            ]);
+        }
+
+        $scopeId = $context['organization_id'] ?? null;
+
+        $item = $queue[$index];
+        $externalId = trim((string) ($item['external_id'] ?? ''));
+        $newSn = trim((string) ($item['new_sn'] ?? ''));
+        $tdId = (int) ($item['technical_detail_id'] ?? 0);
+
+        $verdict = $this->checkReplacement($externalId, $newSn);
+
+        if (!$verdict['ok']) {
+            // A local refusal - unknown ONU, serial already provisioned elsewhere,
+            // SmartOLT unconfigured. Recorded against the item, not fatal to the run.
+            $context['blocked'] = (int) ($context['blocked'] ?? 0) + 1;
+            $this->log('warning', 'Batched serial replacement refused.', [
+                'external_id' => $externalId,
+                'reason' => $verdict['message'],
+            ]);
+        } elseif ($verdict['skip']) {
+            $context['skipped'] = (int) ($context['skipped'] ?? 0) + 1;
+        } else {
+            $pushed = $this->pushReplacementToOlt($externalId, $newSn, $verdict['current_sn']);
+
+            if (!$pushed['success'] && $pushed['rate_limited']) {
+                // Park without advancing the index, so the resume retries this item.
+                return $this->pauseForRateLimit(
+                    $job,
+                    $context,
+                    sprintf('Serial replacement stopped at %d of %d.', $index + 1, count($queue))
+                );
+            }
+
+            if (!$pushed['success']) {
+                $context['failed'] = (int) ($context['failed'] ?? 0) + 1;
+            } else {
+                $context['replaced'] = (int) ($context['replaced'] ?? 0) + 1;
+
+                if ($tdId > 0) {
+                    try {
+                        $this->writeReplacementToBilling($tdId, $newSn, $scopeId, $externalId);
+                    } catch (\DomainException $e) {
+                        // Refused on scope, not broken. The OLT swap stands and is
+                        // logged; the billing difference surfaces on the SN tab.
+                        $this->log('warning', 'Batched replacement target is outside the job scope.', [
+                            'external_id' => $externalId,
+                            'technical_detail_id' => $tdId,
+                            'organization_id' => $scopeId,
+                        ]);
+                    } catch (Throwable $e) {
+                        $this->log('error', 'Batched replacement serial could not be written to billing.', [
+                            'external_id' => $externalId,
+                            'technical_detail_id' => $tdId,
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
+                }
+            }
+        }
+
+        $context['index'] = $index + 1;
+
+        return $this->saveJob($job, [
+            'current' => $index + 1,
+            'message' => sprintf('Replacing ONU serial %d of %d.', $index + 1, count($queue)),
+            'context' => $context,
+        ]);
+    }
+
+    /**
+     * Put the previous serial back on an ONU whose replacement is being reversed.
+     *
+     * Routed here from undoOperation() on the shape of the snapshot, not on the
+     * action name, exactly as the SN-alignment reversal is. Refuses when the ONU no
+     * longer carries the serial this operation wrote: something has changed it since,
+     * and restoring a snapshot older than that change would undo their work too.
+     *
+     * @param array<string, mixed> $data
+     * @return array{success: bool, skipped: bool, message: string}
+     */
+    private function undoReplaceOnuSn(ActivityLog $entry, array $data, int $logId): array
+    {
+        $externalId = (string) ($data['external_id'] ?? '');
+        $previous = is_array($data['previous_state'] ?? null) ? $data['previous_state'] : [];
+        $applied = is_array($data['new_state'] ?? null) ? $data['new_state'] : [];
+
+        $previousSn = trim((string) ($previous['sn'] ?? ''));
+        $appliedSn = trim((string) ($applied['sn'] ?? ''));
+
+        if ($externalId === '' || $previousSn === '') {
+            return $this->failure("Operation #{$logId} carries no previous serial to restore.");
+        }
+
+        $inventory = $this->cachedInventory();
+        $currentSn = trim((string) ($inventory['items'][$externalId]['sn'] ?? ''));
+
+        if ($currentSn !== '' && $appliedSn !== '' && $this->normalizeSerial($currentSn) !== $this->normalizeSerial($appliedSn)) {
+            return $this->failure(sprintf(
+                "ONU %s now carries serial '%s', not the '%s' this operation applied. Reversing would discard that change - resolve it by hand.",
+                $externalId,
+                $currentSn,
+                $appliedSn
+            ));
+        }
+
+        $restore = $this->replaceOnuSn($externalId, $previousSn);
+
+        if (!$restore['success']) {
+            return $this->failure('The reversal was refused: ' . $restore['message']);
+        }
+
+        $data['reversed'] = true;
+        $data['reversed_at'] = now()->toIso8601String();
+        $data['reversed_by'] = auth()->id();
+        $entry->additional_data = $data;
+        $entry->save();
+
+        $this->recordLog(
+            'undo_' . $entry->action,
+            "Reversed operation #{$logId} - ONU {$externalId} put back on serial '{$previousSn}'.",
+            $externalId,
+            $applied,
+            $previous,
+            false,
+            ['reverted_log_id' => $logId]
+        );
+
+        return [
+            'success' => true,
+            'skipped' => (bool) ($restore['skipped'] ?? false),
+            'message' => "Operation #{$logId} reversed.",
+        ];
+    }
+
+    // =========================================================================
     // Unattended daily automation
     // =========================================================================
 
     /**
      * The nightly SmartOLT pass, in one call.
      *
-     * Refresh the ONU inventory and statuses, read who is authenticating on the
-     * RADIUS estate, name every matched ONU for its subscriber's RADIUS username,
-     * and unprovision what has been dark long enough and is safe to remove.
+     * The whole reconciliation pipeline, end to end, with nobody watching:
+     *
+     *  0. drain any operator job a quota stop parked earlier
+     *  1. refresh the ONU inventory, zones and VLAN assignments
+     *  2. refresh ONU statuses from the OLT
+     *  3. discover the bridge MAC of every ONU never crawled
+     *  4. match those MACs to live PPPoE sessions and rename each matched ONU to its
+     *     subscriber's RADIUS username
+     *  5. adopt the SmartOLT hardware serial as that subscriber's router/modem SN
+     *  6. unprovision what has been dark long enough and clears every safety guard
+     *
+     * Phases 3 and 5 previously existed only as operator buttons. The command already
+     * accepted flags for them, so a deployment reading `--help` would reasonably have
+     * believed they ran; they did not, and on a growing estate that meant every ONU
+     * installed since the last manual crawl silently matched nothing.
      *
      * Resumability without a checkpoint row. Every phase re-derives what is left to
      * do from current state rather than from a saved cursor: a rename is skipped once
@@ -2615,16 +3424,22 @@ class SmartOltReconciliationService
      * simply finds less to do. Any operator job parked by the same quota stop is
      * drained first, from its own checkpoint in tool_jobs.
      *
-     * Every SmartOLT and RouterOS call here is outside a transaction. This engine
-     * writes no billing rows at all; its only database writes are activity_logs
-     * audit entries, made by recordLog() after each accepted change.
+     * Every SmartOLT and RouterOS call here is outside a transaction. The one phase
+     * that writes a billing row - phase 5, the router/modem SN adoption - opens its
+     * own transaction per subscriber, inside the loop, so a single row that cannot be
+     * written never rolls back the hundreds that already were. Everything else this
+     * engine writes is an activity_logs audit entry made after an accepted change.
      *
      * @param array{
      *     offline_days?: int,
+     *     discovery?: bool,
      *     rename?: bool,
+     *     sn_alignment?: bool,
      *     cleanup?: bool,
      *     dry_run?: bool,
+     *     max_discovery?: int,
      *     max_renames?: int,
+     *     max_sn?: int,
      *     max_deletes?: int
      * } $options
      * @return array{success:int,failed:int,skipped:int,errors:array<int,mixed>,phases:array<string,mixed>}
@@ -2634,18 +3449,26 @@ class SmartOltReconciliationService
         $result = ['success' => 0, 'failed' => 0, 'skipped' => 0, 'errors' => [], 'phases' => []];
 
         $offlineDays = max(1, (int) ($options['offline_days'] ?? self::AUTOMATION_OFFLINE_DAYS));
+        $doDiscovery = (bool) ($options['discovery'] ?? true);
         $doRename = (bool) ($options['rename'] ?? true);
+        $doSnAlignment = (bool) ($options['sn_alignment'] ?? true);
         $doCleanup = (bool) ($options['cleanup'] ?? true);
         $dryRun = (bool) ($options['dry_run'] ?? false);
+        $maxDiscovery = max(0, (int) ($options['max_discovery'] ?? self::AUTOMATION_MAX_DISCOVERY));
         $maxRenames = max(0, (int) ($options['max_renames'] ?? 500));
+        $maxSn = max(0, (int) ($options['max_sn'] ?? self::AUTOMATION_MAX_SN_UPDATES));
         $maxDeletes = max(0, (int) ($options['max_deletes'] ?? 100));
 
         $this->log('info', 'SmartOLT daily automation starting.', [
             'offline_days' => $offlineDays,
+            'discovery' => $doDiscovery,
             'rename' => $doRename,
+            'sn_alignment' => $doSnAlignment,
             'cleanup' => $doCleanup,
             'dry_run' => $dryRun,
+            'max_discovery' => $maxDiscovery,
             'max_renames' => $maxRenames,
+            'max_sn' => $maxSn,
             'max_deletes' => $maxDeletes,
         ]);
 
@@ -2688,12 +3511,27 @@ class SmartOltReconciliationService
             $doCleanup = false;
         }
 
-        // ---- Phase 3 & 4: MAC match and rename to the RADIUS username --------
+        // ---- Phase 3: bridge MAC discovery for anything never crawled --------
+        //
+        // Ahead of the two matching phases on purpose. Both bind an ONU to a live
+        // PPPoE session through its bridge MAC, so an ONU installed since the last
+        // run matches nothing until this has read it. Running discovery after them
+        // would mean every new install waited a full extra day to be aligned.
+        if ($doDiscovery) {
+            $result['phases']['discovery'] = $this->automateDiscovery($result, $dryRun, $maxDiscovery);
+        }
+
+        // ---- Phase 4: MAC match and rename to the RADIUS username ------------
         if ($doRename) {
             $result['phases']['rename'] = $this->automateRenames($result, $organizationId, $dryRun, $maxRenames);
         }
 
-        // ---- Phase 5: 3-day offline / LOS / PwrFail cleanup ------------------
+        // ---- Phase 5: adopt the SmartOLT serial as the billing router/modem SN
+        if ($doSnAlignment) {
+            $result['phases']['sn_alignment'] = $this->automateSnAlignment($result, $organizationId, $dryRun, $maxSn);
+        }
+
+        // ---- Phase 6: 3-day offline / LOS / PwrFail cleanup ------------------
         if ($doCleanup) {
             $result['phases']['cleanup'] = $this->automateCleanup($result, $organizationId, $offlineDays, $dryRun, $maxDeletes);
         }
@@ -2929,6 +3767,181 @@ class SmartOltReconciliationService
     }
 
     /**
+     * Read the bridge MAC of every ONU this estate has never crawled.
+     *
+     * The phase that makes every later one possible: the MAC behind an ONU is what
+     * binds it to a live PPPoE session, and without it the rename and SN phases have
+     * nothing to match on. An ONU installed since the last run is exactly the case
+     * that needs it, and exactly the case the old pipeline never covered - discovery
+     * was an operator button and nothing else, so a nightly run on a growing estate
+     * quietly matched fewer and fewer ONUs.
+     *
+     * Cheap by construction. Only ONUs with no stored reading are queued, and readings
+     * are kept indefinitely, so a settled estate makes no calls at all. `$max` bounds
+     * the morning after a batch of installs; whatever is left is picked up tomorrow.
+     *
+     * @param array<string, mixed> $result
+     * @return array<string, mixed>
+     */
+    private function automateDiscovery(array &$result, bool $dryRun, int $max): array
+    {
+        $phase = ['queued' => 0, 'checked' => 0, 'with_macs' => 0, 'remaining' => 0, 'rate_limited' => false, 'failed' => 0];
+
+        $inventory = $this->cachedInventory();
+        $macCache = $this->cachedBridgeMacs();
+        $pending = array_diff(array_keys($inventory['items']), array_keys($macCache['items']));
+
+        $phase['queued'] = count($pending);
+
+        if ($phase['queued'] === 0 || $max <= 0) {
+            return $phase;
+        }
+
+        if ($dryRun) {
+            $phase['remaining'] = $phase['queued'];
+            $result['skipped'] += $phase['queued'];
+
+            return $phase;
+        }
+
+        try {
+            // stopOnRateLimit: an unattended pass gains nothing by spending the rest of
+            // its budget on calls the quota will refuse one after another.
+            $discovery = $this->discoverBridgeMacs([], $max, true);
+        } catch (Throwable $e) {
+            $phase['failed']++;
+            $result['failed']++;
+            $result['errors'][] = 'Bridge MAC discovery: ' . $e->getMessage();
+            $this->log('error', 'Bridge MAC discovery phase failed.', ['error' => $e->getMessage()]);
+
+            return $phase;
+        }
+
+        $phase['checked'] = (int) ($discovery['checked'] ?? 0);
+        $phase['remaining'] = (int) ($discovery['remaining'] ?? 0);
+        $phase['rate_limited'] = (bool) ($discovery['rate_limited'] ?? false);
+        $phase['with_macs'] = count(array_filter(
+            $discovery['items'] ?? [],
+            static fn (array $item): bool => ($item['mac_address'] ?? '') !== ''
+        ));
+
+        $result['success'] += $phase['checked'];
+
+        foreach ($discovery['errors'] ?? [] as $error) {
+            $result['errors'][] = 'MAC discovery: ' . $error;
+        }
+
+        if ($phase['rate_limited']) {
+            $result['errors'][] = 'Bridge MAC discovery stopped on the SmartOLT rate limit.';
+        }
+
+        return $phase;
+    }
+
+    /**
+     * Adopt the SmartOLT hardware serial as the matched subscriber's router/modem SN.
+     *
+     * The unattended form of the Router/Modem SN tab. Direction is one-way and is not
+     * negotiable: SmartOLT reads the serial off the device, so it is the source of
+     * truth and billing is the copy. Nothing in this phase ever pushes a billing value
+     * back to the OLT.
+     *
+     * Only rows the preview marked write-eligible are touched, and each one is
+     * re-checked under `lockForUpdate` at write time rather than trusted from the
+     * preview - so a serial another operator or a service order set in the seconds
+     * since is counted as a skip, not overwritten. A second run of a finished pass
+     * therefore ends with `written = 0` and `failed = 0`.
+     *
+     * The transaction is per subscriber and sits inside the loop. One row that cannot
+     * be written must not roll back the four hundred that already were.
+     *
+     * @param array<string, mixed> $result
+     * @return array<string, mixed>
+     */
+    private function automateSnAlignment(array &$result, ?int $organizationId, bool $dryRun, int $max): array
+    {
+        $phase = ['candidates' => 0, 'written' => 0, 'skipped' => 0, 'blocked' => 0, 'failed' => 0, 'capped' => false];
+
+        try {
+            $preview = $this->getSnAlignmentPreview($organizationId);
+        } catch (Throwable $e) {
+            $result['failed']++;
+            $result['errors'][] = 'SN alignment: ' . $e->getMessage();
+            $this->log('error', 'SN alignment preview failed.', ['error' => $e->getMessage()]);
+
+            return $phase;
+        }
+
+        foreach ($preview['errors'] as $error) {
+            $result['errors'][] = 'RADIUS: ' . $error;
+        }
+
+        foreach ($preview['rows'] as $row) {
+            if (($row['eligible'] ?? false) !== true) {
+                continue;
+            }
+
+            $tdId = (int) ($row['technical_detail_id'] ?? 0);
+            $newSn = trim((string) ($row['sn'] ?? ''));
+
+            if ($tdId <= 0 || $newSn === '') {
+                continue;
+            }
+
+            $phase['candidates']++;
+
+            if ($phase['written'] >= $max) {
+                // Budget spent. Nothing is lost: eligibility is recomputed next run.
+                $phase['capped'] = true;
+                $phase['skipped']++;
+                $result['skipped']++;
+                continue;
+            }
+
+            if ($dryRun) {
+                $phase['skipped']++;
+                $result['skipped']++;
+                continue;
+            }
+
+            try {
+                $previousSn = $this->writeReplacementToBilling(
+                    $tdId,
+                    $newSn,
+                    $organizationId,
+                    (string) ($row['external_id'] ?? ''),
+                    'cron:smartolt-daily-automation'
+                );
+
+                if ($previousSn === null) {
+                    $phase['skipped']++;
+                    $result['skipped']++;
+                } else {
+                    $phase['written']++;
+                    $result['success']++;
+                }
+            } catch (\DomainException $e) {
+                // Refused on scope, not broken - counted apart from real failures.
+                $phase['blocked']++;
+                $this->log('warning', 'Automated SN alignment target is outside the run scope.', [
+                    'technical_detail_id' => $tdId,
+                    'organization_id' => $organizationId,
+                ]);
+            } catch (Throwable $e) {
+                $phase['failed']++;
+                $result['failed']++;
+                $result['errors'][] = ['technical_detail_id' => $tdId, 'error' => $e->getMessage()];
+                $this->log('error', 'Automated SN alignment write failed.', [
+                    'technical_detail_id' => $tdId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $phase;
+    }
+
+    /**
      * Unprovision ONUs dark for the threshold and cleared by every safety guard.
      *
      * Each candidate is revalidated immediately before its delete fires — the
@@ -3091,6 +4104,14 @@ class SmartOltReconciliationService
         // so a renamed action string cannot route a DB change into the ONU path.
         if (array_key_exists('technical_detail_id', $previous)) {
             return $this->undoSnAlignment($entry, $data, $logId);
+        }
+
+        // A serial replacement is reversed through replace_onu_sn, not through
+        // update_location_details - the generic path below has no field for `sn` and
+        // would report the snapshot as unrestorable. Detected on the snapshot shape
+        // for the same reason as above: a renamed action string must not misroute it.
+        if (array_key_exists('sn', $previous)) {
+            return $this->undoReplaceOnuSn($entry, $data, $logId);
         }
 
         if ($externalId === '' || $previous === []) {
@@ -3633,7 +4654,9 @@ class SmartOltReconciliationService
      *     usernames: array<string, array<int, string>>,
      *     sessions_available: bool,
      *     online: array<string, bool>,
-     *     session_errors: array<int, string>
+     *     session_errors: array<int, string>,
+     *     pullouts_by_account: array<string, array<int, array{id: int, is_done: bool, status: ?string, visit_status: ?string}>>,
+     *     pullouts_by_serial: array<string, array<int, array{id: int, is_done: bool, status: ?string, visit_status: ?string}>>
      * }
      */
     private function buildSafetyMap(?int $organizationId = null): array
@@ -3648,12 +4671,16 @@ class SmartOltReconciliationService
             $accounts = [];
             $jobs = [];
             $usernames = [];
+            $pulloutsByAccount = [];
+            $pulloutsBySerial = [];
 
             DB::table('technical_details as td')
                 ->join('billing_accounts as ba', 'ba.id', '=', 'td.account_id')
                 ->whereNotNull('td.router_modem_sn')
                 ->where('td.router_modem_sn', '!=', '')
-                ->select(['td.router_modem_sn', 'td.username', 'ba.billing_status_id'])
+                // account_no links a serial to the pullout Service Orders raised on its
+                // account - see pulloutVerdict().
+                ->select(['td.router_modem_sn', 'td.username', 'ba.billing_status_id', 'ba.account_no'])
                 ->orderBy('td.id')
                 ->chunk(self::SUBSCRIBER_CHUNK, function ($chunk) use (&$accounts, &$usernames): void {
                     foreach ($chunk as $row) {
@@ -3662,7 +4689,10 @@ class SmartOltReconciliationService
                             continue;
                         }
 
-                        $accounts[$serial][] = ['billing_status_id' => $row->billing_status_id];
+                        $accounts[$serial][] = [
+                            'billing_status_id' => $row->billing_status_id,
+                            'account_no' => $row->account_no,
+                        ];
 
                         $username = trim((string) ($row->username ?? ''));
                         if ($username !== '') {
@@ -3685,6 +4715,25 @@ class SmartOltReconciliationService
                     }
                 });
 
+            // Pullout Service Orders, indexed by account and by serial. An ONU is only
+            // deletable once one of these is Done for it - see pulloutVerdict(). The
+            // LOWER/TRIM filter cannot use an index, so this is a full scan of
+            // service_orders; it runs once per instance behind the memo above.
+            // Organization scope, when given, narrows only this read: a pullout on a
+            // row with no organization_id then cannot clear the ONU, which fails closed.
+            DB::table('service_orders')
+                ->where(function ($query): void {
+                    $query->whereIn(DB::raw("LOWER(TRIM(COALESCE(concern, '')))"), self::PULLOUT_CONCERNS)
+                        ->orWhere(DB::raw("LOWER(TRIM(COALESCE(repair_category, '')))"), '=', self::PULLOUT_REPAIR_CATEGORY);
+                })
+                ->when($organizationId !== null, fn ($query) => $query->where('organization_id', $organizationId))
+                ->select(['id', 'account_no', 'status', 'visit_status', 'old_router_modem_sn', 'new_router_modem_sn'])
+                ->chunkById(self::SUBSCRIBER_CHUNK, function ($chunk) use (&$pulloutsByAccount, &$pulloutsBySerial): void {
+                    foreach ($chunk as $row) {
+                        $this->indexPulloutOrder($row, $pulloutsByAccount, $pulloutsBySerial);
+                    }
+                }, 'id');
+
             // Who is authenticating right now. An ONU whose subscriber holds a live
             // PPPoE session is in service whatever the OLT last reported, and is the
             // single most important thing standing between this sweep and a customer
@@ -3704,6 +4753,8 @@ class SmartOltReconciliationService
                 'sessions_available' => $sessions['available'],
                 'online' => $online,
                 'session_errors' => $sessions['errors'],
+                'pullouts_by_account' => $pulloutsByAccount,
+                'pullouts_by_serial' => $pulloutsBySerial,
             ];
         } catch (Throwable $e) {
             $this->log('error', 'Could not build the cleanup safety map.', ['error' => $e->getMessage()]);
@@ -3716,6 +4767,8 @@ class SmartOltReconciliationService
                 'sessions_available' => false,
                 'online' => [],
                 'session_errors' => [$e->getMessage()],
+                'pullouts_by_account' => [],
+                'pullouts_by_serial' => [],
             ];
         }
 

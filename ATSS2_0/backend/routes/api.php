@@ -185,6 +185,9 @@ Route::put('/smart-olt/{id}', [\App\Http\Controllers\SmartOltController::class ,
 Route::delete('/smart-olt/{id}', [\App\Http\Controllers\SmartOltController::class , 'destroy']);
 Route::get('/reconnection-logs', [ReconnectionLogsController::class , 'index']);
 Route::get('/data-logs', [\App\Http\Controllers\Api\DataLogsController::class , 'index']);
+Route::get('/modem-router-logs', [\App\Http\Controllers\Api\ModemRouterLogsController::class, 'index']);
+Route::get('/modem-router-logs/sn/{sn}', [\App\Http\Controllers\Api\ModemRouterLogsController::class, 'getBySn']);
+Route::get('/modem-router-logs/summary', [\App\Http\Controllers\Api\ModemRouterLogsController::class, 'summary']);
 // The RADIUS retry queue, read-only.
 Route::get('/radius-queue', [\App\Http\Controllers\Api\RadiusQueueController::class , 'index']);
 
@@ -4020,6 +4023,7 @@ Route::middleware('auth:sanctum')->prefix('radius-reconciliation')->group(functi
     Route::get('/export', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'export']);
 
     Route::post('/sync-password', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncPassword']);
+    Route::post('/align-username', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'alignUsername']);
     Route::post('/sync-group-mikrotik', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncGroupMikrotik']);
     Route::post('/sync-group-billing', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'syncGroupBilling']);
     Route::post('/restrict', [\App\Http\Controllers\Api\RadiusReconciliationController::class, 'restrict']);
@@ -4065,6 +4069,10 @@ Route::middleware('auth:sanctum')->prefix('smartolt-reconciliation')->group(func
     Route::post('/start-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'startJob']);
     Route::post('/process-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'processJob']);
     Route::post('/abort-job', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'abortJob']);
+    // Hardware swap for one ONU. Not a job: it is a single call the operator makes
+    // from a confirmation modal and needs the answer to immediately, unlike the
+    // sweeps above which run in slices against a quota.
+    Route::post('/replace-sn', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'replaceSn']);
     Route::post('/undo', [\App\Http\Controllers\Api\SmartOltReconciliationController::class, 'undo']);
 });
 

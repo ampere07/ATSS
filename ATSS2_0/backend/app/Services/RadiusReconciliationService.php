@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\ActivityLog;
 use App\Models\RadiusConfig;
+use App\Services\PppoeUsernameService;
 use App\Support\PlanGroup;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
@@ -98,6 +99,7 @@ class RadiusReconciliationService
         'restrict',
         'disconnect',
         'delete',
+        'align_username',
     ];
 
     private const LOG_CHANNEL       = 'radiusrelated';
@@ -329,15 +331,28 @@ class RadiusReconciliationService
         }
 
         // Active in billing but absent from every targeted device.
+        $pppoeHelper = new PppoeUsernameService();
         foreach ($billing as $username => $bill) {
             if (isset($seen[$username])) {
                 continue;
             }
 
+            $formatCheck = $pppoeHelper->validateUsernameFormat($username, [
+                'first_name'     => $bill['first_name'] ?? '',
+                'middle_initial' => $bill['middle_initial'] ?? '',
+                'last_name'      => $bill['last_name'] ?? '',
+                'mobile_number'  => $bill['mobile_number'] ?? '',
+                'lcp'            => $bill['lcp'] ?? '',
+                'nap'            => $bill['nap'] ?? '',
+                'port'           => $bill['port'] ?? '',
+                'lcpnap'         => $bill['lcpnap'] ?? '',
+            ]);
+
             $rows[] = [
                 'username'          => $username,
                 'account_no'        => $bill['account_no'],
                 'customer_name'     => $bill['customer_name'],
+                'account_id'        => $bill['account_id'],
                 'state'             => self::STATE_MISSING_RADIUS,
                 'server_id'         => null,
                 'server_label'      => '—',
@@ -354,6 +369,9 @@ class RadiusReconciliationService
                 'session_ip'        => null,
                 'session_mac'       => null,
                 'duplicate_servers' => [],
+                'is_format_valid'   => $formatCheck['valid'],
+                'format_issue'      => $formatCheck['reason'],
+                'suggested_username'=> $formatCheck['suggested'],
             ];
         }
 
@@ -492,10 +510,25 @@ class RadiusReconciliationService
             $state = self::STATE_SYNCED;
         }
 
+        $formatCheck = (new PppoeUsernameService())->validateUsernameFormat(
+            $username,
+            $bill ? [
+                'first_name'     => $bill['first_name'] ?? '',
+                'middle_initial' => $bill['middle_initial'] ?? '',
+                'last_name'      => $bill['last_name'] ?? '',
+                'mobile_number'  => $bill['mobile_number'] ?? '',
+                'lcp'            => $bill['lcp'] ?? '',
+                'nap'            => $bill['nap'] ?? '',
+                'port'           => $bill['port'] ?? '',
+                'lcpnap'         => $bill['lcpnap'] ?? '',
+            ] : null
+        );
+
         return [
             'username'          => $username,
             'account_no'        => $bill['account_no'] ?? null,
             'customer_name'     => $bill['customer_name'] ?? null,
+            'account_id'        => $bill['account_id'] ?? null,
             'state'             => $state,
             'server_id'         => $server['id'],
             'server_label'      => $server['label'],
@@ -512,6 +545,9 @@ class RadiusReconciliationService
             'session_ip'        => $session['ip'] ?? null,
             'session_mac'       => $session['mac'] ?? null,
             'duplicate_servers' => $isDuplicate ? array_values($onServers) : [],
+            'is_format_valid'   => $formatCheck['valid'],
+            'format_issue'      => $formatCheck['reason'],
+            'suggested_username'=> $formatCheck['suggested'],
         ];
     }
 
@@ -604,12 +640,18 @@ class RadiusReconciliationService
                 'td.id as td_id',
                 'td.username',
                 'td.pppoe_password',
+                'td.lcp',
+                'td.nap',
+                'td.port',
+                'td.lcpnap',
                 'ba.id as account_id',
                 'ba.account_no',
                 'ba.billing_status_id',
                 'c.id as customer_id',
                 'c.first_name',
+                'c.middle_initial',
                 'c.last_name',
+                'c.contact_number_primary',
                 'c.desired_plan',
             ]);
 
@@ -635,6 +677,14 @@ class RadiusReconciliationService
                     'account_no'        => $row->account_no,
                     'customer_id'       => $row->customer_id !== null ? (int) $row->customer_id : null,
                     'customer_name'     => trim(($row->first_name ?? '') . ' ' . ($row->last_name ?? '')) ?: null,
+                    'first_name'        => (string) ($row->first_name ?? ''),
+                    'middle_initial'    => (string) ($row->middle_initial ?? ''),
+                    'last_name'         => (string) ($row->last_name ?? ''),
+                    'mobile_number'     => (string) ($row->contact_number_primary ?? ''),
+                    'lcp'               => (string) ($row->lcp ?? ''),
+                    'nap'               => (string) ($row->nap ?? ''),
+                    'port'              => (string) ($row->port ?? ''),
+                    'lcpnap'            => (string) ($row->lcpnap ?? ''),
                     'billing_status_id' => $row->billing_status_id,
                     'pppoe_password'    => (string) ($row->pppoe_password ?? ''),
                     'plan_label'        => $planLabel,
@@ -937,6 +987,133 @@ class RadiusReconciliationService
         );
 
         return $this->success("Billing password for '{$username}' now matches the RADIUS device.");
+    }
+
+    /**
+     * Update a subscriber's PPPoE username in the database (technical_details and job_orders)
+     * and automatically sync the rename to MikroTik User Manager if present.
+     *
+     * @param string $currentUsername
+     * @param string $newUsername
+     * @param int|null $organizationId
+     * @param int|null $serverId
+     * @return array<string, mixed>
+     */
+    public function alignUsername(string $currentUsername, string $newUsername, ?int $organizationId = null, ?int $serverId = null): array
+    {
+        $currentUsername = trim($currentUsername);
+        $newUsername     = trim($newUsername);
+
+        if ($currentUsername === '') {
+            return $this->failure('Current username is required.');
+        }
+
+        if ($newUsername === '') {
+            return $this->failure('New username cannot be empty.');
+        }
+
+        if ($currentUsername === $newUsername) {
+            return $this->skipped("Username is already '{$newUsername}'.");
+        }
+
+        $technical = DB::table('technical_details')->where('username', $currentUsername)->first();
+        if ($technical === null) {
+            return $this->failure("No billing record found with the PPPoE username '{$currentUsername}'.");
+        }
+
+        if ($organizationId !== null && $technical->organization_id !== null && (int)$technical->organization_id !== $organizationId) {
+            return $this->failure("Subscriber record belongs to another organization.");
+        }
+
+        // Check uniqueness of new username
+        $conflictTech = DB::table('technical_details')
+            ->where('username', $newUsername)
+            ->where('id', '!=', $technical->id)
+            ->exists();
+
+        if ($conflictTech) {
+            return $this->failure("The username '{$newUsername}' is already used by another account in technical details.");
+        }
+
+        $jobOrders = DB::table('job_orders')
+            ->where('account_id', $technical->account_id)
+            ->get();
+
+        $previous = [
+            'technical_details' => [
+                'id'       => (int) $technical->id,
+                'username' => $technical->username,
+            ],
+            'job_orders_count' => $jobOrders->count(),
+        ];
+
+        try {
+            DB::transaction(function () use ($technical, $newUsername): void {
+                DB::table('technical_details')
+                    ->where('id', $technical->id)
+                    ->lockForUpdate()
+                    ->update([
+                        'username'   => $newUsername,
+                        'updated_at' => now(),
+                    ]);
+
+                DB::table('job_orders')
+                    ->where('account_id', $technical->account_id)
+                    ->lockForUpdate()
+                    ->update([
+                        'pppoe_username' => $newUsername,
+                        'username'       => $newUsername,
+                        'updated_at'     => now(),
+                    ]);
+            });
+
+            // Automated MikroTik User Manager sync (outside DB transaction per Rule 4.3)
+            $routerRenamed = false;
+            $located = $this->locateUser($currentUsername, $serverId, null, $organizationId);
+            if ($located['success'] && isset($located['config']) && isset($located['user'])) {
+                /** @var RadiusConfig $config */
+                $config = $located['config'];
+                $currentRad = $located['user'];
+                try {
+                    $routerApi = app(RouterosApiService::class);
+                    $renamed = $routerApi->updateUser($config, (string) $currentRad['id'], ['name' => $newUsername]);
+                    if ($renamed) {
+                        $routerRenamed = true;
+                        // Disconnect active session if online so it re-authenticates with new credentials
+                        $this->disconnectSession($currentUsername, (int) $config->id, $organizationId);
+                    }
+                } catch (Throwable $re) {
+                    $this->log('warning', "Failed to rename account '{$currentUsername}' on MikroTik router.", [
+                        'error' => $re->getMessage(),
+                    ]);
+                }
+            }
+
+            $this->recordLog(
+                'align_username',
+                "Aligned PPPoE username from '{$currentUsername}' to '{$newUsername}' on database" . ($routerRenamed ? " and MikroTik router." : "."),
+                $newUsername,
+                $previous,
+                ['technical_details' => ['id' => $technical->id, 'username' => $newUsername]],
+                $located['config']->id ?? null,
+                true,
+                ['account_id' => $technical->account_id, 'old_username' => $currentUsername, 'router_renamed' => $routerRenamed]
+            );
+
+            // Invalidate snapshot cache so the table refreshes
+            Cache::forget(self::SNAPSHOT_PREFIX . self::SERVER_ALL);
+
+            $msg = $routerRenamed
+                ? "PPPoE username successfully aligned and updated to '{$newUsername}' on database and MikroTik router."
+                : "PPPoE username successfully aligned and updated to '{$newUsername}' on database.";
+
+            return $this->success($msg);
+        } catch (Throwable $e) {
+            $this->log('error', "Failed to align username from '{$currentUsername}' to '{$newUsername}'.", [
+                'error' => $e->getMessage()
+            ]);
+            return $this->failure("Database error while updating username: " . $e->getMessage());
+        }
     }
 
     /**
@@ -1411,6 +1588,9 @@ class RadiusReconciliationService
                     'delete'              => $itemServerId === null
                         ? $this->failure("'{$username}' cannot be deleted without naming the server it lives on.")
                         : $this->deleteFromRadius($username, $item['rad_id'] ?? null, $itemServerId, $organizationId),
+                    'align_username'      => empty($item['suggested_username'])
+                        ? $this->skipped("No suggested username available to align '{$username}'.")
+                        : $this->alignUsername($username, (string) $item['suggested_username'], $organizationId, $itemServerId),
                     default               => $this->failure("Unknown bulk operation '{$operation}'."),
                 };
 
@@ -1731,6 +1911,7 @@ class RadiusReconciliationService
         try {
             $outcome = match ($entry->action) {
                 'sync_password'                        => $this->undoPasswordSync($previous),
+                'align_username'                       => $this->undoAlignUsername($previous, $username),
                 'sync_group_billing'                   => $this->undoBillingGroup($previous),
                 'sync_group_mikrotik', 'restrict'      => $this->undoDeviceGroup($username, $previous, $serverId, $organizationId),
                 'add_user'                             => $this->undoAdd($username, $serverId, $organizationId),
@@ -1799,6 +1980,52 @@ class RadiusReconciliationService
         });
 
         return $this->success('The previous billing password was restored.');
+    }
+
+    /**
+     * Reversal for align_username.
+     *
+     * @param array<string, mixed> $previous
+     * @param string $currentUsername
+     * @return array<string, mixed>
+     */
+    private function undoAlignUsername(array $previous, string $currentUsername): array
+    {
+        $technical = is_array($previous['technical_details'] ?? null) ? $previous['technical_details'] : null;
+
+        if ($technical === null || empty($technical['username'])) {
+            return $this->failure('The snapshot holds no previous username state to restore.');
+        }
+
+        $oldUsername = $technical['username'];
+        $techId      = (int) $technical['id'];
+
+        try {
+            DB::transaction(function () use ($techId, $oldUsername): void {
+                DB::table('technical_details')
+                    ->where('id', $techId)
+                    ->lockForUpdate()
+                    ->update(['username' => $oldUsername, 'updated_at' => now()]);
+
+                $techRow = DB::table('technical_details')->where('id', $techId)->first();
+                if ($techRow) {
+                    DB::table('job_orders')
+                        ->where('account_id', $techRow->account_id)
+                        ->lockForUpdate()
+                        ->update([
+                            'pppoe_username' => $oldUsername,
+                            'username'       => $oldUsername,
+                            'updated_at'     => now(),
+                        ]);
+                }
+            });
+
+            Cache::forget(self::SNAPSHOT_PREFIX . self::SERVER_ALL);
+
+            return $this->success("The previous username '{$oldUsername}' was restored.");
+        } catch (Throwable $e) {
+            return $this->failure("Failed to restore username to '{$oldUsername}': " . $e->getMessage());
+        }
     }
 
     /**
