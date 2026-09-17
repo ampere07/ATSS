@@ -9,6 +9,8 @@ export interface RadiusServer {
   port: string | number;
   ssl_type: string;
   username: string;
+  is_fallback?: boolean;
+  fallback_for?: number | null;
 }
 
 /** The eight states an audited account can land in. */

@@ -138,6 +138,54 @@ class RadiusReconciliationService
     // =========================================================================
 
     /**
+     * Analyze and classify the configured RADIUS devices.
+     *
+     * If two configs share the same IP address, the subsequent one is not a new
+     * server, but a fallback/failover transport for that server (e.g. API SSL port 8729
+     * vs plain 8728).
+     *
+     * @return array<int, array{config: RadiusConfig, id: int, server_number: int, is_fallback: bool, fallback_for: ?int, label: string}>
+     */
+    public function classifiedConfigs(?int $organizationId = null): array
+    {
+        $configs = $this->resolver->orderedConfigs($organizationId)->values();
+        $classified = [];
+        $serverNumber = 0;
+        $ipMap = [];
+
+        foreach ($configs as $config) {
+            $ip = trim((string) $config->ip);
+            if (isset($ipMap[$ip])) {
+                $primaryNum = $ipMap[$ip]['server_number'];
+                $classified[(int) $config->id] = [
+                    'config'        => $config,
+                    'id'            => (int) $config->id,
+                    'server_number' => $primaryNum,
+                    'is_fallback'   => true,
+                    'fallback_for'  => $primaryNum,
+                    'label'         => "Server #{$primaryNum} Fallback ({$config->ip})",
+                ];
+            } else {
+                $serverNumber++;
+                $ipMap[$ip] = [
+                    'server_number' => $serverNumber,
+                    'primary_id'    => (int) $config->id,
+                ];
+                $classified[(int) $config->id] = [
+                    'config'        => $config,
+                    'id'            => (int) $config->id,
+                    'server_number' => $serverNumber,
+                    'is_fallback'   => false,
+                    'fallback_for'  => null,
+                    'label'         => "Server #{$serverNumber} ({$config->ip})",
+                ];
+            }
+        }
+
+        return $classified;
+    }
+
+    /**
      * The RADIUS devices this operator may target, safe for transport to the UI.
      *
      * Never includes the device password — the UI only ever needs to name a server,
@@ -147,19 +195,23 @@ class RadiusReconciliationService
      */
     public function getServers(?int $organizationId = null): array
     {
-        $configs = $this->resolver->orderedConfigs($organizationId);
+        $classified = $this->classifiedConfigs($organizationId);
 
-        return $configs->values()->map(function (RadiusConfig $config, int $index): array {
+        return array_values(array_map(function (array $item): array {
+            /** @var RadiusConfig $config */
+            $config = $item['config'];
             return [
-                'id'       => (int) $config->id,
-                'position' => $index + 1,
-                'label'    => 'Server #' . ($index + 1) . ' (' . $config->ip . ')',
-                'ip'       => $config->ip,
-                'port'     => $config->port,
-                'ssl_type' => $config->ssl_type ?: 'https',
-                'username' => $config->username,
+                'id'           => $item['id'],
+                'position'     => $item['server_number'],
+                'label'        => $item['label'],
+                'ip'           => $config->ip,
+                'port'         => $config->port,
+                'ssl_type'     => $config->ssl_type ?: 'https',
+                'username'     => $config->username,
+                'is_fallback'  => $item['is_fallback'],
+                'fallback_for' => $item['fallback_for'],
             ];
-        })->all();
+        }, $classified));
     }
 
     /**
@@ -192,10 +244,14 @@ class RadiusReconciliationService
      */
     private function labelFor(RadiusConfig $config, ?int $organizationId = null): string
     {
-        $configs = $this->resolver->orderedConfigs($organizationId)->values();
-        $position = $configs->search(fn (RadiusConfig $c): bool => (int) $c->id === (int) $config->id);
+        $classified = $this->classifiedConfigs($organizationId);
+        $cid = (int) $config->id;
 
-        return 'Server #' . (($position === false ? 0 : $position) + 1) . ' (' . $config->ip . ')';
+        if (isset($classified[$cid])) {
+            return $classified[$cid]['label'];
+        }
+
+        return 'Server (' . $config->ip . ')';
     }
 
     // =========================================================================
@@ -248,27 +304,111 @@ class RadiusReconciliationService
         $sessionsByServer = [];
         $serverMeta       = [];
 
-        foreach ($configs as $config) {
-            $serverKey = (int) $config->id;
-            $label     = $this->labelFor($config, $organizationId);
+        if ($isCombined) {
+            // Group configs by IP. For each IP, query the primary endpoint first;
+            // only query the fallback config if the primary endpoint fails to read users.
+            $configsByIp = [];
+            foreach ($configs as $config) {
+                $ip = trim((string) $config->ip);
+                $configsByIp[$ip][] = $config;
+            }
 
-            $serverMeta[$serverKey] = [
-                'id'    => $serverKey,
-                'label' => $label,
-                'ip'    => $config->ip,
-            ];
+            foreach ($configsByIp as $ip => $ipConfigs) {
+                $primaryConfig = $ipConfigs[0];
+                $primaryId     = (int) $primaryConfig->id;
+                $primaryLabel  = $this->labelFor($primaryConfig, $organizationId);
 
-            $users = $this->fetchUsers($config, $trace, $errors, $label);
-            $radiusByServer[$serverKey]   = $users;
-            $sessionsByServer[$serverKey] = $this->fetchSessions($config, $trace, $errors, $label);
+                $targetConfig = $primaryConfig;
+                $targetId     = $primaryId;
+                $targetLabel  = $primaryLabel;
 
-            $serverMeta[$serverKey]['user_count']    = count($users);
-            $serverMeta[$serverKey]['session_count'] = count($sessionsByServer[$serverKey]);
+                // Try reading users from the primary endpoint
+                $primaryErrors = [];
+                $primaryTrace  = [];
+                $users = $this->fetchUsers($primaryConfig, $primaryTrace, $primaryErrors, $primaryLabel);
+
+                // If primary endpoint failed and fallback config(s) exist for this IP, try fallback
+                if ($primaryErrors !== [] && count($ipConfigs) > 1) {
+                    $fallbackSucceeded = false;
+                    for ($i = 1; $i < count($ipConfigs); $i++) {
+                        $fallbackConfig = $ipConfigs[$i];
+                        $fallbackId     = (int) $fallbackConfig->id;
+                        $fallbackLabel  = $this->labelFor($fallbackConfig, $organizationId);
+
+                        $this->trace(
+                            $trace,
+                            "{$primaryLabel} failed to read users (" . implode(', ', $primaryErrors) . "); attempting fallback endpoint {$fallbackLabel}...",
+                            'WARNING'
+                        );
+
+                        $fallbackErrors = [];
+                        $fallbackTrace  = [];
+                        $fallbackUsers  = $this->fetchUsers($fallbackConfig, $fallbackTrace, $fallbackErrors, $fallbackLabel);
+
+                        if ($fallbackErrors === []) {
+                            $targetConfig      = $fallbackConfig;
+                            $targetId          = $fallbackId;
+                            $targetLabel       = $fallbackLabel;
+                            $users             = $fallbackUsers;
+                            $trace             = array_merge($trace, $fallbackTrace);
+                            $fallbackSucceeded = true;
+                            break;
+                        } else {
+                            $this->trace(
+                                $trace,
+                                "{$fallbackLabel} also failed: " . implode(', ', $fallbackErrors),
+                                'WARNING'
+                            );
+                        }
+                    }
+
+                    if (!$fallbackSucceeded) {
+                        $trace  = array_merge($trace, $primaryTrace);
+                        $errors = array_merge($errors, $primaryErrors);
+                    }
+                } else {
+                    $trace  = array_merge($trace, $primaryTrace);
+                    $errors = array_merge($errors, $primaryErrors);
+                }
+
+                $serverMeta[$targetId] = [
+                    'id'    => $targetId,
+                    'label' => $targetLabel,
+                    'ip'    => $targetConfig->ip,
+                ];
+
+                $sessions = $this->fetchSessions($targetConfig, $trace, $errors, $targetLabel);
+                $radiusByServer[$targetId]   = $users;
+                $sessionsByServer[$targetId] = $sessions;
+
+                $serverMeta[$targetId]['user_count']    = count($users);
+                $serverMeta[$targetId]['session_count'] = count($sessions);
+            }
+        } else {
+            foreach ($configs as $config) {
+                $serverKey = (int) $config->id;
+                $label     = $this->labelFor($config, $organizationId);
+
+                $serverMeta[$serverKey] = [
+                    'id'    => $serverKey,
+                    'label' => $label,
+                    'ip'    => $config->ip,
+                ];
+
+                $users = $this->fetchUsers($config, $trace, $errors, $label);
+                $radiusByServer[$serverKey]   = $users;
+                $sessionsByServer[$serverKey] = $this->fetchSessions($config, $trace, $errors, $label);
+
+                $serverMeta[$serverKey]['user_count']    = count($users);
+                $serverMeta[$serverKey]['session_count'] = count($sessionsByServer[$serverKey]);
+            }
         }
 
         // ---- 2. Cross-server duplicate detection -----------------------------
         // Only meaningful in combined mode; in single-server mode a username can
         // appear at most once so the map is always empty.
+        // A duplicate requires the account to exist across distinct server IP addresses
+        // (same IP on different ports is a primary/fallback relationship, not a duplicate server).
         $usernameServers = [];
         foreach ($radiusByServer as $sid => $users) {
             foreach (array_keys($users) as $username) {
@@ -277,7 +417,17 @@ class RadiusReconciliationService
         }
         $duplicateUsernames = array_keys(array_filter(
             $usernameServers,
-            static fn (array $sids): bool => count($sids) > 1
+            function (array $sids) use ($serverMeta): bool {
+                if (count($sids) <= 1) {
+                    return false;
+                }
+                $distinctIps = [];
+                foreach ($sids as $sid) {
+                    $ip = $serverMeta[$sid]['ip'] ?? (string) $sid;
+                    $distinctIps[$ip] = true;
+                }
+                return count($distinctIps) > 1;
+            }
         ));
 
         if ($duplicateUsernames !== []) {
@@ -375,14 +525,15 @@ class RadiusReconciliationService
             ];
         }
 
-        $summary = $this->summarize($rows, $configs->count(), count($billing), count($duplicates));
+        $distinctServerCount = count($radiusByServer);
+        $summary = $this->summarize($rows, $distinctServerCount, count($billing), count($duplicates));
 
         $this->trace(
             $trace,
             sprintf(
                 'Reconciliation complete in %sms across %d device(s): %d row(s), %d duplicate account(s).',
                 round((microtime(true) - $started) * 1000, 2),
-                $configs->count(),
+                $distinctServerCount,
                 count($rows),
                 count($duplicates)
             ),
@@ -1485,6 +1636,10 @@ class RadiusReconciliationService
 
         if ($keepConfig === null || $removeConfig === null) {
             return $this->failure('One or both of the named RADIUS servers do not exist.');
+        }
+
+        if (trim((string) $keepConfig->ip) === trim((string) $removeConfig->ip)) {
+            return $this->failure("Cannot resolve duplicate: both configurations point to the same IP ({$keepConfig->ip}). One is a fallback connection, not a separate server.");
         }
 
         $keepLabel   = $this->labelFor($keepConfig, $organizationId);

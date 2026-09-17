@@ -25,7 +25,7 @@ class CustomerController extends Controller
             ]);
 
             $username = Auth::user()->username ?? Auth::user()->name ?? 'Unknown User';
-            
+
             \Log::info('[Presence] Customer broadcast:', [
                 'customer_id' => $validated['customer_id'],
                 'username' => $username,
@@ -122,7 +122,7 @@ class CustomerController extends Controller
             ]);
         } catch (\Exception $e) {
             \Log::error('Error fetching customers: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch customers',
@@ -135,7 +135,7 @@ class CustomerController extends Controller
     {
         try {
             $customer = Customer::with(['group', 'billingAccounts.onlineStatus'])->findOrFail($id);
-            
+
             $data = [
                 'id' => $customer->id,
                 'first_name' => $customer->first_name,
@@ -182,7 +182,7 @@ class CustomerController extends Controller
             ]);
         } catch (\Exception $e) {
             \Log::error('Error fetching customer: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Customer not found',
@@ -231,7 +231,7 @@ class CustomerController extends Controller
             ], 201);
         } catch (\Exception $e) {
             \Log::error('Error creating customer: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to create customer',
@@ -293,7 +293,7 @@ class CustomerController extends Controller
             ]);
         } catch (\Exception $e) {
             \Log::error('Error updating customer: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to update customer',
@@ -337,7 +337,7 @@ class CustomerController extends Controller
             ]);
         } catch (\Exception $e) {
             \Log::error('Error deleting customer: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to delete customer',
@@ -349,7 +349,24 @@ class CustomerController extends Controller
     public function uploadImages(Request $request, $id): JsonResponse
     {
         try {
-            $customer = Customer::findOrFail($id);
+            $customer = Customer::find($id);
+
+            if (!$customer) {
+                $customer = Customer::where('account_no', $id)
+                    ->orWhereHas('billingAccounts', function ($q) use ($id) {
+                        $q->where('account_no', $id);
+                    })
+                    ->first();
+            }
+
+            if (!$customer) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Failed to upload images',
+                    'error' => "No customer found with ID or account number: {$id}"
+                ], 404);
+            }
+
             $driveService = resolve(\App\Services\GoogleDriveService::class);
 
             $folderName = $request->input('folder_name', "(customer) " . trim($customer->first_name . " " . $customer->last_name));
@@ -386,36 +403,38 @@ class CustomerController extends Controller
                     $newData[$dbColumn] = $newUrl;
                 }
 
-                $customer->update($imageUrls);
+                \DB::transaction(function () use ($customer, $imageUrls, $oldData, $newData) {
+                    $customer->update($imageUrls);
 
-                // Audit Trail Log
-                $userEmail = auth()->user()?->email ?? 'System';
-                AuditTrailLog::create([
-                    'old_details' => [
-                        'type' => 'customers',
-                        'id' => $customer->id,
-                        'data' => $oldData
-                    ],
-                    'new_details' => [
-                        'type' => 'customers',
-                        'id' => $customer->id,
-                        'data' => $newData
-                    ],
-                    'created_by_user' => $userEmail,
-                    'updated_by_user' => $userEmail
-                ]);
+                    // Audit Trail Log
+                    $userEmail = auth()->user()?->email ?? 'System';
+                    AuditTrailLog::create([
+                        'old_details' => [
+                            'type' => 'customers',
+                            'id' => $customer->id,
+                            'data' => $oldData
+                        ],
+                        'new_details' => [
+                            'type' => 'customers',
+                            'id' => $customer->id,
+                            'data' => $newData
+                        ],
+                        'created_by_user' => $userEmail,
+                        'updated_by_user' => $userEmail
+                    ]);
 
-                // Log Activity
-                ActivityLog::log(
-                    'Customer Attachments Uploaded',
-                    "Uploaded " . count($imageUrls) . " attachments for Customer #{$id}",
-                    'info',
-                    [
-                        'resource_type' => 'Customer',
-                        'resource_id' => $id,
-                        'additional_data' => array_keys($imageUrls)
-                    ]
-                );
+                    // Log Activity
+                    ActivityLog::log(
+                        'Customer Attachments Uploaded',
+                        "Uploaded " . count($imageUrls) . " attachments for Customer #{$customer->id}",
+                        'info',
+                        [
+                            'resource_type' => 'Customer',
+                            'resource_id' => $customer->id,
+                            'additional_data' => array_keys($imageUrls)
+                        ]
+                    );
+                });
             }
 
             return response()->json([

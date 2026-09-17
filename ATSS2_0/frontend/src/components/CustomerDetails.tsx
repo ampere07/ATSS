@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react';
+import React, { useState, useEffect, useRef, Suspense, useCallback, useMemo } from 'react';
 import { ChevronDown, ChevronRight, Plus, Trash2, Paperclip, Wrench, Edit, ChevronLeft, ChevronRight as ChevronRightNav, Maximize2, X, ExternalLink, Settings, Circle, CircleArrowRight, Loader2, Download, MessageSquare } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -127,7 +127,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
         const userData = JSON.parse(authData);
         setUserRole(userData.role || '');
         setRoleId(userData.role_id || null);
-        
+
         let perms: string[] = [];
         if (userData.permissions) {
           if (Array.isArray(userData.permissions)) {
@@ -911,7 +911,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
             className={`${isDarkMode
               ? 'text-blue-400 hover:text-blue-300'
               : 'text-blue-600 hover:text-blue-700'
-            } flex items-center space-x-1 min-w-0 max-w-[180px] sm:max-w-[300px]`}
+              } flex items-center space-x-1 min-w-0 max-w-[180px] sm:max-w-[300px]`}
           >
             <span className="text-sm truncate" title={billingRecord.houseFrontPicture}>{billingRecord.houseFrontPicture}</span>
             <ExternalLink size={14} className="flex-shrink-0" />
@@ -1458,7 +1458,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
     if (onExpandSection && sectionKey === 'detailsUpdateLogs') {
       const name = billingRecord.customerName || '';
       const nameSuffix = name ? ` (${name})` : '';
-      
+
       const labels: Record<string, string> = {
         invoices: `All Related Invoices${nameSuffix}`,
         statementOfAccounts: `All Related Statement of Accounts${nameSuffix}`,
@@ -1475,7 +1475,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
         changeDueLogs: `All Related Change Due Logs${nameSuffix}`,
         securityDeposits: `All Related Security Deposits${nameSuffix}`
       };
-      
+
       onExpandSection(
         sectionKey,
         labels[sectionKey] || sectionKey,
@@ -1505,7 +1505,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
 
   const handleExportCSV = () => {
     let csvContent = "";
-    
+
     const addRow = (row: any[]) => {
       csvContent += row.map(v => `"${String(v || '').replace(/"/g, '""')}"`).join(",") + "\r\n";
     };
@@ -1575,12 +1575,12 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
         addRow(headers);
         data.forEach((item: any) => {
           const rowData = keys.map((k: string) => {
-             let val = item[k];
-             if (k === 'created_at' || k === 'updated_at' || k === 'date') val = formatDate(val);
-             if (typeof val === 'object' && val !== null) {
-                try { val = JSON.stringify(val); } catch(e) {}
-             }
-             return val;
+            let val = item[k];
+            if (k === 'created_at' || k === 'updated_at' || k === 'date') val = formatDate(val);
+            if (typeof val === 'object' && val !== null) {
+              try { val = JSON.stringify(val); } catch (e) { }
+            }
+            return val;
           });
           addRow(rowData);
         });
@@ -1602,11 +1602,10 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
   // Unified return with resizing wrapper
   return (
     <div
-      className={`flex flex-col relative md:border-l overflow-hidden ${
-        isMobile ? 'fixed inset-0 z-[9999] w-screen h-[100dvh] max-h-[100dvh]' : 'h-full'
-      } ${isDarkMode
-        ? 'bg-gray-900 text-white border-white border-opacity-30'
-        : 'bg-white text-gray-900 border-gray-300'
+      className={`flex flex-col relative md:border-l overflow-hidden ${isMobile ? 'fixed inset-0 z-[9999] w-screen h-[100dvh] max-h-[100dvh]' : 'h-full'
+        } ${isDarkMode
+          ? 'bg-gray-900 text-white border-white border-opacity-30'
+          : 'bg-white text-gray-900 border-gray-300'
         }`}
       style={{ width: isMobile ? '100%' : `${detailsWidth}px` }}
     >
@@ -1791,7 +1790,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
                   Transact
                 </button>
               )}
-              
+
               {/* Navigation Chevrons */}
               {(onPrevious || onNext) && (
                 <div className="flex items-center">
@@ -2372,9 +2371,8 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
       {expandedModalSection && (
         <div className="absolute inset-0 flex flex-col" style={{ backgroundColor: isDarkMode ? '#111827' : '#ffffff', zIndex: 10000 }}>
           {/* Header */}
-          <div className={`px-4 md:px-6 py-4 flex items-center justify-between border-b ${
-            isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
-          }`}>
+          <div className={`px-4 md:px-6 py-4 flex items-center justify-between border-b ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
+            }`}>
             <div className="flex items-center space-x-2 md:space-x-4">
               <div className="flex items-center space-x-2 md:space-x-3">
                 <h2 className={`text-lg md:text-xl font-bold truncate max-w-[200px] md:max-w-none ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
@@ -2393,11 +2391,10 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
                   {expandedModalSection === 'changeDueLogs' && 'All Related Change Due Logs'}
                   {expandedModalSection === 'securityDeposits' && 'All Related Security Deposits'}
                 </h2>
-                <span className={`px-2 py-0.5 rounded-full text-[10px] md:text-xs font-bold border transition-colors ${
-                  isDarkMode 
-                    ? 'bg-gray-800 text-gray-400 border-gray-700' 
+                <span className={`px-2 py-0.5 rounded-full text-[10px] md:text-xs font-bold border transition-colors ${isDarkMode
+                    ? 'bg-gray-800 text-gray-400 border-gray-700'
                     : 'bg-gray-100 text-gray-500 border-gray-200'
-                }`}>
+                  }`}>
                   {relatedDataCounts[expandedModalSection]} items
                 </span>
               </div>
@@ -2405,9 +2402,8 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
 
             <button
               onClick={handleExpandModalClose}
-              className={`p-2 rounded-full transition-colors ${
-                isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-100 text-gray-600 hover:text-gray-900'
-              }`}
+              className={`p-2 rounded-full transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-100 text-gray-600 hover:text-gray-900'
+                }`}
             >
               <X size={20} />
             </button>
@@ -2474,7 +2470,7 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
             if (onRefresh) onRefresh();
           }}
           customerData={{
-            id: billingRecord.id || billingRecord.applicationId,
+            id: billingRecord.customerId || billingRecord.id || billingRecord.applicationId,
             first_name: billingRecord.firstName || billingRecord.customerName?.split(' ')[0],
             last_name: billingRecord.lastName || billingRecord.customerName?.split(' ').slice(1).join(' '),
             proof_of_billing_url: billingRecord.proofOfBillingUrl,
