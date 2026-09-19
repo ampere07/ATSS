@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, Dimensions, RefreshControl, StyleSheet, Modal, DeviceEventEmitter, Alert } from 'react-native';
-import { FileText, Search, X, Menu, RefreshCw, ArrowLeft, Filter, Check } from 'lucide-react-native';
+import { FileText, Search, X, Menu, RefreshCw, ArrowLeft, Filter, Check, Download } from 'lucide-react-native';
 import { FlashList } from '@shopify/flash-list';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ServiceOrderDetails from '../components/ServiceOrderDetails';
@@ -13,6 +13,8 @@ import {
   sortServiceOrdersForTechnician
 } from '../utils/technicianServiceOrderAccess';
 import { createAgentReferralMatcher } from '../utils/agentReferral';
+import { exportToCSV } from '../utils/exportUtils';
+import { SERVICE_ORDER_EXPORT_COLUMNS, serviceOrderExportValue } from '../utils/exportColumns';
 
 // Location grouping removed as per user request
 
@@ -441,6 +443,16 @@ const ServiceOrderPage: React.FC = () => {
   }, [serviceOrders, debouncedSearch, statusFilter, userRole, userRoleId, userFullName, userEmail, isTechnicianOnly]);
 
   /**
+   * Exports what the list is currently showing. Account No leads the columns,
+   * as it does on the web: the list does not display it, and a spreadsheet
+   * without it cannot be matched back to an account.
+   */
+  const handleExport = useCallback(() => {
+    if (!filteredServiceOrders || filteredServiceOrders.length === 0) return;
+    exportToCSV('service_orders_export', SERVICE_ORDER_EXPORT_COLUMNS, filteredServiceOrders, serviceOrderExportValue);
+  }, [filteredServiceOrders]);
+
+  /**
    * The service orders a technician may not open yet.
    *
    * Built from the technician's whole assigned set — the API already scopes
@@ -576,6 +588,18 @@ const ServiceOrderPage: React.FC = () => {
                 </View>
               </View>
               <View style={so.actionsRow}>
+                <Pressable
+                  onPress={handleExport}
+                  disabled={filteredServiceOrders.length === 0}
+                  style={[so.actionBtn, {
+                    backgroundColor: '#f3f4f6',
+                    borderWidth: 1,
+                    borderColor: '#d1d5db',
+                    opacity: filteredServiceOrders.length === 0 ? 0.4 : 1,
+                  }]}
+                >
+                  <Download size={20} color="#4b5563" />
+                </Pressable>
                 <Pressable
                   onPress={() => setShowStatusModal(true)}
                   style={[so.actionBtn, { 

@@ -24,7 +24,7 @@ import {
   Filter,
 } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import GlobalSearch from './globalfunctions/GlobalSearch';
+import { StandardPage } from '../components/common';
 import TransactionListDetails from '../components/TransactionListDetails';
 import { transactionService } from '../services/transactionService';
 import { getCities, City } from '../services/cityService';
@@ -293,7 +293,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
   const [sortColumn, setSortColumn] = useState<string | null>('date_processed');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage] = useState(50);
+  const [itemsPerPage, setItemsPerPage] = useState(50);
 
   const [refreshing, setRefreshing] = useState(false);
   const [locationFilterVisible, setLocationFilterVisible] = useState(false);
@@ -602,13 +602,6 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
     return filtered;
   }, [globalFilteredTransactions, selectedLocation, sortColumn, sortDirection]);
-
-  const paginatedTransactions = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return filteredTransactions.slice(start, start + itemsPerPage);
-  }, [filteredTransactions, currentPage, itemsPerPage]);
-
-  const totalPages = Math.ceil(filteredTransactions.length / itemsPerPage);
 
   // ─── Pull to refresh ──────────────────────────────────────────────────────
 
@@ -964,360 +957,168 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
-  return (
-    <View style={{ flex: 1, backgroundColor: '#f9fafb' }}>
-      {/* Header */}
-      <View
-        style={{
-          paddingTop: isTablet ? 16 : 60,
-          paddingHorizontal: 16,
-          paddingBottom: 10,
-          backgroundColor: '#ffffff',
-          borderBottomWidth: 1,
-          borderBottomColor: '#e5e7eb',
-          gap: 10,
-        }}
-      >
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <View style={{ flex: 1 }}>
-            <GlobalSearch
-              searchQuery={searchQuery}
-              setSearchQuery={(q) => { setSearchQuery(q); setCurrentPage(1); }}
-              isDarkMode={false}
-              colorPalette={colorPalette}
-              placeholder="Search transactions..."
-            />
-          </View>
-          {/* Location tree */}
+  // Batch approve and the sort chips sit under the toolbar, above the list —
+  // they act on the list rather than narrowing it, so they are not filters.
+  const listHeader = (
+    <View style={{ backgroundColor: '#ffffff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb', paddingHorizontal: 16, paddingVertical: 8, gap: 8 }}>
+      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+        {hasPermission('transaction-list.batch-approve') && (
           <TouchableOpacity
-            onPress={() => setLocationFilterVisible(true)}
+            onPress={() => isBatchApproveMode ? handleCancelApprove() : setIsBatchApproveMode(true)}
             style={{
-              padding: 9,
+              flexDirection: 'row',
+              alignItems: 'center',
+              backgroundColor: isBatchApproveMode ? '#dc2626' : primary,
+              paddingHorizontal: 14,
+              paddingVertical: 8,
               borderRadius: 8,
-              borderWidth: 1,
-              borderColor: selectedLocation !== 'all' ? primary : '#e5e7eb',
-              backgroundColor: selectedLocation !== 'all' ? `${primary}12` : '#ffffff',
+              gap: 6,
             }}
           >
-            <Menu size={18} color={selectedLocation !== 'all' ? primary : '#374151'} />
+            {isBatchApproveMode ? <X size={15} color="#ffffff" /> : <CheckCheck size={15} color="#ffffff" />}
+            <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '500' }}>
+              {isBatchApproveMode ? 'Cancel' : 'Batch Approve'}
+            </Text>
           </TouchableOpacity>
-          {/* Funnel filter */}
-          <TouchableOpacity
-            onPress={() => setIsFunnelFilterOpen(true)}
-            style={{
-              padding: 9,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: activeFilterKeys.length > 0 ? '#ef4444' : '#e5e7eb',
-              backgroundColor: '#ffffff',
-            }}
-          >
-            <Filter size={18} color={activeFilterKeys.length > 0 ? '#ef4444' : '#374151'} />
-            {activeFilterKeys.length > 0 && (
-              <View
-                style={{
-                  position: 'absolute',
-                  top: -4,
-                  right: -4,
-                  minWidth: 16,
-                  height: 16,
-                  paddingHorizontal: 3,
-                  borderRadius: 8,
-                  backgroundColor: '#ef4444',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                <Text style={{ fontSize: 9, color: '#fff', fontWeight: '700' }}>{activeFilterKeys.length}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-          {/* Export */}
-          <TouchableOpacity
-            onPress={handleExport}
-            disabled={filteredTransactions.length === 0}
-            style={{
-              padding: 9,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: primary,
-              backgroundColor: '#ffffff',
-              opacity: filteredTransactions.length === 0 ? 0.4 : 1,
-            }}
-          >
-            <Download size={18} color={primary} />
-          </TouchableOpacity>
-          {/* Refresh */}
-          <TouchableOpacity
-            onPress={handleRefresh}
-            style={{
-              padding: 9,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: primary,
-              backgroundColor: '#ffffff',
-            }}
-          >
-            <RefreshCw size={18} color={primary} />
-          </TouchableOpacity>
-        </View>
-
-        {/* Active funnel filter chips */}
-        {activeFilterKeys.length > 0 && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}
-          >
-            <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1 }}>FILTERS:</Text>
-            {activeFilterKeys.map((key) => {
-              const filter = activeFilters[key] as any;
-              const label = filterColumns.find((c) => c.key === key)?.label || key;
-              return (
-                <View
-                  key={key}
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    gap: 4,
-                    backgroundColor: `${primary}15`,
-                    borderColor: `${primary}30`,
-                    borderWidth: 1,
-                    borderRadius: 99,
-                    paddingLeft: 10,
-                    paddingRight: 6,
-                    paddingVertical: 4,
-                  }}
-                >
-                  <Text style={{ fontSize: 11, color: primary }} numberOfLines={1}>
-                    {label}: {getFilterDisplayValue(filter)}
-                  </Text>
-                  <TouchableOpacity onPress={() => removeFilter(key)}>
-                    <X size={12} color={primary} />
-                  </TouchableOpacity>
-                </View>
-              );
-            })}
-            <TouchableOpacity onPress={handleClearAllFilters} style={{ paddingHorizontal: 8 }}>
-              <Text style={{ fontSize: 11, fontWeight: '700', color: primary, textDecorationLine: 'underline' }}>
-                Clear all
-              </Text>
-            </TouchableOpacity>
-          </ScrollView>
         )}
 
-        {/* Batch approve row */}
-        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-          {hasPermission('transaction-list.batch-approve') && (
+        {isBatchApproveMode && (
+          <>
             <TouchableOpacity
-              onPress={() => isBatchApproveMode ? handleCancelApprove() : setIsBatchApproveMode(true)}
+              onPress={toggleSelectAll}
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
-                backgroundColor: isBatchApproveMode ? '#dc2626' : primary,
+                borderWidth: 1,
+                borderColor: primary,
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                borderRadius: 8,
+                gap: 4,
+              }}
+            >
+              <Text style={{ color: primary, fontSize: 13 }}>All</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={handleBatchApprove}
+              disabled={selectedTransactionIds.length === 0 || isApproving}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: selectedTransactionIds.length === 0 ? '#d1d5db' : '#22c55e',
                 paddingHorizontal: 14,
                 paddingVertical: 8,
                 borderRadius: 8,
                 gap: 6,
+                opacity: isApproving ? 0.6 : 1,
               }}
             >
-              {isBatchApproveMode
-                ? <X size={15} color="#ffffff" />
-                : <CheckCheck size={15} color="#ffffff" />}
+              <Check size={15} color="#ffffff" />
               <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '500' }}>
-                {isBatchApproveMode ? 'Cancel' : 'Batch Approve'}
+                {isApproving ? 'Approving...' : `Approve (${selectedTransactionIds.length})`}
               </Text>
             </TouchableOpacity>
-          )}
-
-          {isBatchApproveMode && (
-            <>
-              <TouchableOpacity
-                onPress={toggleSelectAll}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  borderWidth: 1,
-                  borderColor: primary,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  gap: 4,
-                }}
-              >
-                <Text style={{ color: primary, fontSize: 13 }}>All</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={handleBatchApprove}
-                disabled={selectedTransactionIds.length === 0 || isApproving}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  backgroundColor: selectedTransactionIds.length === 0 ? '#d1d5db' : '#22c55e',
-                  paddingHorizontal: 14,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  gap: 6,
-                  opacity: isApproving ? 0.6 : 1,
-                }}
-              >
-                <Check size={15} color="#ffffff" />
-                <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '500' }}>
-                  {isApproving ? 'Approving...' : `Approve (${selectedTransactionIds.length})`}
-                </Text>
-              </TouchableOpacity>
-            </>
-          )}
-
-          {/* Active filter chips */}
-          {selectedLocation !== 'all' && (
-            <View style={{
-              flexDirection: 'row', alignItems: 'center', gap: 4,
-              backgroundColor: `${primary}15`, paddingHorizontal: 8,
-              paddingVertical: 4, borderRadius: 12,
-            }}>
-              <Text style={{ fontSize: 11, color: primary }}>
-                {selectedLocation.startsWith('reg:') ? selectedLocation.substring(4) :
-                 selectedLocation.startsWith('city:') ? selectedLocation.substring(5) :
-                 selectedLocation.startsWith('brgy:') ? selectedLocation.substring(5) : selectedLocation}
-              </Text>
-              <TouchableOpacity onPress={() => setSelectedLocation('all')}>
-                <X size={12} color={primary} />
-              </TouchableOpacity>
-            </View>
-          )}
-        </View>
-
-        {/* Sort row */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 2 }}>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            {sortOptions.map(opt => (
-              <TouchableOpacity
-                key={opt.key}
-                onPress={() => {
-                  if (sortColumn === opt.key) {
-                    setSortDirection(d => d === 'asc' ? 'desc' : 'asc');
-                  } else {
-                    setSortColumn(opt.key);
-                    setSortDirection('desc');
-                  }
-                }}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  paddingHorizontal: 10,
-                  paddingVertical: 5,
-                  borderRadius: 12,
-                  backgroundColor: sortColumn === opt.key ? `${primary}15` : '#f3f4f6',
-                  gap: 4,
-                }}
-              >
-                <Text style={{ fontSize: 12, color: sortColumn === opt.key ? primary : '#6b7280', fontWeight: sortColumn === opt.key ? '600' : '400' }}>
-                  {opt.label}
-                </Text>
-                {sortColumn === opt.key && (
-                  <Text style={{ fontSize: 10, color: primary }}>{sortDirection === 'asc' ? '↑' : '↓'}</Text>
-                )}
-              </TouchableOpacity>
-            ))}
-          </View>
-        </ScrollView>
+          </>
+        )}
       </View>
 
-      {/* List */}
-      {loading && transactions.length === 0 ? (
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <ActivityIndicator size="large" color={primary} />
-          <Text style={{ color: '#6b7280', fontSize: 14 }}>Loading transactions...</Text>
-        </View>
-      ) : error && transactions.length === 0 ? (
-        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <Text style={{ color: '#ef4444', fontSize: 14 }}>{error}</Text>
-          <TouchableOpacity
-            onPress={() => fetchTransactions(true)}
-            style={{ backgroundColor: primary, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8 }}
-          >
-            <Text style={{ color: '#ffffff', fontWeight: '600' }}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <FlatList
-          data={paginatedTransactions}
-          keyExtractor={item => String(item.id)}
-          renderItem={renderItem}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={handleRefresh}
-              colors={[primary]}
-              tintColor={primary}
-            />
-          }
-          contentContainerStyle={{ paddingVertical: 8, paddingBottom: 80 }}
-          ListEmptyComponent={
-            <View style={{ padding: 40, alignItems: 'center' }}>
-              <Text style={{ color: '#6b7280', fontSize: 14 }}>
-                {transactions.length > 0 ? 'No transactions found matching your filters' : 'No transactions found.'}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          {sortOptions.map(opt => (
+            <TouchableOpacity
+              key={opt.key}
+              onPress={() => {
+                if (sortColumn === opt.key) {
+                  setSortDirection(d => d === 'asc' ? 'desc' : 'asc');
+                } else {
+                  setSortColumn(opt.key);
+                  setSortDirection('desc');
+                }
+              }}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+                borderRadius: 12,
+                backgroundColor: sortColumn === opt.key ? `${primary}15` : '#f3f4f6',
+                gap: 4,
+              }}
+            >
+              <Text style={{ fontSize: 12, color: sortColumn === opt.key ? primary : '#6b7280', fontWeight: sortColumn === opt.key ? '600' : '400' }}>
+                {opt.label}
               </Text>
-            </View>
-          }
-          ListFooterComponent={
-            totalPages > 1 ? (
-              <View
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  paddingHorizontal: 16,
-                  paddingVertical: 12,
-                  borderTopWidth: 1,
-                  borderTopColor: '#e5e7eb',
-                  backgroundColor: '#ffffff',
-                  marginTop: 4,
-                }}
-              >
-                <Text style={{ fontSize: 12, color: '#6b7280' }}>
-                  {(currentPage - 1) * itemsPerPage + 1}–{Math.min(currentPage * itemsPerPage, filteredTransactions.length)} of {filteredTransactions.length}
-                </Text>
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <TouchableOpacity
-                    onPress={() => setCurrentPage(p => Math.max(1, p - 1))}
-                    disabled={currentPage === 1}
-                    style={{
-                      paddingHorizontal: 14,
-                      paddingVertical: 6,
-                      borderRadius: 6,
-                      borderWidth: 1,
-                      borderColor: currentPage === 1 ? '#e5e7eb' : primary,
-                      opacity: currentPage === 1 ? 0.4 : 1,
-                    }}
-                  >
-                    <Text style={{ color: currentPage === 1 ? '#9ca3af' : primary, fontSize: 13 }}>Prev</Text>
-                  </TouchableOpacity>
-                  <Text style={{ alignSelf: 'center', fontSize: 12, color: '#374151' }}>
-                    {currentPage} / {totalPages}
-                  </Text>
-                  <TouchableOpacity
-                    onPress={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                    disabled={currentPage === totalPages}
-                    style={{
-                      paddingHorizontal: 14,
-                      paddingVertical: 6,
-                      borderRadius: 6,
-                      borderWidth: 1,
-                      borderColor: currentPage === totalPages ? '#e5e7eb' : primary,
-                      opacity: currentPage === totalPages ? 0.4 : 1,
-                    }}
-                  >
-                    <Text style={{ color: currentPage === totalPages ? '#9ca3af' : primary, fontSize: 13 }}>Next</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ) : null
-          }
-        />
-      )}
+              {sortColumn === opt.key && (
+                <Text style={{ fontSize: 10, color: primary }}>{sortDirection === 'asc' ? '↑' : '↓'}</Text>
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
+    </View>
+  );
 
+  const locationLabel = selectedLocation.startsWith('reg:')
+    ? selectedLocation.substring(4)
+    : selectedLocation.startsWith('city:') || selectedLocation.startsWith('brgy:')
+      ? selectedLocation.substring(5)
+      : selectedLocation;
+
+  return (
+    <StandardPage<Transaction>
+      data={filteredTransactions}
+      keyExtractor={(item) => String(item.id)}
+      renderItem={(item) => renderItem({ item })}
+      searchQuery={searchQuery}
+      onSearchChange={(q) => { setSearchQuery(q); setCurrentPage(1); }}
+      searchPlaceholder="Search transactions..."
+      onOpenFunnel={() => setIsFunnelFilterOpen(true)}
+      activeFilterCount={activeFilterKeys.length}
+      chips={[
+        ...activeFilterKeys.map((key) => ({
+          key,
+          label: filterColumns.find((c) => c.key === key)?.label || key,
+          value: getFilterDisplayValue(activeFilters[key] as any),
+        })),
+        ...(selectedLocation !== 'all' ? [{ key: '__location', label: 'Location', value: locationLabel }] : []),
+      ]}
+      onRemoveChip={(key) => (key === '__location' ? setSelectedLocation('all') : removeFilter(key))}
+      onClearChips={() => { handleClearAllFilters(); setSelectedLocation('all'); }}
+      onExport={handleExport}
+      exportDisabled={filteredTransactions.length === 0}
+      onRefresh={handleRefresh}
+      isRefreshing={loading}
+      onPullRefresh={handleRefresh}
+      pullRefreshing={refreshing}
+      isLoading={loading && transactions.length === 0}
+      loadingText="Loading transactions..."
+      error={error}
+      onRetry={() => fetchTransactions(true)}
+      emptyText="No transactions found"
+      currentPage={currentPage}
+      onPageChange={setCurrentPage}
+      itemsPerPage={itemsPerPage}
+      onItemsPerPageChange={(n) => { setItemsPerPage(n); setCurrentPage(1); }}
+      colorPalette={colorPalette}
+      header={listHeader}
+      toolbarActions={
+        <TouchableOpacity
+          onPress={() => setLocationFilterVisible(true)}
+          style={{
+            width: 38,
+            height: 38,
+            borderRadius: 8,
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderWidth: 1,
+            borderColor: selectedLocation !== 'all' ? primary : '#e5e7eb',
+            backgroundColor: selectedLocation !== 'all' ? `${primary}12` : '#ffffff',
+          }}
+        >
+          <Menu size={18} color={selectedLocation !== 'all' ? primary : '#374151'} />
+        </TouchableOpacity>
+      }
+    >
       {/* Location filter modal */}
       {renderLocationFilterModal()}
 
@@ -1379,7 +1180,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
         isDarkMode={false}
         colorPalette={colorPalette}
       />
-    </View>
+    </StandardPage>
   );
 };
 

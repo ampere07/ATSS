@@ -50,6 +50,7 @@ import {
   DEFAULT_VISIBLE_WIDGETS,
   CURRENCY_WIDGETS,
 } from '../types/monitor.types';
+import TechLiveLocationMap from '../components/TechLiveLocationMap';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const isDarkMode = false; // FORCED LIGHT MODE
@@ -674,7 +675,8 @@ const LiveMonitor: React.FC = () => {
   const isFinishedStatus = (status: any) =>
     FINISHED_STATUSES.includes(String(status ?? '').trim().toLowerCase());
 
-  const renderQueueTable = (data: any[], id: string) => {
+  // Cards, not a table — the name used to say otherwise.
+  const renderQueueCards = (data: any[], id: string) => {
     if (!Array.isArray(data) || data.length === 0) {
       return <Text style={{ color: '#9ca3af', textAlign: 'center', padding: 16 }}>No Data Available</Text>;
     }
@@ -764,6 +766,21 @@ const LiveMonitor: React.FC = () => {
       );
     }
 
+    // Technician Live Location — a real map, and the one widget that is worth
+    // drawing with nothing in it. An empty technician list is a meaningful
+    // answer here ("nobody is reporting"), whereas the "No Data Available"
+    // below would read as a broken widget. Checked before that guard for the
+    // same reason the web version is.
+    if (id === 'tech_live_location') {
+      return (
+        <TechLiveLocationMap
+          data={Array.isArray(widget.data) ? (widget.data as any) : []}
+          isDarkMode={isDarkMode}
+          colorPalette={colorPalette}
+        />
+      );
+    }
+
     const hasData = widget.data && (Array.isArray(widget.data) ? widget.data.length > 0 : true);
     if (!hasData) {
       return <Text style={{ color: '#9ca3af', textAlign: 'center', padding: 16, fontSize: 12 }}>No Data Available</Text>;
@@ -776,7 +793,7 @@ const LiveMonitor: React.FC = () => {
 
     // Detailed queues
     if (id === 'team_detailed_queue' || id === 'agent_detailed_queue') {
-      return renderQueueTable(widget.data, id);
+      return renderQueueCards(widget.data, id);
     }
 
     // Standard list view

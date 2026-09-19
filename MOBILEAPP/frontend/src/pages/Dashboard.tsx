@@ -67,6 +67,14 @@ import SOAGeneration from './SOAGeneration';
 import Settings from './Settings';
 import PaymentMethodList from './PaymentMethodList';
 import UsageTypeList from './UsageTypeList';
+import VlanList from './VlanList';
+import RadiusQueue from './RadiusQueue';
+import AgentInvoice from './AgentInvoice';
+import ModemRouterLogs from './ModemRouterLogs';
+import BillingReconcileTool from './BillingReconcileTool';
+import XenditReconcileTool from './XenditReconcileTool';
+import MikrotikRadiusTool from './MikrotikRadiusTool';
+import SmartOltTool from './SmartOltTool';
 import WorkCategoryList from './WorkCategoryList';
 import StatusRemarksList from './StatusRemarksList';
 import RouterModelList from './RouterModelList';
@@ -295,6 +303,25 @@ const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 return <PaymentMethodList />;
             case 'usage-type-list':
                 return <UsageTypeList />;
+            // Named for the permission key rather than given a "-list" suffix
+            // like its neighbours, so it needs no SECTION_PERMISSION_OVERRIDES
+            // entry — the section id and the key it is guarded by are one string.
+            case 'vlan-config':
+                return <VlanList />;
+            case 'radius-queue':
+                return <RadiusQueue />;
+            case 'agent-invoices':
+                return <AgentInvoice />;
+            case 'modem-router-logs':
+                return <ModemRouterLogs />;
+            case 'billing-reconcile-tool':
+                return <BillingReconcileTool />;
+            case 'xendit-reconcile-tool':
+                return <XenditReconcileTool />;
+            case 'mikrotik-radius-tool':
+                return <MikrotikRadiusTool />;
+            case 'smartolt-tool':
+                return <SmartOltTool />;
             case 'work-category-list':
                 return <WorkCategoryList />;
             case 'status-remarks-list':

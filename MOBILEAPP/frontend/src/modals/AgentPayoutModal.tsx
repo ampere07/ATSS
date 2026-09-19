@@ -16,6 +16,25 @@ interface AgentPayoutModalProps {
     onSuccess: () => void;
     agentId?: number;
     agentName?: string;
+    /**
+     * Approving an existing payout rather than raising a new one.
+     *
+     * A payout raised from an invoice is recorded without an amount, proof or
+     * remarks, so approving collects them. With this set the form posts to the
+     * record's own approve endpoint — posting to /commissions/history instead
+     * would raise a SECOND payout beside the one being approved.
+     */
+    approveId?: number;
+    /** The reference the record already carries; approving keeps it. */
+    approveRefNumber?: string;
+    /**
+     * Raised from an agent invoice. The form then asks only for the agent:
+     * the invoice number is the reference, and the amount is settled when
+     * the payout is approved rather than when it is raised.
+     */
+    fromInvoice?: boolean;
+    /** The invoice number, which becomes the payout's reference. */
+    invoiceNumber?: string;
 }
 
 interface PayoutFormData {
@@ -57,7 +76,11 @@ const AgentPayoutForm: React.FC<{
     onClose: () => void;
     onSuccess: () => void;
     isOpen: boolean;
-}> = ({ agentId, agentName, onClose, onSuccess, isOpen }) => {
+    approveId?: number;
+    approveRefNumber?: string;
+    fromInvoice?: boolean;
+    invoiceNumber?: string;
+}> = ({ agentId, agentName, onClose, onSuccess, isOpen, approveId, approveRefNumber, fromInvoice = false, invoiceNumber }) => {
     const { isDarkMode } = useModalTheme();
 
     const [agents, setAgents] = useState<any[]>([]);
@@ -162,7 +185,10 @@ const AgentPayoutForm: React.FC<{
 
             setFormData({
                 agent_id: agentId || '',
-                ref_number: generateRefNumber(),
+                // Approving keeps the reference the record was raised with —
+                // it is what ties the payout back to the invoice it settles.
+                ref_number: approveRefNumber
+                    || (fromInvoice && invoiceNumber ? invoiceNumber : generateRefNumber()),
                 total_amount: initialAmount,
                 remarks: '',
                 proof_of_payment: '',
@@ -225,7 +251,11 @@ const AgentPayoutForm: React.FC<{
 
     const handleSave = async () => {
         if (!formData.agent_id || !formData.ref_number || !formData.total_amount || !formData.remarks || !image) {
-            setError('Agent, reference number, amount, proof, and remarks are required.');
+            setError(approveId
+                ? 'Amount, proof, and remarks are required to approve.'
+                : fromInvoice
+                    ? 'Agent and reference number are required.'
+                    : 'Agent, reference number, amount, proof, and remarks are required.');
             return;
         }
 
@@ -285,8 +315,20 @@ const AgentPayoutForm: React.FC<{
                 type: formData.payout_type,
                 job_order_ids: [],
                 ...(currentUser?.organization_id ? { organization_id: currentUser.organization_id } : {}),
+                // Tells the API this came from an invoice, which is what
+                // relaxes its requirement for the fields the form did not ask for.
+                ...(fromInvoice ? { from_invoice: true } : {}),
             };
-            const response = await apiClient.post('/commissions/history', payload);
+            // Approving writes these details onto the record that already
+            // exists and applies it; raising a payout creates a new one.
+            const response = approveId
+                ? await apiClient.post(`/commissions/history/${approveId}/approve`, {
+                    total_amount: formData.total_amount,
+                    type: formData.payout_type,
+                    remarks: formData.remarks,
+                    proof_of_payment: proofUrl,
+                })
+                : await apiClient.post('/commissions/history', payload);
 
             if ((response.data as any).success) {
                 onSuccess();

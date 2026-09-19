@@ -15,7 +15,7 @@ import {
   useWindowDimensions,
   DeviceEventEmitter
 } from 'react-native';
-import { Search, Plus, RefreshCw, Filter, Check } from 'lucide-react-native';
+import { Search, Plus, RefreshCw, Filter, Check, Download } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -29,6 +29,8 @@ import {
   sortWorkOrdersForTechnician,
   TECHNICIAN_LOCKED_MESSAGE
 } from '../utils/technicianWorkOrderAccess';
+import { exportToCSV } from '../utils/exportUtils';
+import { WORK_ORDER_EXPORT_COLUMNS, workOrderExportValue } from '../utils/exportColumns';
 
 // --- Static Helpers & Components ---
 const ITEMS_PER_PAGE = 50;
@@ -266,6 +268,12 @@ const WorkOrderPage: React.FC = () => {
     return filtered;
   }, [workOrders, searchQuery, statusFilter, userRole, userEmail, userName, isTechnicianOnly]);
 
+  /** Exports what the list is showing — search and status filter already applied. */
+  const handleExport = useCallback(() => {
+    if (!filteredWorkOrders || filteredWorkOrders.length === 0) return;
+    exportToCSV('work_orders_export', WORK_ORDER_EXPORT_COLUMNS, filteredWorkOrders, workOrderExportValue);
+  }, [filteredWorkOrders]);
+
   /**
    * The work orders a technician may not open yet.
    *
@@ -417,6 +425,22 @@ const WorkOrderPage: React.FC = () => {
           </View>
 
           <View style={st.actionsRow}>
+            <TouchableOpacity
+              onPress={handleExport}
+              disabled={filteredWorkOrders.length === 0}
+              style={[st.actionIconBtn, {
+                backgroundColor: '#f3f4f6',
+                borderWidth: 1,
+                borderColor: '#d1d5db',
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                borderRadius: 4,
+                opacity: filteredWorkOrders.length === 0 ? 0.4 : 1,
+              }]}
+            >
+              <Download size={20} color="#4b5563" />
+            </TouchableOpacity>
+
             <TouchableOpacity
               onPress={() => setShowStatusModal(true)}
               style={[st.actionIconBtn, { 

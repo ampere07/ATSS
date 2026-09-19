@@ -1,17 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import {
-    View,
-    Text,
-    TouchableOpacity,
-    FlatList,
-    RefreshControl,
-    ActivityIndicator,
-    Platform,
-    useWindowDimensions,
-} from 'react-native';
+import { View, Text, TouchableOpacity, Platform, useWindowDimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { Download, RefreshCw, Plus, Filter } from 'lucide-react-native';
+import { Plus } from 'lucide-react-native';
 import { exportToPDF } from '../utils/exportUtils';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { useCommissionStore } from '../store/commissionStore';
@@ -20,7 +11,7 @@ import CommissionDetails from '../components/CommissionDetails';
 import CommissionPayoutModal from '../modals/CommissionPayoutModal';
 import { useAgentStore } from '../store/agentStore';
 import usePermissions from '../hooks/usePermissions';
-import GlobalSearch from './globalfunctions/GlobalSearch';
+import { StandardPage, RecordCard } from '../components/common';
 
 // Forced light mode to match the ~50 already-migrated pages.
 const isDarkMode = false;
@@ -96,7 +87,8 @@ const Commission: React.FC = () => {
     const [dateTo, setDateTo] = useState<Date | null>(null);
     const [showFromPicker, setShowFromPicker] = useState(false);
     const [showToPicker, setShowToPicker] = useState(false);
-    const [showFilters, setShowFilters] = useState(false);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [itemsPerPage, setItemsPerPage] = useState(25);
 
     // An agent opens this page to read their own history; recording a payout
     // against an agent is the administrator's act, and the API refuses it
@@ -255,53 +247,119 @@ const Commission: React.FC = () => {
     const mutedColor = '#6b7280';
     const faintColor = '#9ca3af';
 
-    const renderCard = ({ item }: { item: any }) => {
-        const payout = isPayoutType(item.type);
-        const add = isAddType(item.type);
-        const amtColor = payout ? '#ef4444' : add ? '#16a34a' : textColor;
-        const sign = payout ? '-' : add ? '+' : '';
+    const dateRangeLabel = [dateFrom ? toDateString(dateFrom) : '…', dateTo ? toDateString(dateTo) : '…'].join(' → ');
 
-        // Approval state, read the same way as the web table: settled in green,
-        // awaiting action in amber, declined in red.
-        const status = item.status || 'Pending';
-        const settled = status === 'Paid' || status === 'Approved';
-        const rejected = status === 'Rejected';
-        const statusBg = settled ? '#dcfce7' : rejected ? '#fee2e2' : '#fef3c7';
-        const statusFg = settled ? '#15803d' : rejected ? '#b91c1c' : '#b45309';
-
-        return (
-            <TouchableOpacity
-                onPress={() => handleRowClick(item)}
-                activeOpacity={0.7}
-                style={{
-                    backgroundColor: cardBg,
-                    borderWidth: 1,
-                    borderColor,
-                    borderRadius: 10,
-                    padding: 14,
-                    marginBottom: 10,
-                }}
-            >
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <View style={{ flex: 1, paddingRight: 10 }}>
-                        <Text style={{ fontSize: 14, fontWeight: '600', color: '#3b82f6', fontVariant: ['tabular-nums'] }}>
-                            {item.ref_number || `#${item.id}`}
+    // The date range lives in the standard left drawer now, the way the
+    // application list's filters do, instead of pushing the list down the
+    // screen with an inline panel.
+    const dateRangeDrawer = (
+        <View style={{ paddingTop: 60, paddingHorizontal: 16 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, color: faintColor }}>
+                    Date Range
+                </Text>
+                {(dateFrom || dateTo) ? (
+                    <TouchableOpacity onPress={() => { setDateFrom(null); setDateTo(null); }}>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: primaryColor }}>Clear</Text>
+                    </TouchableOpacity>
+                ) : null}
+            </View>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 11, color: mutedColor, marginBottom: 4 }}>From</Text>
+                    <TouchableOpacity
+                        onPress={() => setShowFromPicker(true)}
+                        style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: dateFrom ? primaryColor : borderColor, backgroundColor: cardBg }}
+                    >
+                        <Text style={{ fontSize: 13, color: dateFrom ? textColor : faintColor }}>
+                            {dateFrom ? toDateString(dateFrom) : 'Select date'}
                         </Text>
-                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-                            <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: payout ? '#fee2e2' : '#dcfce7' }}>
-                                <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: payout ? '#b91c1c' : '#15803d' }}>
-                                    {typeLabel(item.type)}
-                                </Text>
+                    </TouchableOpacity>
+                    {showFromPicker ? (
+                        <DateTimePicker
+                            value={dateFrom || new Date()}
+                            mode="date"
+                            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                            onChange={(_e, date) => {
+                                setShowFromPicker(false);
+                                if (date) setDateFrom(date);
+                            }}
+                        />
+                    ) : null}
+                </View>
+                <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 11, color: mutedColor, marginBottom: 4 }}>To</Text>
+                    <TouchableOpacity
+                        onPress={() => setShowToPicker(true)}
+                        style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: dateTo ? primaryColor : borderColor, backgroundColor: cardBg }}
+                    >
+                        <Text style={{ fontSize: 13, color: dateTo ? textColor : faintColor }}>
+                            {dateTo ? toDateString(dateTo) : 'Select date'}
+                        </Text>
+                    </TouchableOpacity>
+                    {showToPicker ? (
+                        <DateTimePicker
+                            value={dateTo || new Date()}
+                            mode="date"
+                            display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                            onChange={(_e, date) => {
+                                setShowToPicker(false);
+                                if (date) setDateTo(date);
+                            }}
+                        />
+                    ) : null}
+                </View>
+            </View>
+        </View>
+    );
+
+    return (
+        <StandardPage<any>
+            data={filteredData}
+            keyExtractor={(item, index) => String(item.id ?? index)}
+            renderItem={(item) => {
+                const payout = isPayoutType(item.type);
+                const add = isAddType(item.type);
+                const amtColor = payout ? '#ef4444' : add ? '#16a34a' : textColor;
+                const sign = payout ? '-' : add ? '+' : '';
+
+                // Approval state, read the same way as the web table: settled in
+                // green, awaiting action in amber, declined in red.
+                const status = item.status || 'Pending';
+                const settled = status === 'Paid' || status === 'Approved';
+                const rejected = status === 'Rejected';
+                const statusBg = settled ? '#dcfce7' : rejected ? '#fee2e2' : '#fef3c7';
+                const statusFg = settled ? '#15803d' : rejected ? '#b91c1c' : '#b45309';
+
+                return (
+                    <RecordCard
+                        title={item.ref_number || `#${item.id}`}
+                        normalizeTitle={false}
+                        titleStyle={{ color: '#3b82f6', fontWeight: '600', fontVariant: ['tabular-nums'] }}
+                        badges={
+                            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2, marginBottom: 4 }}>
+                                <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: payout ? '#fee2e2' : '#dcfce7' }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: payout ? '#b91c1c' : '#15803d' }}>
+                                        {typeLabel(item.type)}
+                                    </Text>
+                                </View>
+                                <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: statusBg }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: statusFg }}>
+                                        {status}
+                                    </Text>
+                                </View>
                             </View>
-                            <View style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, backgroundColor: statusBg }}>
-                                <Text style={{ fontSize: 10, fontWeight: '700', textTransform: 'uppercase', color: statusFg }}>
-                                    {status}
-                                </Text>
-                            </View>
-                        </View>
-                        {item.agent_name ? (
-                            <Text style={{ fontSize: 12, color: mutedColor, marginTop: 4 }}>{item.agent_name}</Text>
-                        ) : null}
+                        }
+                        subtitle={item.agent_name || undefined}
+                        showStatus={false}
+                        selected={selectedRecord?.id === item.id}
+                        onPress={() => handleRowClick(item)}
+                        right={
+                            <Text style={{ fontSize: 15, fontWeight: '700', color: amtColor }}>
+                                {sign}{formatAmount(item.total_amount)}
+                            </Text>
+                        }
+                    >
                         {item.commission_id_list ? (
                             <Text style={{ fontSize: 12, color: '#60a5fa', marginTop: 2 }} numberOfLines={1}>
                                 {item.commission_id_list.split(',').map((id: string) => `#${id.trim()}`).join(', ')}
@@ -311,176 +369,63 @@ const Commission: React.FC = () => {
                             {item.created_at ? new Date(item.created_at).toLocaleString() : '---'}
                             {item.created_by ? `  ·  ${item.created_by}` : ''}
                         </Text>
-                    </View>
-                    <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: amtColor }}>
-                            {sign}{formatAmount(item.total_amount)}
-                        </Text>
-                    </View>
-                </View>
-            </TouchableOpacity>
-        );
-    };
-
-    if (isLoading && payoutHistory.length === 0) {
-        return (
-            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: pageBg }}>
-                <ActivityIndicator size="large" color={primaryColor} />
-            </View>
-        );
-    }
-
-    return (
-        <View style={{ flex: 1, backgroundColor: pageBg }}>
-            {/* Header */}
-            <View style={{
-                paddingTop: isTablet ? 16 : 60,
-                paddingHorizontal: 16,
-                paddingBottom: 12,
-                backgroundColor: cardBg,
-                borderBottomWidth: 1,
-                borderBottomColor: borderColor,
-            }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-                    <Text style={{ fontSize: 18, fontWeight: '700', color: textColor }}>Commission History</Text>
-                    {canPayOut ? (
-                        <TouchableOpacity
-                            onPress={() => setShowPayoutModal(true)}
-                            style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, backgroundColor: primaryColor }}
-                        >
-                            <Plus size={14} color="#ffffff" />
-                            <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '600' }}>Add</Text>
-                        </TouchableOpacity>
-                    ) : null}
-                </View>
-
-                {/* Search + actions */}
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                    <GlobalSearch
-                        searchQuery={searchTerm}
-                        setSearchQuery={setSearchTerm}
-                        isDarkMode={isDarkMode}
-                        colorPalette={colorPalette}
-                        placeholder="Search history..."
+                    </RecordCard>
+                );
+            }}
+            searchQuery={searchTerm}
+            onSearchChange={setSearchTerm}
+            searchPlaceholder="Search history..."
+            drawerContent={dateRangeDrawer}
+            drawerActive={!!(dateFrom || dateTo)}
+            rangeChip={
+                dateFrom || dateTo
+                    ? { label: 'Date range', value: dateRangeLabel, onClear: () => { setDateFrom(null); setDateTo(null); } }
+                    : null
+            }
+            onExport={handleExport}
+            exportDisabled={filteredData.length === 0}
+            onRefresh={handleRefresh}
+            isRefreshing={isLoading}
+            onPullRefresh={handleRefresh}
+            pullRefreshing={refreshing}
+            isLoading={isLoading && payoutHistory.length === 0}
+            emptyText="No matching records found"
+            currentPage={currentPage}
+            onPageChange={setCurrentPage}
+            itemsPerPage={itemsPerPage}
+            onItemsPerPageChange={setItemsPerPage}
+            colorPalette={colorPalette}
+            isDarkMode={isDarkMode}
+            detail={
+                showDetails && selectedRecord ? (
+                    <CommissionDetails
+                        data={selectedRecord}
+                        type="payouts"
+                        isMobile
+                        onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
+                        onPrevious={currentIndex > 0 ? handlePrevious : undefined}
+                        onNext={currentIndex !== -1 && currentIndex < filteredData.length - 1 ? handleNext : undefined}
                     />
+                ) : null
+            }
+            toolbarActions={
+                canPayOut ? (
                     <TouchableOpacity
-                        onPress={() => setShowFilters((v) => !v)}
-                        style={{ padding: 9, borderRadius: 6, borderWidth: 1, borderColor: (dateFrom || dateTo) ? primaryColor : borderColor, backgroundColor: cardBg }}
+                        onPress={() => setShowPayoutModal(true)}
+                        style={{ height: 38, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, borderRadius: 8, backgroundColor: primaryColor }}
                     >
-                        <Filter size={18} color={(dateFrom || dateTo) ? primaryColor : mutedColor} />
+                        <Plus size={14} color="#ffffff" />
+                        <Text style={{ color: '#ffffff', fontSize: 13, fontWeight: '600' }}>Add</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity
-                        onPress={handleExport}
-                        style={{ padding: 9, borderRadius: 6, borderWidth: 1, borderColor, backgroundColor: cardBg }}
-                    >
-                        <Download size={18} color={mutedColor} />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                        onPress={handleRefresh}
-                        style={{ padding: 9, borderRadius: 6, borderWidth: 1, borderColor, backgroundColor: cardBg }}
-                    >
-                        <RefreshCw size={18} color={primaryColor} />
-                    </TouchableOpacity>
-                </View>
-
-                {/* Date range filters */}
-                {showFilters ? (
-                    <View style={{ marginTop: 12 }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                            <Text style={{ fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, color: faintColor }}>
-                                Date Range
-                            </Text>
-                            {(dateFrom || dateTo) ? (
-                                <TouchableOpacity onPress={() => { setDateFrom(null); setDateTo(null); }}>
-                                    <Text style={{ fontSize: 12, fontWeight: '600', color: primaryColor }}>Clear</Text>
-                                </TouchableOpacity>
-                            ) : null}
-                        </View>
-                        <View style={{ flexDirection: 'row', gap: 8 }}>
-                            <View style={{ flex: 1 }}>
-                                <Text style={{ fontSize: 11, color: mutedColor, marginBottom: 4 }}>From</Text>
-                                <TouchableOpacity
-                                    onPress={() => setShowFromPicker(true)}
-                                    style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: dateFrom ? primaryColor : borderColor, backgroundColor: cardBg }}
-                                >
-                                    <Text style={{ fontSize: 13, color: dateFrom ? textColor : faintColor }}>
-                                        {dateFrom ? toDateString(dateFrom) : 'Select date'}
-                                    </Text>
-                                </TouchableOpacity>
-                                {showFromPicker ? (
-                                    <DateTimePicker
-                                        value={dateFrom || new Date()}
-                                        mode="date"
-                                        display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                                        onChange={(_e, date) => {
-                                            setShowFromPicker(false);
-                                            if (date) setDateFrom(date);
-                                        }}
-                                    />
-                                ) : null}
-                            </View>
-                            <View style={{ flex: 1 }}>
-                                <Text style={{ fontSize: 11, color: mutedColor, marginBottom: 4 }}>To</Text>
-                                <TouchableOpacity
-                                    onPress={() => setShowToPicker(true)}
-                                    style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: dateTo ? primaryColor : borderColor, backgroundColor: cardBg }}
-                                >
-                                    <Text style={{ fontSize: 13, color: dateTo ? textColor : faintColor }}>
-                                        {dateTo ? toDateString(dateTo) : 'Select date'}
-                                    </Text>
-                                </TouchableOpacity>
-                                {showToPicker ? (
-                                    <DateTimePicker
-                                        value={dateTo || new Date()}
-                                        mode="date"
-                                        display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                                        onChange={(_e, date) => {
-                                            setShowToPicker(false);
-                                            if (date) setDateTo(date);
-                                        }}
-                                    />
-                                ) : null}
-                            </View>
-                        </View>
-                    </View>
-                ) : null}
-            </View>
-
-            {/* List */}
-            <FlatList
-                data={filteredData}
-                keyExtractor={(item, index) => String(item.id ?? index)}
-                renderItem={renderCard}
-                contentContainerStyle={{ padding: 16, paddingBottom: 96 }}
-                refreshControl={
-                    <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={primaryColor} colors={[primaryColor]} />
-                }
-                ListEmptyComponent={
-                    <View style={{ paddingVertical: 48, alignItems: 'center' }}>
-                        <Text style={{ fontSize: 14, fontStyle: 'italic', color: faintColor }}>No matching records found</Text>
-                    </View>
-                }
-            />
-
-            {/* Details overlay */}
-            {showDetails && selectedRecord ? (
-                <CommissionDetails
-                    data={selectedRecord}
-                    type="payouts"
-                    isMobile
-                    onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
-                    onPrevious={currentIndex > 0 ? handlePrevious : undefined}
-                    onNext={currentIndex !== -1 && currentIndex < filteredData.length - 1 ? handleNext : undefined}
-                />
-            ) : null}
-
-            {/* Commission Payout Modal */}
+                ) : null
+            }
+        >
             <CommissionPayoutModal
                 isOpen={showPayoutModal}
                 onClose={() => setShowPayoutModal(false)}
                 onSuccess={() => { setShowPayoutModal(false); fetchData(); }}
             />
-        </View>
+        </StandardPage>
     );
 };
 

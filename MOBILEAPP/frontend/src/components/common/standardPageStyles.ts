@@ -1,10 +1,12 @@
 import { StyleSheet } from 'react-native';
 
 /**
- * Shared style sheet for the standard list-page UI.
+ * Leftover style tokens from the first standard-page attempt.
  *
- * Extracted verbatim from JobOrder.tsx so every page that adopts
- * `StandardListPage` renders with the exact same look & spacing.
+ * The standard page and card now carry their own styles (StandardPage.tsx,
+ * RecordCard.tsx). What is still used from here is STANDARD_COLORS — the
+ * palette constants — and the status-filter modal's styles. New pages should
+ * not reach for the layout keys below; they belong to StandardPage now.
  */
 export const standardPageStyles = StyleSheet.create({
   container: { height: '100%', overflow: 'hidden' },

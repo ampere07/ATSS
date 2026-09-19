@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, Pressable } from 'react-native';
+import { View, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Plus, Edit2, Trash2 } from 'lucide-react-native';
 import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import StatusRemarksFormModal from '../modals/StatusRemarksFormModal';
-import { StandardListPage, standardPageStyles as s, STANDARD_COLORS } from '../components/common';
+import { StandardPage, RecordCard, STANDARD_COLORS } from '../components/common';
 
 interface StatusRemark {
   id: number;
@@ -42,25 +42,17 @@ const StatusRemarkCard = React.memo(({ item, onEdit, onDelete, deleting }: {
   onDelete: (r: StatusRemark) => void;
   deleting: boolean;
 }) => (
-  <Pressable
+  <RecordCard
+    title={item.status_remarks}
+    // A remark is a free-text sentence, not a name — capitalising it would
+    // retitle the user's own words.
+    normalizeTitle={false}
+    subtitle={`Created: ${formatDate(item.created_at)} | By: ${item.created_by_user || 'System'}`}
+    showStatus={false}
     onPress={() => onEdit(item)}
-    style={[s.cardRow, { borderColor: STANDARD_COLORS.border }]}
-  >
-    <View style={s.cardInner}>
-      <View style={s.cardLeft}>
-        <Text style={[s.cardName, { color: STANDARD_COLORS.text }]} numberOfLines={2}>
-          {item.status_remarks}
-        </Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginTop: 4 }}>
-          <Text style={{ fontSize: 10, textTransform: 'uppercase', fontWeight: '500', color: STANDARD_COLORS.textDisabled }}>
-            Created: {formatDate(item.created_at)}
-          </Text>
-          <Text style={{ fontSize: 10, textTransform: 'uppercase', fontWeight: '500', color: STANDARD_COLORS.textDisabled }}>
-            By: {item.created_by_user || 'System'}
-          </Text>
-        </View>
-      </View>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 16 }}>
+    disabled={deleting}
+    right={
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
         <TouchableOpacity onPress={() => onEdit(item)} style={{ padding: 8, borderRadius: 6 }}>
           <Edit2 size={18} color="#4b5563" />
         </TouchableOpacity>
@@ -72,8 +64,8 @@ const StatusRemarkCard = React.memo(({ item, onEdit, onDelete, deleting }: {
           {deleting ? <ActivityIndicator size="small" color="#ef4444" /> : <Trash2 size={18} color="#ef4444" />}
         </TouchableOpacity>
       </View>
-    </View>
-  </Pressable>
+    }
+  />
 ));
 StatusRemarkCard.displayName = 'StatusRemarkCard';
 
@@ -230,8 +222,7 @@ const StatusRemarksList: React.FC = () => {
 
   return (
     <>
-      <StandardListPage<StatusRemark>
-        title="Status Remarks"
+      <StandardPage<StatusRemark>
         data={filteredStatusRemarks}
         keyExtractor={(item) => String(item.id)}
         renderItem={renderItem}
@@ -240,16 +231,27 @@ const StatusRemarksList: React.FC = () => {
         searchPlaceholder="Search Status Remarks"
         isLoading={isLoading && statusRemarks.length === 0}
         emptyText="No status remarks found"
-        isRefreshing={refreshing}
-        onRefresh={handleRefresh}
+        onPullRefresh={handleRefresh}
+        pullRefreshing={refreshing}
         itemsPerPage={50}
         currentPage={currentPage}
         onPageChange={setCurrentPage}
         colorPalette={colorPalette}
+        isDarkMode={isDarkMode}
         toolbarActions={
-          <Pressable onPress={handleAddNew} style={[s.actionBtn, { backgroundColor: primaryColor }]}>
+          <TouchableOpacity
+            onPress={handleAddNew}
+            style={{
+              width: 38,
+              height: 38,
+              borderRadius: 8,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: primaryColor,
+            }}
+          >
             <Plus size={20} color="#ffffff" />
-          </Pressable>
+          </TouchableOpacity>
         }
       />
 

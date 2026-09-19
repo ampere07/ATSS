@@ -153,6 +153,7 @@ export const PAGES = [
   'radius-logs',
   'radius-queue',
   'system-logs',
+  'modem-router-logs',
 
   // Tools. Web-only screens, but the keys live here too: this catalog has to
   // stay identical to the server's and the web client's, and a role's key list
@@ -352,6 +353,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'radius-logs': 'Radius Logs',
   'radius-queue': 'Radius Queue',
   'system-logs': 'System Logs',
+  'modem-router-logs': 'Modem/Router Logs',
   'smartolt-tool': 'SmartOLT Tool',
   'mikrotik-radius-tool': 'Mikrotik Radius Tool',
   'xendit-reconcile-tool': 'Xendit Reconciliation',
@@ -455,7 +457,7 @@ export const PERMISSION_GROUPS: Array<{ label: string; pages: string[] }> = [
     pages: [
       'disconnected-logs', 'reconnection-logs', 'sms-logs', 'sms-blast-logs',
       'email-logs', 'data-logs', 'expenses-log', 'smart-olt-logs',
-      'radius-logs', 'system-logs',
+      'radius-logs', 'system-logs', 'modem-router-logs',
     ],
   },
   { label: 'Customer Portal', pages: ['customer-dashboard', 'customer-bills', 'customer-support', 'agent-application'] },
@@ -527,6 +529,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     'email-logs',
     'data-logs',
     'expenses-log',
+    'modem-router-logs',
     // The RADIUS retry queue. Read-only, and an operational screen rather than
     // a configuration one.
     'radius-queue',
@@ -579,6 +582,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
   [ROLE.INVENTORY_STAFF]: [
     'inventory',
     'inventory-category-list',
+    'modem-router-logs',
   ],
 
   [ROLE.OSP]: [
@@ -606,6 +610,7 @@ export const ROLE_PERMISSIONS: Record<number, string[]> = {
     // and SuperAdmin concern rather than a field-operations one.
     'smartolt-tool',
     'mikrotik-radius-tool',
+    'modem-router-logs',
   ],
 };
 
@@ -645,12 +650,28 @@ export const SECTION_PERMISSION_OVERRIDES: Record<string, string | string[]> = {
   'work-category-list': 'work-category',
   'router-model-list': 'router-models',
   'smart-olt-config': 'smart-olt',
-  'file-log-viewer': ['smart-olt-logs', 'radius-logs', 'system-logs'],
+  // Renders the SmartOLT log file specifically (type="smartolt"), so it is
+  // guarded by that page's own key rather than by the union the API accepts
+  // for reading any file log. The union would have offered a SmartOLT viewer
+  // to a role granted only radius-logs. The web keeps the three as separate
+  // entries under separate keys.
+  'file-log-viewer': 'smart-olt-logs',
   'so-charges': 'so-charge',
   'disconnection-logs': 'disconnected-logs',
+  // Plural here, singular in the shared catalog. Without this line the section
+  // resolved to its own id, which is not a key any role holds, so Organizations
+  // was reachable only by a SuperAdmin — whose wildcard matches anything — and
+  // refused to an Administrator or to a custom role granted `organization`
+  // explicitly.
+  organizations: 'organization',
   rebate: 'mass-rebate',
   billing: 'customer',
-  'activity-logs': 'data-logs',
+  // Renders <Logs />, which reads /logs — and ApiPermissionMap demands
+  // 'system-logs' there, a key only SuperAdmin holds. Mapped to 'data-logs'
+  // before, which an Administrator DOES hold: the entry was listed for them,
+  // opened for them, and then the API refused every request it made. The web
+  // lists System Logs under its own key for exactly this reason.
+  'activity-logs': 'system-logs',
 
   // The page is "Pay Out/In" here and "Bonus History" on the web; the key the
   // server knows it by is the web's. Listed before the two sections below so

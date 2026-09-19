@@ -26,7 +26,7 @@ import {
   RefreshCw,
   X,
 } from 'lucide-react-native';
-import GlobalSearch from './globalfunctions/GlobalSearch';
+import { StandardPage } from '../components/common';
 import SOADetails from '../components/SOADetails';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { paymentService, PendingPayment } from '../services/paymentService';
@@ -45,7 +45,7 @@ const CARD = '#ffffff';
 const TEXT = '#111827';
 const MUTED = '#6b7280';
 const BORDER = '#e5e7eb';
-const ITEMS_PER_PAGE = 25;
+const DEFAULT_ITEMS_PER_PAGE = 25;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const convertCustomerDataToBillingDetail = (customerData: CustomerDetailData): BillingDetailRecord => ({
@@ -144,6 +144,7 @@ const SOA: React.FC = () => {
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+  const [itemsPerPage, setItemsPerPage] = useState(DEFAULT_ITEMS_PER_PAGE);
   const [selectedCustomer, setSelectedCustomer] = useState<CustomerDetailData | null>(null);
   const [isLoadingDetails, setIsLoadingDetails] = useState<boolean>(false);
 
@@ -326,13 +327,6 @@ const SOA: React.FC = () => {
     }
     return filtered;
   }, [globalFilteredRecords, selectedDate, sortColumn, sortDirection, funnelFilters, activeFilterKeys, readFunnelValue]);
-
-  const totalPages = Math.ceil(filteredRecords.length / ITEMS_PER_PAGE);
-
-  const paginatedRecords = useMemo(() => {
-    const start = (currentPage - 1) * ITEMS_PER_PAGE;
-    return filteredRecords.slice(start, start + ITEMS_PER_PAGE);
-  }, [filteredRecords, currentPage]);
 
   const currentSOAIndex = useMemo(() => {
     if (!selectedRecordId) return -1;
@@ -629,201 +623,64 @@ const SOA: React.FC = () => {
 
   // ── Main render ──
   return (
-    <View style={{ flex: 1, backgroundColor: BG, paddingTop: isTablet ? 16 : 60 }}>
-      {/* Header toolbar */}
-      <View style={styles.toolbar}>
-        <View style={{ flex: 1 }}>
-          <GlobalSearch
-            searchQuery={searchQuery}
-            setSearchQuery={setSearchQuery}
-            isDarkMode={isDarkMode}
-            colorPalette={colorPalette}
-            placeholder="Search SOA records..."
-          />
-        </View>
-
-        {/* Filter (sidebar) toggle */}
-        {userRole !== 'customer' && (
+    <StandardPage<SOARecordUI>
+      data={filteredRecords}
+      keyExtractor={(item) => item.id}
+      renderItem={(item) => renderSOACard({ item })}
+      searchQuery={searchQuery}
+      onSearchChange={setSearchQuery}
+      searchPlaceholder="Search SOA records..."
+      // Two filters, the same split the web toolbar has: the drawer narrows by
+      // place, the funnel narrows by any column.
+      drawerContent={
+        userRole !== 'customer' ? (
+          <View style={{ flex: 1 }}>
+            <View style={[styles.sidebarDrawerHeader, { paddingTop: 60 }]}>
+              <Text style={styles.sidebarDrawerTitle}>Statements</Text>
+            </View>
+            <SidebarContent />
+          </View>
+        ) : undefined
+      }
+      onOpenFunnel={userRole !== 'customer' ? () => setIsFunnelFilterOpen(true) : undefined}
+      activeFilterCount={activeFilterKeys.length}
+      chips={activeFilterKeys.map((filterKey) => ({
+        key: filterKey,
+        label: (filterColumns.find((c: any) => c.key === filterKey) as any)?.label || filterKey,
+        value: describeFilter((funnelFilters as any)[filterKey]),
+      }))}
+      onRemoveChip={removeFunnelFilter}
+      onClearChips={() => persistFunnelFilters({})}
+      onExport={handleExport}
+      exportDisabled={isLoading || filteredRecords.length === 0}
+      onRefresh={handleRefresh}
+      refreshDisabled={isLoading || isRefreshingManual}
+      isRefreshing={isLoading || isRefreshingManual}
+      onPullRefresh={onRefresh}
+      pullRefreshing={refreshing}
+      isLoading={isLoading && soaRecords.length === 0}
+      loadingText="Loading SOA records..."
+      error={error}
+      onRetry={() => fetchSOARecords(true)}
+      emptyText="No SOA records found"
+      currentPage={currentPage}
+      onPageChange={setCurrentPage}
+      itemsPerPage={itemsPerPage}
+      onItemsPerPageChange={(n) => { setItemsPerPage(n); setCurrentPage(1); }}
+      colorPalette={colorPalette}
+      isDarkMode={isDarkMode}
+      toolbarActions={
+        userRole === 'customer' ? (
           <TouchableOpacity
-            style={styles.toolBtn}
-            onPress={() => setIsSidebarVisible(true)}
-          >
-            <Filter size={18} color={TEXT} />
-          </TouchableOpacity>
-        )}
-
-        {/* Column funnel filter — the location sidebar above narrows by place,
-            this narrows by any column, the same split as the web toolbar. */}
-        {userRole !== 'customer' && (
-          <TouchableOpacity
-            style={[styles.toolBtn, activeFilterKeys.length > 0 && { borderColor: '#ef4444' }]}
-            onPress={() => setIsFunnelFilterOpen(true)}
-          >
-            <SlidersHorizontal size={18} color={activeFilterKeys.length > 0 ? '#ef4444' : TEXT} />
-          </TouchableOpacity>
-        )}
-
-        {/* Pay Now for customers */}
-        {userRole === 'customer' && (
-          <TouchableOpacity
-            style={[styles.payBtn, { backgroundColor: isPaymentProcessing ? '#6b7280' : primary }]}
+            style={[styles.payBtn, { height: 38, backgroundColor: isPaymentProcessing ? '#6b7280' : primary }]}
             onPress={handlePayNow}
             disabled={isPaymentProcessing}
           >
             <Text style={styles.payBtnText}>{isPaymentProcessing ? 'Processing...' : 'Pay Now'}</Text>
           </TouchableOpacity>
-        )}
-
-        {/* Export */}
-        <TouchableOpacity
-          style={[styles.toolBtn, { borderColor: primary }]}
-          onPress={handleExport}
-          disabled={isLoading || filteredRecords.length === 0}
-        >
-          <Download size={18} color={primary} />
-        </TouchableOpacity>
-
-        {/* Refresh */}
-        <TouchableOpacity
-          style={[styles.toolBtn, { borderColor: primary }]}
-          onPress={handleRefresh}
-          disabled={isLoading || isRefreshingManual}
-        >
-          {(isLoading || isRefreshingManual) ? (
-            <ActivityIndicator size="small" color={primary} />
-          ) : (
-            <RefreshCw size={18} color={primary} />
-          )}
-        </TouchableOpacity>
-      </View>
-
-      {/* Active filter chips — same shape as the application list, so what is
-          narrowing the view is visible without reopening the drawer. */}
-      {activeFilterKeys.length > 0 && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={{ backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}
-          contentContainerStyle={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8 }}
-        >
-          <Text style={{ fontSize: 10, fontWeight: '700', color: '#9ca3af', letterSpacing: 1 }}>FILTERS:</Text>
-          {activeFilterKeys.map((filterKey) => {
-            const col = filterColumns.find((c: any) => c.key === filterKey);
-            return (
-              <View
-                key={filterKey}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  backgroundColor: `${primary}15`,
-                  borderRadius: 99,
-                  paddingLeft: 10,
-                  paddingRight: 6,
-                  paddingVertical: 4,
-                  borderWidth: 1,
-                  borderColor: `${primary}30`,
-                  gap: 4,
-                }}
-              >
-                <Text style={{ fontSize: 11, color: primary }}>
-                  <Text style={{ opacity: 0.7 }}>{col?.label || filterKey}: </Text>
-                  {describeFilter((funnelFilters as any)[filterKey])}
-                </Text>
-                <TouchableOpacity onPress={() => removeFunnelFilter(filterKey)}>
-                  <X size={12} color={primary} />
-                </TouchableOpacity>
-              </View>
-            );
-          })}
-          <TouchableOpacity onPress={() => persistFunnelFilters({})} style={{ paddingHorizontal: 8 }}>
-            <Text style={{ fontSize: 11, fontWeight: '700', color: primary, textDecorationLine: 'underline' }}>
-              Clear all
-            </Text>
-          </TouchableOpacity>
-        </ScrollView>
-      )}
-
-      {/* Pagination info */}
-      {filteredRecords.length > 0 && (
-        <View style={styles.paginationBar}>
-          <Text style={styles.paginationText}>
-            Showing {(currentPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(currentPage * ITEMS_PER_PAGE, filteredRecords.length)} of {filteredRecords.length}
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <TouchableOpacity
-              onPress={() => setCurrentPage(p => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
-              style={[styles.pageBtn, currentPage === 1 && { opacity: 0.4 }]}
-            >
-              <ChevronLeft size={16} color={TEXT} />
-            </TouchableOpacity>
-            <Text style={styles.paginationText}>
-              {currentPage}/{totalPages || 1}
-            </Text>
-            <TouchableOpacity
-              onPress={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-              disabled={currentPage >= totalPages}
-              style={[styles.pageBtn, currentPage >= totalPages && { opacity: 0.4 }]}
-            >
-              <ChevronRight size={16} color={TEXT} />
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
-
-      {/* List */}
-      {isLoading && soaRecords.length === 0 ? (
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={primary} />
-          <Text style={styles.centerText}>Loading SOA records...</Text>
-        </View>
-      ) : error ? (
-        <View style={styles.center}>
-          <Text style={{ color: '#ef4444', marginBottom: 12 }}>{error}</Text>
-          <TouchableOpacity style={[styles.retryBtn, { backgroundColor: primary }]} onPress={() => fetchSOARecords(true)}>
-            <Text style={{ color: '#fff' }}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <FlatList
-          data={paginatedRecords}
-          keyExtractor={item => item.id}
-          renderItem={renderSOACard}
-          contentContainerStyle={{ padding: 12, paddingBottom: 32 }}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={primary} />
-          }
-          ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={styles.centerText}>No SOA records found</Text>
-            </View>
-          }
-        />
-      )}
-
-      {/* Sidebar modal (filter) */}
-      <Modal
-        visible={isSidebarVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={() => setIsSidebarVisible(false)}
-      >
-        <TouchableOpacity
-          style={styles.sidebarOverlay}
-          activeOpacity={1}
-          onPress={() => setIsSidebarVisible(false)}
-        />
-        <View style={styles.sidebarDrawer}>
-          <View style={styles.sidebarDrawerHeader}>
-            <Text style={styles.sidebarDrawerTitle}>Statements</Text>
-            <TouchableOpacity onPress={() => setIsSidebarVisible(false)}>
-              <X size={20} color={MUTED} />
-            </TouchableOpacity>
-          </View>
-          <SidebarContent />
-        </View>
-      </Modal>
-
+        ) : null
+      }
+    >
       {/* SOA Detail modal */}
       {selectedRecord && userRole !== 'customer' && (
         <SOADetails
@@ -976,7 +833,7 @@ const SOA: React.FC = () => {
         currentFilters={funnelFilters}
         records={globalFilteredRecords}
       />
-    </View>
+    </StandardPage>
   );
 };
 

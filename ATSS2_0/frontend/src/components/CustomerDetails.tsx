@@ -2470,7 +2470,19 @@ const BillingDetails: React.FC<BillingDetailsProps> = ({
             if (onRefresh) onRefresh();
           }}
           customerData={{
-            id: billingRecord.customerId || billingRecord.id || billingRecord.applicationId,
+            // The account number, which is what both mappings put in `id` —
+            // convertCustomerDataToBillingDetail and billingService alike set it
+            // from accountNo, not from customers.id. CustomerController::
+            // uploadImages takes either: it tries the primary key first and then
+            // falls back to matching account_no on the customer and on its
+            // billing accounts, which is the path this takes.
+            //
+            // There was a `billingRecord.customerId` ahead of these two. No
+            // mapping has ever produced that field and it is not on
+            // BillingDetailRecord, so it read as undefined and fell through to
+            // exactly the value below — it only stopped being invisible when
+            // the build started type-checking this file.
+            id: billingRecord.id || billingRecord.applicationId,
             first_name: billingRecord.firstName || billingRecord.customerName?.split(' ')[0],
             last_name: billingRecord.lastName || billingRecord.customerName?.split(' ').slice(1).join(' '),
             proof_of_billing_url: billingRecord.proofOfBillingUrl,

@@ -17,6 +17,7 @@ import { createServiceOrderItems, ServiceOrderItem } from '../services/serviceOr
 import { formatToGMT8MySQL } from '../utils/dateUtils';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { concernService, Concern } from '../services/concernService';
+import { getBillingRecordDetails } from '../services/billingService';
 import { getAllLCPNAPs, LCPNAP } from '../services/lcpnapService';
 import { technicianService } from '../services/technicianService';
 
@@ -97,6 +98,36 @@ export interface ImageFiles {
   portLabelImageFile: ImagePicker.ImagePickerAsset | null;
 }
 
+/**
+ * billing_status.id 5 is Pullout — the account has been physically pulled out
+ * and its portal login disabled (see App\Support\PulloutCategory on the server,
+ * which is what disables it).
+ *
+ * The only ticket worth raising against an account in that state is the one
+ * that brings it back, so the Concern and Repair Category pickers collapse to
+ * the reactivation option. Offering "Relocate" or "Replace Router" on a
+ * pulled-out account invites a visit for a service that is not connected.
+ */
+const PULLOUT_BILLING_STATUS_ID = 5;
+
+/** Spelled both ways across the app; the server accepts either. */
+const REACTIVATE_SPELLINGS = ['reactivate', 'reactivation'];
+
+const isReactivateOption = (value?: string | null): boolean =>
+  REACTIVATE_SPELLINGS.includes(String(value ?? '').toLowerCase().replace(/\s+/g, ''));
+
+/** Every repair category, and the one a pulled-out account may be given. */
+const REPAIR_CATEGORIES = [
+  'Fiber Relaying', 'Migrate', 'Reactivation', 'others', 'Pullout',
+  'Reboot/Reconfig Router', 'Relocate Router', 'Relocate', 'Replace Patch Cord',
+  'Replace Router', 'Resplice', 'Transfer LCP/NAP/PORT', 'Update Vlan',
+];
+
+const REACTIVATE_REPAIR_CATEGORY = REPAIR_CATEGORIES.find(isReactivateOption)!;
+
+/** Offered when the concern catalog carries no reactivation entry of its own. */
+const REACTIVATE_CONCERN_FALLBACK = 'Reactivate';
+
 export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onClose: () => void, onSave: (data: any) => void) => {
   const serviceOrderId = serviceOrderData?.id;
   const isMountedRef = useRef(true);
@@ -106,6 +137,7 @@ export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onCl
 
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(() => settingsColorPaletteService.getActiveSync());
   const [currentUser, setCurrentUser] = useState<UserData | null>(null);
+  const [billingStatusId, setBillingStatusId] = useState<number | null>(null);
   const [isContentReady, setIsContentReady] = useState(false);
   const [loading, setLoading] = useState(false);
   const [scrollEnabled, setScrollEnabled] = useState(true);
@@ -719,6 +751,35 @@ export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onCl
   };
 
   // Filtered Lists for Pickers
+  // The account's billing status decides what the pickers may offer, so it is
+  // read when the modal opens and cleared when it closes — a stale 5 left behind
+  // from the previous record would narrow the next one wrongly.
+  useEffect(() => {
+    const accountNo = serviceOrderData?.accountNumber || serviceOrderData?.account_no;
+
+    if (!isOpen || !accountNo) {
+      setBillingStatusId(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const details = await getBillingRecordDetails(String(accountNo));
+        if (!cancelled) setBillingStatusId(details?.billing_status_id ?? null);
+      } catch (error) {
+        // Not fatal: leaving it null shows the full lists, which is the
+        // behaviour this screen had before the narrowing existed.
+        if (!cancelled) setBillingStatusId(null);
+        console.error('Error fetching billing status:', error);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [isOpen, serviceOrderData]);
+
+  const isPulledOut = billingStatusId === PULLOUT_BILLING_STATUS_ID;
+
   const filtered = useMemo(() => ({
     inventory: [
       { id: 'none', item_name: 'None' } as any,
@@ -739,14 +800,27 @@ export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onCl
     supportStatuses: ['Resolved', 'Failed', 'In Progress', 'For Visit'].filter(s => s.toLowerCase().includes((searchQueries.supportStatus || '').toLowerCase())),
     visitStatuses: ['Done', 'In Progress', 'Failed', 'Reschedule'].filter(s => s.toLowerCase().includes((searchQueries.visitStatus || '').toLowerCase())),
     assignedEmails: technicians.filter(t => t.name.toLowerCase().includes((searchQueries.assignedEmail || '').toLowerCase()) || t.email.toLowerCase().includes((searchQueries.assignedEmail || '').toLowerCase())),
-    repairCategories: ['Fiber Relaying', 'Migrate', 'Reactivation', 'others', 'Pullout', 'Reboot/Reconfig Router', 'Relocate Router', 'Relocate', 'Replace Patch Cord', 'Replace Router', 'Resplice', 'Transfer LCP/NAP/PORT', 'Update Vlan'].filter(s => s.toLowerCase().includes((searchQueries.repairCategory || '').toLowerCase())),
+    repairCategories: (isPulledOut ? [REACTIVATE_REPAIR_CATEGORY] : REPAIR_CATEGORIES)
+      .filter(s => s.toLowerCase().includes((searchQueries.repairCategory || '').toLowerCase())),
     ports: (() => {
       const ports = Array.from({ length: totalPorts }, (_, i) => `P${(i + 1).toString().padStart(2, '0')}`);
       const available = ports.filter(p => !usedPorts.some(up => up.toUpperCase() === p.toUpperCase()));
       return available.filter(p => p.toLowerCase().includes((searchQueries.port || '').toLowerCase()));
     })(),
     vlans: vlans.filter(v => v.toLowerCase().includes((searchQueries.vlan || '').toLowerCase())),
-    concerns: concerns.filter(c => c.concern_name.toLowerCase().includes((searchQueries.concern || '').toLowerCase())),
+    // `concern` is a free string on service_orders and the update path never maps
+    // it back to support_concern.id, so a reactivation entry the catalog happens
+    // not to carry can still be offered and saved.
+    concerns: (() => {
+      if (!isPulledOut) {
+        return concerns.filter(c => c.concern_name.toLowerCase().includes((searchQueries.concern || '').toLowerCase()));
+      }
+      const fromCatalog = concerns.filter(c => isReactivateOption(c.concern_name));
+      const available = fromCatalog.length > 0
+        ? fromCatalog
+        : [{ concern_name: REACTIVATE_CONCERN_FALLBACK } as Concern];
+      return available.filter(c => c.concern_name.toLowerCase().includes((searchQueries.concern || '').toLowerCase()));
+    })(),
     plans: plans.map(p => `${p.name} - ${parseFloat(p.price.toString())}`).filter(p => p.toLowerCase().includes((searchQueries.plan || '').toLowerCase())),
   }), [
     inventoryItems, searchQueries.inventory, lcpnaps, searchQueries.lcpnaps, 
@@ -754,7 +828,8 @@ export const useServiceOrderEdit = (isOpen: boolean, serviceOrderData: any, onCl
     activeTechField, formData.visitBy, formData.visitWith, formData.visitWithOther,
     searchQueries.supportStatus, searchQueries.visitStatus, searchQueries.assignedEmail,
     searchQueries.repairCategory, totalPorts, usedPorts, searchQueries.port,
-    vlans, searchQueries.vlan, concerns, searchQueries.concern, plans, searchQueries.plan
+    vlans, searchQueries.vlan, concerns, searchQueries.concern, plans, searchQueries.plan,
+    isPulledOut
   ]);
 
   return {

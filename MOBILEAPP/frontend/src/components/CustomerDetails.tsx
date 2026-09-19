@@ -40,6 +40,7 @@ import PaymentPortalDetails from './PaymentPortalDetails';
 import TransactionListDetails from './TransactionListDetails';
 import LcpNapLocationDetails from './LcpNapLocationDetails';
 import { relatedDataColumns, TableColumn } from '../config/relatedDataColumns';
+import { FieldCard } from './common';
 import { usePermissions } from '../hooks/usePermissions';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -228,71 +229,49 @@ interface RelatedSectionProps {
   title: string;
   count: number;
   items: any[];
-  /** Column set from `relatedDataColumns` — renders the same table the web build shows. */
+  /** Column set from `relatedDataColumns` — the web table's columns, drawn as cards. */
   columns?: TableColumn[];
   renderRow?: (item: any, index: number) => React.ReactElement;
-  /** Opens the row's detail view, same as the web table's onRowClick. */
+  /** Opens the record's detail view, same as the web table's onRowClick. */
   onRowPress?: (row: any) => void;
   primaryColor: string;
   onExpand?: () => void;
 }
 
-/** Widths are per-column so a long label ("Balance From Previous Bill") keeps its header
- *  on one line; the whole table scrolls sideways, like the web table's overflow-x. */
-const columnWidth = (column: TableColumn) => Math.max(120, Math.min(260, column.label.length * 9 + 32));
-
-const RelatedTable: React.FC<{
+/**
+ * A related record, drawn as a card instead of a table row.
+ *
+ * The column set still comes from `relatedDataColumns` — the same one the web
+ * table uses — so nothing is lost: the first column becomes the card's heading
+ * and the rest become labelled fields. What is gone is the sideways scroll,
+ * which on a phone put most of the columns past the right edge of the screen.
+ */
+const RelatedCards: React.FC<{
   columns: TableColumn[];
   rows: any[];
   onRowPress?: (row: any) => void;
-}> = ({ columns, rows, onRowPress }) => (
-  <ScrollView horizontal showsHorizontalScrollIndicator style={styles.tableScroll}>
-    <View>
-      <View style={styles.tableHeaderRow}>
-        {columns.map((column, index) => (
-          <View
-            key={column.key}
-            style={[
-              styles.tableHeaderCell,
-              { width: columnWidth(column) },
-              index < columns.length - 1 && styles.tableCellDivider,
-            ]}
-          >
-            <Text style={styles.tableHeaderText} numberOfLines={1}>{column.label}</Text>
-          </View>
-        ))}
-      </View>
+}> = ({ columns, rows, onRowPress }) => {
+  const cellText = (column: TableColumn, row: any) => {
+    const raw = row?.[column.key];
+    const rendered = column.render ? column.render(raw, row) : raw;
+    return rendered === null || rendered === undefined || rendered === '' ? '-' : String(rendered);
+  };
 
+  const [head, ...rest] = columns;
+
+  return (
+    <View>
       {rows.map((row, rowIndex) => (
-        <TouchableOpacity
+        <FieldCard
           key={rowIndex}
-          style={styles.tableRow}
-          onPress={() => onRowPress?.(row)}
-          disabled={!onRowPress}
-          activeOpacity={0.6}
-        >
-          {columns.map((column, index) => {
-            const raw = row?.[column.key];
-            const rendered = column.render ? column.render(raw, row) : raw;
-            const text = rendered === null || rendered === undefined || rendered === '' ? '-' : String(rendered);
-            return (
-              <View
-                key={column.key}
-                style={[
-                  styles.tableCell,
-                  { width: columnWidth(column) },
-                  index < columns.length - 1 && styles.tableCellDivider,
-                ]}
-              >
-                <Text style={styles.tableCellText} numberOfLines={2}>{text}</Text>
-              </View>
-            );
-          })}
-        </TouchableOpacity>
+          title={head ? cellText(head, row) : undefined}
+          fields={rest.map((column) => ({ label: column.label, value: cellText(column, row) }))}
+          onPress={onRowPress ? () => onRowPress(row) : undefined}
+        />
       ))}
     </View>
-  </ScrollView>
-);
+  );
+};
 
 const RELATED_PAGE_SIZE = 5;
 
@@ -353,7 +332,7 @@ const RelatedSection: React.FC<RelatedSectionProps> = ({
       {expanded && count > 0 && (
         <View style={columns ? styles.sectionTableContent : styles.sectionContent}>
           {columns
-            ? <RelatedTable columns={columns} rows={pageItems} onRowPress={onRowPress} />
+            ? <RelatedCards columns={columns} rows={pageItems} onRowPress={onRowPress} />
             : pageItems.map((item, idx) => renderRow?.(item, idx))}
 
           {/* Pager sits where a 6th row would be */}
@@ -1410,20 +1389,12 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     gap: 8,
   },
-  // Table variant: no horizontal padding, so the table can scroll edge to edge.
+  // Card variant: the cards carry their own padding and dividers.
   sectionTableContent: {
     borderTopWidth: 1,
     borderTopColor: '#e5e7eb',
     paddingBottom: 8,
   },
-  tableScroll: { backgroundColor: '#ffffff' },
-  tableHeaderRow: { flexDirection: 'row', backgroundColor: '#f3f4f6', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
-  tableHeaderCell: { paddingHorizontal: 12, paddingVertical: 10, justifyContent: 'center' },
-  tableHeaderText: { fontSize: 11, fontWeight: '700', color: '#111827', textTransform: 'uppercase', letterSpacing: 0.5 },
-  tableRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
-  tableCell: { paddingHorizontal: 12, paddingVertical: 10, justifyContent: 'center' },
-  tableCellDivider: { borderRightWidth: 1, borderRightColor: '#e5e7eb' },
-  tableCellText: { fontSize: 13, color: '#111827' },
   pagerRow: {
     flexDirection: 'row',
     alignItems: 'center',

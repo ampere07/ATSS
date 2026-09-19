@@ -1616,6 +1616,44 @@ class JobOrderController extends Controller
                         'account_number' => $accountNumber,
                     ]);
                 }
+
+                // An approved job order means a working service, so the portal
+                // login has to be open — the branch below creates new users with
+                // active = 1 and this one left the flag wherever it happened to
+                // be. The account that reaches here is usually one that was
+                // pulled out (active = 0) and has now been re-installed: the
+                // approval reported the portal account ready while the customer
+                // was still refused at sign-in.
+                //
+                // Only for a customer-role account. A staff user whose username
+                // collides with an account number must not be re-enabled by an
+                // installation, which is the same reason the password repoint
+                // above carries this guard.
+                //
+                // Both columns, so the row cannot read 'active' while being
+                // locked out or the reverse. `active` is what sign-in checks.
+                if (\App\Support\PortalPassword::isCustomer($existingUser)) {
+                    $wasSuspended = !$existingUser->active;
+
+                    $existingUser->active = 1;
+                    $existingUser->status = 'active';
+                    $existingUser->updated_by_user_id = $actionUserId;
+                    $existingUser->save();
+
+                    if ($wasSuspended) {
+                        \Log::info('Existing customer portal login re-enabled by job order approval', [
+                            'user_id' => $existingUser->id,
+                            'account_number' => $accountNumber,
+                            'job_order_id' => $id,
+                        ]);
+                    }
+                } else {
+                    \Log::warning('Account number matches a non-customer user; portal login left untouched', [
+                        'user_id' => $existingUser->id,
+                        'account_number' => $accountNumber,
+                        'role_id' => $existingUser->role_id,
+                    ]);
+                }
             } else {
                 // Create user with direct password hash assignment to avoid mutator
                 $userData = [

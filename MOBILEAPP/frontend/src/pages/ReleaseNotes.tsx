@@ -14,7 +14,7 @@ interface ReleaseNote {
     version: string;
     date: string;
     title: string;
-    updates: { text: string; visibility: 'all' | 'customer' | 'technician' | 'agent' }[];
+    updates: { text: string; visibility: 'all' | 'customer' | 'technician' | 'agent' | 'admin' }[];
 }
 
 interface ReleaseNotesProps {
@@ -27,6 +27,28 @@ const ReleaseNotes: React.FC<ReleaseNotesProps> = ({ onBack }) => {
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
 
     const allNotes: ReleaseNote[] = [
+        {
+            version: '2.5.68',
+            date: 'September 18, 2026',
+            title: 'One Layout for Every List & a Stricter Pullout Rule',
+            updates: [
+                { text: 'Every List Is a Card List: Discounts, Rebates, DC Notice, SO Charge, Overdue, Invoice, Statements, Payment Portal, Revert Requests, Transactions, Bonus History, Team Agents, Agent Management, Agent Payout and Invoices now share one layout. Nothing scrolls sideways any more — what used to sit in columns off the right edge of the screen is on the card itself.', visibility: 'admin' },
+                { text: 'The Same Controls in the Same Place: Search, the filter drawer, column filters, export and refresh sit in one row, in the same order, on every one of those pages. What you learn on one page you already know on the next.', visibility: 'admin' },
+                { text: 'Paging Where There Was None: Overdue, SO Charge, Payment Portal, Discounts, Bonus History and Agent Payout used to draw every record in one endless scroll. They now page, with a Show 10 / 25 / 50 / 100 picker beside the record count.', visibility: 'admin' },
+                { text: 'Dashboard and Monitoring on the Bar: Both are on the floating navigation bar now, where the web sidebar has always had them, instead of being reachable only through the menu.', visibility: 'admin' },
+                { text: 'The Logs Group Matches the Web: All nine log pages are on the bar, in the same order as the web sidebar, each with the same restriction on who may open it.', visibility: 'admin' },
+                { text: 'No More Pages You Cannot Open: Administrators were being offered System Logs and Smart OLT Logs, and every request those pages made came back refused. They are now listed only for the accounts that can actually read them.', visibility: 'admin' },
+                { text: 'Customer Bills and Support Off Your Bar: Those two are the customer portal, not administration. They no longer appear on an administrator or superadmin navigation bar.', visibility: 'admin' },
+                { text: 'The Expenses Widget Loads: The Expenses breakdown on the Monitoring dashboard failed every time it was asked for. It returns figures again.', visibility: 'admin' },
+                { text: 'Pulled-Out Accounts Offer Only Reactivation: When an account is at Pullout billing status, the Service Order form narrows Concern and Repair Category to reactivation alone. A relocation or a router swap can no longer be raised against a service that is not connected.', visibility: 'admin' },
+                { text: 'A Returning Customer Can Sign In Again: Approving a Job Order for an account that had been pulled out now re-opens that customer portal login. Before this, the approval reported the account ready while the customer was still refused at sign-in.', visibility: 'admin' },
+                { text: 'Related Records Read as Cards: The related lists inside a customer record, and the customers listed under an LCP/NAP, were tables that ran off the side of the screen — the customer name was the column being cut. They are cards now, with nothing hidden.', visibility: 'admin' },
+                { text: 'Pullout Now Needs the Repair Category: To disconnect a customer on a pullout visit, choose Pullout as the Repair Category and set the visit to Done. Marking a visit Done on a ticket that only mentions pullout in the concern no longer disconnects anyone — the category is what decides it, so the disconnection is something you record rather than something inferred.', visibility: 'technician' },
+                { text: 'Any Spelling Works: Pullout, Pull Out, For Pullout — the category is read the same way however it is written or spaced.', visibility: 'technician' },
+                { text: 'Reactivation Only on a Pulled-Out Line: If the account you are visiting has already been pulled out, Concern and Repair Category offer reactivation and nothing else, so there is no way to record a relocation or a router replacement against a line that is not connected.', visibility: 'technician' },
+                { text: 'Two-Line Menu Labels: Every option on the floating navigation bar now reads on two lines, one word per line. Longer names like Agent Management and Revert Requests are no longer cut short, and every icon in a row sits at the same height.', visibility: 'all' }
+            ]
+        },
         {
             version: '2.5.66',
             date: 'September 4, 2026',
@@ -363,6 +385,11 @@ const ReleaseNotes: React.FC<ReleaseNotesProps> = ({ onBack }) => {
                         if (role === 'customer') return u.visibility === 'customer';
                         if (role === 'technician' || role === 'tech') return u.visibility === 'technician';
                         if (role === 'agent') return u.visibility === 'agent';
+                        // Administrators and superadmins had no branch at all, so the
+                        // filter fell through to `false` and their Release Notes page
+                        // showed only the entries marked 'all'. Role strings match the
+                        // rest of the app: the server lower-cases role_name.
+                        if (role === 'administrator' || role === 'superadmin') return u.visibility === 'admin';
                         return false;
                     });
                     return { ...note, updates: visibleUpdates };

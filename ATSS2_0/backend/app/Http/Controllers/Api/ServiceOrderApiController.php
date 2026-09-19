@@ -33,6 +33,69 @@ class ServiceOrderApiController extends Controller
     private const CHARGE_PENDING = 'pending';
     private const CHARGE_ADDED   = 'added';
 
+    /**
+     * How a reactivation is spelled, in `concern` and in `repair_category`.
+     *
+     * Support files it as a concern, the technician picks it as a repair
+     * category, and the two fields disagree about the word — the category list
+     * says "Reactivate" while older rows and the migration branch say
+     * "Reactivation". Both spellings are read everywhere, from one list, so a
+     * reactivation is never missed because of which field it was filed in or
+     * which word was used.
+     */
+    private const REACTIVATE_CATEGORIES = ['reactivate', 'reactivation'];
+
+    /**
+     * The technical_details columns a PPPoE username is built out of.
+     *
+     * PppoeUsernameService encodes the LCP, the NAP and the port into the name,
+     * so a change to any one of them is what makes the stored username describe
+     * a line the customer is no longer on. Nothing else on the record has that
+     * property, which is why the reactivation re-sync watches these three and
+     * not the whole row.
+     */
+    private const LINE_IDENTITY_COLUMNS = ['lcp', 'nap', 'port'];
+
+    /**
+     * The online_status readings that mean the RADIUS account is not cut off.
+     *
+     * RadiusStatusSyncService writes one of Online, Offline, Restricted,
+     * Disconnected or Not Found. Only the first two say the account sits in a
+     * normal plan group: "Offline" is a customer whose router is unplugged, not
+     * a customer who has been cut off, and reconnecting them would achieve
+     * nothing except dropping whatever session they do have.
+     *
+     * Restricted and Disconnected are the opposite — the account is in a cut-off
+     * group and a reactivation has to move it back whatever billing says.
+     */
+    private const RADIUS_CONNECTED_STATUSES = ['online', 'offline'];
+
+    /**
+     * How old an online_status reading may be and still be trusted to SKIP a
+     * reconnection.
+     *
+     * The sync runs every minute but works in batches of a few hundred accounts,
+     * so on a large base a given account's row is refreshed every several
+     * minutes rather than every minute. Fifteen leaves room for that without
+     * trusting a reading from an hour ago.
+     *
+     * Only the skip direction is gated on this. Acting on a stale "Restricted"
+     * costs a redundant reconnection; acting on a stale "Online" would leave a
+     * customer cut off after a reactivation that reported success, which is the
+     * failure worth being asymmetric about.
+     */
+    private const RADIUS_STATUS_TRUSTED_FOR_MINUTES = 15;
+
+    /**
+     * What `users.status` reads for a live portal account.
+     *
+     * Lowercase, matching the value JobOrderController writes when it creates a
+     * customer's login. `active` is the column the sign-in actually gates on;
+     * this one is the human-readable state beside it, and the two are written
+     * together so a row can never say "active" while being locked out.
+     */
+    private const PORTAL_STATUS_ACTIVE = 'active';
+
     /** True when at least one failed RADIUS operation was successfully queued for retry. */
     private bool $radiusQueued = false;
 
@@ -1204,11 +1267,15 @@ class ServiceOrderApiController extends Controller
 
             $isAlreadyResolvedReconnect = (($originalConcern === 'Reconnect' || $originalConcern === 'Upgrade/Downgrade Plan') && $originalSupportStatus === 'resolved');
             $isAlreadyResolvedRestrict = (($originalConcern === 'Restrict' || $originalConcern === 'Disconnect') && $originalSupportStatus === 'resolved');
-            $pulloutCategories = ['pullout', 'for pullout'];
-            $isAlreadyPulloutDone = (
-                    in_array(strtolower(trim($originalRepairCategory)), $pulloutCategories, true)
-                    || in_array(strtolower(trim($originalConcern)), $pulloutCategories, true)
-                ) && $originalVisitStatus === 'done';
+            // Mirrors the trigger below, by asking the same object the same
+            // question against the row as it was BEFORE this write. Its job is to
+            // stop a re-save of a finished pullout from running it a second time,
+            // so it has to agree with the trigger or it will suppress a pullout
+            // that has not happened yet.
+            $isAlreadyPulloutDone = \App\Support\PulloutCategory::deactivatesPortalLogin(
+                $originalRepairCategory,
+                $originalVisitStatus
+            );
             $isAlreadyMigrationDone = (in_array($originalRepairCategory, ['migrate', 'relocate', 'relocate router', 'transfer lcp/nap/port']) && $originalVisitStatus === 'done');
             // Was the ONU handover already earned before this write? If so this save
             // is a re-save of a finished replacement and must not run it again.
@@ -1264,7 +1331,7 @@ class ServiceOrderApiController extends Controller
             // Compared case-insensitively — the old `=== 'Reactivate'` check missed
             // any other casing. 'reactivation' is accepted too because the
             // repair-category lookup spells it that way and the two get mixed up.
-            $reactivateConcerns = ['reactivate', 'reactivation'];
+            $reactivateConcerns = self::REACTIVATE_CATEGORIES;
 
             // Read from the repair category as well as the concern.
             //
@@ -1298,8 +1365,16 @@ class ServiceOrderApiController extends Controller
                 // looked Active already and the write was skipped. Re-running it
                 // is harmless and repairs any account left stuck that way.
                 try {
+                    // Both columns, together. `active` is what the sign-in checks;
+                    // `status` is the state shown beside the account and is what a
+                    // new portal login is created holding. Writing only the first
+                    // left a reactivated customer able to sign in while every
+                    // screen still described them as inactive.
                     $activated = \App\Models\User::where('username', $serviceOrder->account_no)
-                        ->update(['active' => 1]);
+                        ->update([
+                            'active' => 1,
+                            'status' => self::PORTAL_STATUS_ACTIVE,
+                        ]);
 
                     if ($activated === 0) {
                         // Not the same as success: no portal login exists for this
@@ -1308,32 +1383,63 @@ class ServiceOrderApiController extends Controller
                             'account_no' => $serviceOrder->account_no
                         ]);
                     } else {
-                        \Log::info('[REACTIVATE] users.active set to 1', [
+                        \Log::info('[REACTIVATE] users.active set to 1 and users.status set to active', [
                             'account_no' => $serviceOrder->account_no,
                             'rows' => $activated
                         ]);
                     }
                 } catch (\Exception $e) {
-                    \Log::error('[REACTIVATE] Failed to set users.active = 1: ' . $e->getMessage(), [
+                    \Log::error('[REACTIVATE] Failed to activate the portal login: ' . $e->getMessage(), [
                         'account_no' => $serviceOrder->account_no
                     ]);
                 }
 
-                // The billing/RADIUS side stays gated — re-running it for an
-                // account that is already Active would be a no-op at best.
+                // Reconnect, unless the line is already up.
+                //
+                // "Already up" used to mean billing_status_id == 1 and nothing
+                // else, which was wrong in both directions. An account can carry
+                // Active billing while its RADIUS account still sits in the
+                // Restricted or Disconnected group — several paths set the
+                // billing column without touching RADIUS — and that reactivation
+                // reported success while leaving the customer cut off. The
+                // reverse costs less but is still churn: an account already in
+                // its plan group gets its session dropped and re-applied for
+                // nothing.
+                //
+                // So RADIUS is asked first and billing is the fallback for when
+                // there is no usable reading. See radiusSaysConnected().
                 if (!$isAlreadyResolvedReactivate) {
                     $billingAccount = BillingAccount::where('account_no', $serviceOrder->account_no)->first();
-                    if ($billingAccount && (int) $billingAccount->billing_status_id !== 1) {
-                        \Log::info('Triggering reactivation for Service Order with Reactivate concern', [
+
+                    if (!$billingAccount) {
+                        $reactivateStatus = 'no_account';
+                        \Log::warning('[REACTIVATE] No billing account; reconnection skipped', [
                             'account_no' => $serviceOrder->account_no,
-                            'current_billing_status_id' => $billingAccount->billing_status_id
                         ]);
-                        // attemptReconnection sets billing_status_id to 1 (Active) and re-applies the plan in RADIUS
-                        $reactivateStatus = $this->attemptReconnection($billingAccount, $id, $updatedByUser, $organizationId);
                     } else {
-                        \Log::info('Reactivate: billing already Active or account not found; RADIUS step skipped', [
-                            'account_no' => $serviceOrder->account_no
-                        ]);
+                        $radiusConnected = $this->radiusSaysConnected($serviceOrder->account_no);
+                        $billingActive = (int) $billingAccount->billing_status_id === 1;
+
+                        // A reading beats the billing column either way; billing
+                        // only decides when RADIUS has nothing fresh to say.
+                        $alreadyUp = $radiusConnected ?? $billingActive;
+
+                        if ($alreadyUp) {
+                            $reactivateStatus = $radiusConnected === true ? 'already_online' : 'already_active';
+                            \Log::info('[REACTIVATE] Account is already connected; RADIUS step skipped', [
+                                'account_no'                => $serviceOrder->account_no,
+                                'radius_says_connected'     => $radiusConnected,
+                                'billing_status_id'         => $billingAccount->billing_status_id,
+                            ]);
+                        } else {
+                            \Log::info('Triggering reactivation for Service Order with Reactivate concern', [
+                                'account_no' => $serviceOrder->account_no,
+                                'current_billing_status_id' => $billingAccount->billing_status_id,
+                                'radius_says_connected' => $radiusConnected,
+                            ]);
+                            // attemptReconnection sets billing_status_id to 1 (Active) and re-applies the plan in RADIUS
+                            $reactivateStatus = $this->attemptReconnection($billingAccount, $id, $updatedByUser, $organizationId);
+                        }
                     }
                 }
             }
@@ -1384,16 +1490,21 @@ class ServiceOrderApiController extends Controller
             $pulloutRow = DB::table('service_orders')->where('id', $id)->first();
             $pulloutVisitStatus = strtolower(trim((string) ($pulloutRow->visit_status ?? '')));
             $pulloutRepairCategory = strtolower(trim((string) ($pulloutRow->repair_category ?? '')));
-            $pulloutConcern = strtolower(trim((string) ($pulloutRow->concern ?? '')));
 
-            // 'for pullout' is accepted next to 'pullout' because the two spellings are
-            // used interchangeably for these tickets. Auto-generated requests put 'for pullout'
-            // in `concern` while technicians may set either `repair_category` or `concern`.
-            $pulloutCategories = ['pullout', 'for pullout'];
-            $isPulloutVisitDone = (
-                    in_array($pulloutRepairCategory, $pulloutCategories, true)
-                    || in_array($pulloutConcern, $pulloutCategories, true)
-                ) && $pulloutVisitStatus === 'done';
+            // The REPAIR CATEGORY decides this, and nothing else. Every spelling
+            // of it — "Pullout", "Pull Out", "for pullout" — is one instruction;
+            // see App\Support\PulloutCategory, which holds the whole rule.
+            //
+            // Consequence worth knowing: AutoDisconnectService::createPulloutRequest
+            // raises its tickets with concern = 'for pullout' and no category, so
+            // closing one of those disables the login only if the technician picks
+            // Pullout as the Repair Category. The modal requires a category when
+            // the visit is Done and Pullout is in the list, so it is available —
+            // but it is a choice now rather than an inference.
+            $isPulloutVisitDone = \App\Support\PulloutCategory::deactivatesPortalLogin(
+                $pulloutRepairCategory,
+                $pulloutVisitStatus
+            );
 
             if ($isPulloutVisitDone && !$isAlreadyPulloutDone) {
                 $billingAccount = BillingAccount::where('account_no', $serviceOrder->account_no)->first();
@@ -1473,6 +1584,67 @@ class ServiceOrderApiController extends Controller
                 }
             }
 
+            // Re-point a reactivated account's RADIUS account at the line it came
+            // back on.
+            //
+            // A reactivation is not a relocation, so it is not in the list above
+            // and must not be: most reactivations put the customer back on the
+            // port they left on, and renaming their PPPoE account for that would
+            // churn a working credential for nothing. But some come back on a
+            // different LCP, NAP or port, and those three are exactly what
+            // PppoeUsernameService encodes into the username — so when one of
+            // them moves, the stored credential starts describing a line the
+            // customer is no longer on, and RADIUS has to be told.
+            //
+            // The change is read off the row rather than off the request: the
+            // technical_details write further up has already landed by here, so
+            // comparing it against the copy taken before the write answers "did
+            // this save move the line" for any route into it, and cannot be
+            // claimed by a client that did not actually change anything.
+            //
+            // No `already done` guard, unlike the migration trigger beside it.
+            // This one is self-limiting — a re-save of an unchanged ticket
+            // produces no diff and does nothing — and adding one would block the
+            // legitimate case of a second move on a ticket that is already Done.
+            $reactivateRadiusStatus = null;
+
+            if (in_array($repairCategory, self::REACTIVATE_CATEGORIES, true) && $visitStatus === 'done') {
+                $technicalAfterUpdate = DB::selectOne(
+                    "SELECT * FROM technical_details WHERE account_no = ?",
+                    [$accountRef]
+                );
+
+                $movedColumns = $this->changedLineIdentity($oldTechnical, $technicalAfterUpdate);
+
+                if (empty($movedColumns)) {
+                    $reactivateRadiusStatus = 'no_change';
+                    \Log::info('[API SERVICE ORDER REACTIVATE RADIUS SKIP] LCP/NAP/Port unchanged', [
+                        'account_no' => $serviceOrder->account_no,
+                    ]);
+                } else {
+                    $billingAccount = BillingAccount::where('account_no', $serviceOrder->account_no)->first();
+
+                    if (!$billingAccount) {
+                        $reactivateRadiusStatus = 'no_account';
+                        \Log::warning('[API SERVICE ORDER REACTIVATE RADIUS SKIP] No billing account', [
+                            'account_no' => $serviceOrder->account_no,
+                        ]);
+                    } else {
+                        \Log::info('[API SERVICE ORDER REACTIVATE RADIUS] Line moved, re-syncing RADIUS', [
+                            'account_no' => $serviceOrder->account_no,
+                            'changed'    => $movedColumns,
+                        ]);
+
+                        $reactivateRadiusStatus = $this->attemptReactivationRadiusSync(
+                            $billingAccount,
+                            $id,
+                            $updatedByUser,
+                            $organizationId
+                        );
+                    }
+                }
+            }
+
             $updatedServiceOrder = DB::table('service_orders')->where('id', $id)->first();
 
             // Compare and log changes to customers, billing_accounts, and technical_details
@@ -1526,6 +1698,11 @@ class ServiceOrderApiController extends Controller
                 'data' => $updatedServiceOrder,
                 'reconnect_status' => $reconnectStatus,
                 'reactivate_status' => $reactivateStatus,
+                // The RADIUS rename a reactivation onto a different LCP/NAP/port
+                // triggers. Separate from reactivate_status, which is the billing
+                // and portal side: one can succeed while the other is queued, and
+                // the technician needs to be told which.
+                'reactivate_radius_status' => $reactivateRadiusStatus,
                 'restricted_status' => $restrictedStatus,
                 'pullout_status' => $pulloutStatus,
                 'migration_status' => $migrationStatus,
@@ -2699,6 +2876,265 @@ class ServiceOrderApiController extends Controller
         }
         catch (\Exception $e) {
             \Log::error('[API SERVICE ORDER PULLOUT EXCEPTION] ' . $e->getMessage());
+            return 'exception';
+        }
+    }
+
+    /**
+     * Does RADIUS currently have this account in a normal plan group?
+     *
+     * Read from online_status, which the every-minute sync keeps in step with
+     * the RADIUS servers — the controller does not call RADIUS itself for this,
+     * because a reachability round trip on the save path would make a slow or
+     * unreachable server slow down every reactivation, and the answer is already
+     * being collected.
+     *
+     * Three answers, and the third is the point of returning a nullable:
+     *
+     *   true   the account is in its plan group (Online, or Offline with the
+     *          router unplugged). Nothing to reconnect.
+     *   false  the account is Restricted, Disconnected or absent from RADIUS.
+     *          It is cut off and a reactivation has to bring it back.
+     *   null   no row, or one too old to trust. The caller falls back to the
+     *          billing column rather than guessing — and the fallback errs
+     *          towards reconnecting, because a redundant reconnection costs a
+     *          dropped session and a missed one costs a customer still cut off
+     *          after being told they were restored.
+     */
+    private function radiusSaysConnected(?string $accountNo): ?bool
+    {
+        if (empty($accountNo)) {
+            return null;
+        }
+
+        try {
+            $reading = DB::table('online_status')
+                ->where('account_no', $accountNo)
+                ->select('session_status', 'updated_at')
+                ->first();
+
+            if (!$reading || $reading->session_status === null) {
+                return null;
+            }
+
+            $status = strtolower(trim((string) $reading->session_status));
+
+            if ($status === '') {
+                return null;
+            }
+
+            $connected = in_array($status, self::RADIUS_CONNECTED_STATUSES, true);
+
+            // Staleness is only allowed to veto the skip. A stale reading that
+            // says "cut off" still sends us down the reconnect path, which is
+            // the safe direction to be wrong in.
+            if ($connected) {
+                $updatedAt = $reading->updated_at ? Carbon::parse($reading->updated_at) : null;
+
+                if (!$updatedAt || $updatedAt->lt(now()->subMinutes(self::RADIUS_STATUS_TRUSTED_FOR_MINUTES))) {
+                    \Log::info('[REACTIVATE] online_status says connected but the reading is stale; ignoring it', [
+                        'account_no'     => $accountNo,
+                        'session_status' => $reading->session_status,
+                        'updated_at'     => $reading->updated_at,
+                    ]);
+
+                    return null;
+                }
+            }
+
+            return $connected;
+        } catch (\Exception $e) {
+            // online_status is an optimisation, not a dependency: a deployment
+            // without the table, or a failed read, must not stop a reactivation.
+            \Log::warning('[REACTIVATE] Could not read online_status: ' . $e->getMessage(), [
+                'account_no' => $accountNo,
+            ]);
+
+            return null;
+        }
+    }
+
+    /**
+     * Which of the LCP/NAP/port columns this save actually moved.
+     *
+     * Compared trimmed and case-folded so a cosmetic difference — "lcp-008" in
+     * one field and "LCP-008" in the other, or a stray trailing space picked up
+     * from a paste — is not read as a move and does not rename a working PPPoE
+     * account. A missing row on either side means there is nothing to compare
+     * and therefore nothing moved.
+     *
+     * @param  object|null  $before  technical_details as it was before the write.
+     * @param  object|null  $after   technical_details as it is now.
+     * @return string[]  The column names that differ, in LINE_IDENTITY_COLUMNS order.
+     */
+    private function changedLineIdentity($before, $after): array
+    {
+        if (!$before || !$after) {
+            return [];
+        }
+
+        $normalize = static fn ($value) => strtolower(trim((string) ($value ?? '')));
+
+        $changed = [];
+
+        foreach (self::LINE_IDENTITY_COLUMNS as $column) {
+            if ($normalize($before->$column ?? null) !== $normalize($after->$column ?? null)) {
+                $changed[] = $column;
+            }
+        }
+
+        return $changed;
+    }
+
+    /**
+     * Rename a reactivated account's RADIUS account to match the line it is on.
+     *
+     * Called only when the save moved the LCP, NAP or port — see the caller.
+     * Everything here reads the record as it stands AFTER that write, so the
+     * name is generated from the line the customer is actually on rather than
+     * from what the request happened to carry.
+     *
+     * The rename itself goes through ManualRadiusOperationsService::
+     * updateCredentials, the same call Migrate and Transfer LCP/NAP/PORT use.
+     * That is deliberate rather than convenient: it writes technical_details and
+     * job_orders first and only then renames on the device, and on a device
+     * failure it throws so the caller can queue the rename — which is what makes
+     * a half-completed rename recoverable instead of a silent split between the
+     * two. Nothing here writes the username itself; doing so would put a second
+     * writer on the same column and the two would disagree the first time one of
+     * them failed.
+     *
+     * Return values, all surfaced to the client:
+     *   no_username   the account has no PPPoE credential to rename
+     *   no_change     the generated name already matches what is stored
+     *   success       renamed in the database and on the device
+     *   radius_failed the database holds the new name; the device rename is queued
+     *   exception     nothing was attempted
+     */
+    private function attemptReactivationRadiusSync(
+        $billingAccount,
+        $serviceOrderId = null,
+        $updatedByUser = 'System',
+        ?int $organizationId = null
+    ): string {
+        try {
+            $accountNo = $billingAccount->account_no;
+
+            \Log::info('[API SERVICE ORDER REACTIVATE RADIUS] Starting for account: ' . $accountNo);
+
+            // The same projection attemptMigration builds its name from, so the
+            // two produce identical usernames for identical lines.
+            $fullInfo = DB::table('billing_accounts')
+                ->join('customers', 'billing_accounts.customer_id', '=', 'customers.id')
+                ->leftJoin('technical_details', 'billing_accounts.id', '=', 'technical_details.account_id')
+                ->where('billing_accounts.account_no', $accountNo)
+                ->select(
+                    'customers.first_name',
+                    'customers.middle_initial',
+                    'customers.last_name',
+                    'customers.contact_number_primary as mobile_number',
+                    'customers.desired_plan',
+                    'technical_details.lcp',
+                    'technical_details.nap',
+                    'technical_details.port',
+                    'technical_details.username as pppoe_username'
+                )
+                ->first();
+
+            $oldUsername = $fullInfo->pppoe_username ?? null;
+
+            if (empty($oldUsername)) {
+                \Log::info('[API SERVICE ORDER REACTIVATE RADIUS SKIP] No PPPoE username on the account');
+                return 'no_username';
+            }
+
+            $pppoeService = new PppoeUsernameService();
+            $newUsername = $pppoeService->generateUniqueUsername((array) $fullInfo);
+
+            // The line moved but the name did not — a pattern that does not
+            // encode the port, say. Renaming to the name already in use would be
+            // a no-op on the device and a pointless session drop for the
+            // customer, so stop here.
+            if ($oldUsername === $newUsername) {
+                \Log::info('[API SERVICE ORDER REACTIVATE RADIUS SKIP] Username unchanged', [
+                    'account_no' => $accountNo,
+                    'username'   => $oldUsername,
+                ]);
+                return 'no_change';
+            }
+
+            \Log::info("[API SERVICE ORDER REACTIVATE RADIUS] Renaming '{$oldUsername}' -> '{$newUsername}'");
+
+            $credParams = [
+                'accountNumber' => $accountNo,
+                'username'      => $oldUsername,
+                'newUsername'   => $newUsername,
+                // Reactivation restores an account; it does not re-issue it. The
+                // customer's router is still configured with the old password and
+                // keeping it is what lets them come back up without a re-config.
+                'newPassword'   => null,
+                'updatedBy'     => $updatedByUser,
+            ];
+
+            $radiusSuccess = false;
+            $lastRadiusError = '';
+
+            for ($attempt = 1; $attempt <= 2; $attempt++) {
+                $this->radiusSteps[] = ['step' => 'attempt_' . $attempt, 'operation' => 'reactivate', 'status' => 'trying'];
+
+                try {
+                    $radiusOps = app(ManualRadiusOperationsService::class);
+                    $credResult = $radiusOps->updateCredentials($credParams);
+
+                    if (($credResult['status'] ?? '') === 'success') {
+                        $radiusSuccess = true;
+                        $this->radiusSteps[count($this->radiusSteps) - 1]['status'] = 'success';
+                        \Log::channel('radiusrelated')->info("[API SERVICE ORDER REACTIVATE RADIUS] Renamed on attempt {$attempt}");
+                        break;
+                    }
+
+                    $lastRadiusError = $credResult['message'] ?? 'Operation returned failure';
+                    $this->radiusSteps[count($this->radiusSteps) - 1]['status'] = 'failed';
+                    \Log::channel('radiusrelated')->warning("[API SERVICE ORDER REACTIVATE RADIUS] Attempt {$attempt}/2 failed: {$lastRadiusError}");
+                } catch (\Exception $radEx) {
+                    $lastRadiusError = $radEx->getMessage();
+                    $this->radiusSteps[count($this->radiusSteps) - 1]['status'] = 'failed';
+                    \Log::channel('radiusrelated')->warning("[API SERVICE ORDER REACTIVATE RADIUS] Attempt {$attempt}/2 exception: {$lastRadiusError}");
+                }
+
+                if ($attempt < 2) {
+                    sleep(1);
+                }
+            }
+
+            if ($radiusSuccess) {
+                return 'success';
+            }
+
+            // updateCredentials renames the database before it touches the
+            // device, so by here the account already holds the new name and the
+            // device does not. Queuing the same call is what closes that gap —
+            // the worker replays it until the device agrees. Losing it would
+            // leave the customer unable to authenticate with either name.
+            \Log::channel('radiusrelated')->error('[API SERVICE ORDER REACTIVATE RADIUS] All attempts failed. Queuing for retry.');
+            $this->radiusSteps[] = ['step' => 'queued', 'operation' => 'reactivate', 'status' => 'trying'];
+
+            $this->trackRadiusQueue([
+                'organization_id' => $organizationId ?? null,
+                'source_type'     => 'service_order',
+                'source_id'       => $serviceOrderId ?? 0,
+                'account_no'      => $accountNo,
+                'operation'       => 'update_credentials',
+                'params'          => $credParams,
+                'last_error'      => $lastRadiusError,
+                'created_by'      => $updatedByUser,
+            ]);
+
+            $this->radiusSteps[count($this->radiusSteps) - 1]['status'] = $this->radiusQueued ? 'success' : 'failed';
+
+            return 'radius_failed';
+        } catch (\Exception $e) {
+            \Log::error('[API SERVICE ORDER REACTIVATE RADIUS EXCEPTION] ' . $e->getMessage());
             return 'exception';
         }
     }

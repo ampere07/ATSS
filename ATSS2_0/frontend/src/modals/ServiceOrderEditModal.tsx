@@ -118,6 +118,119 @@ const CLOSING_VISIT_STATUS: Record<string, string> = {
   Failed: 'Failed'
 };
 
+/**
+ * The repair categories that put the new LCP/NAP/Port fields on screen and send
+ * them, because the work moves the customer to a different line.
+ *
+ * All four required the full set — router serial, LCP-NAP, port, VLAN, router
+ * model — because a migration or a transfer always replaces the whole
+ * installation. A reactivation does not, so it is not listed here; see
+ * REACTIVATE_CATEGORIES.
+ */
+const RELOCATION_CATEGORIES = ['Migrate', 'Relocate', 'Relocate Router', 'Transfer LCP/NAP/PORT'];
+
+/**
+ * How a reactivation is spelled, lowercased.
+ *
+ * "Reactivate" is what the picker offers. "Reactivation" is what older rows and
+ * the server's migration branch say, and a ticket saved under it has to keep
+ * behaving like one when it is reopened, so both are read. Mirrors
+ * ServiceOrderApiController::REACTIVATE_CATEGORIES.
+ */
+const REACTIVATE_CATEGORIES = ['reactivate', 'reactivation'];
+
+/** Is this repair category a reactivation, whichever way it is spelled? */
+const isReactivateCategory = (repairCategory?: string | null): boolean =>
+  REACTIVATE_CATEGORIES.includes(String(repairCategory ?? '').toLowerCase().trim());
+
+/**
+ * billing_status.id 5 is Pullout — the account has been physically pulled out
+ * and its portal login disabled (see App\Support\PulloutCategory, which is what
+ * disables it).
+ *
+ * The only ticket worth raising against an account in that state is the one
+ * that brings it back, so both pickers collapse to the reactivation option.
+ * Offering "Relocate" or "Replace Router" on a pulled-out account invites a
+ * visit for a service that is not connected.
+ */
+const PULLOUT_BILLING_STATUS_ID = 5;
+
+/**
+ * The repair categories, lifted out of the JSX so the pulled-out case can
+ * narrow the list rather than duplicate it.
+ */
+const REPAIR_CATEGORY_OPTIONS = [
+  { name: 'None' },
+  { name: 'Fiber Relaying' },
+  { name: 'Migrate' },
+  { name: 'others' },
+  { name: 'Pullout' },
+  { name: 'Reactivate' },
+  { name: 'Reboot/Reconfig Router' },
+  { name: 'Relocate Router' },
+  { name: 'Relocate' },
+  { name: 'Replace Patch Cord' },
+  { name: 'Replace Router' },
+  { name: 'Resplice' },
+  { name: 'Transfer LCP/NAP/PORT' },
+  { name: 'Update Vlan' },
+];
+
+/** The single category a pulled-out account may be given. */
+const REACTIVATE_REPAIR_CATEGORY = REPAIR_CATEGORY_OPTIONS.find(
+  (option) => isReactivateCategory(option.name)
+)!;
+
+/** The concern to fall back on when the catalog has no reactivation entry. */
+const REACTIVATE_CONCERN_FALLBACK = 'Reactivate';
+
+/**
+ * What the LCP-NAP and Port fields mean under this repair category.
+ *
+ * Three answers, not two: a relocation requires them as the new installation, a
+ * reactivation offers them as an optional correction, and everything else does
+ * not show them at all. Switching between the three is what has to clear them —
+ * see handleInputChange.
+ */
+const lineFieldGroup = (repairCategory?: string | null): 'relocation' | 'reactivate' | 'none' => {
+  if (RELOCATION_CATEGORIES.includes(String(repairCategory ?? ''))) return 'relocation';
+  if (isReactivateCategory(repairCategory)) return 'reactivate';
+  return 'none';
+};
+
+/**
+ * Has the technician put the account on a different LCP, NAP or port?
+ *
+ * Compared the way the server compares them — trimmed and case-folded — so the
+ * form and the API agree about what counts as a move, and a paste that differs
+ * only in case does not read as one. A blank "new" value means the field was
+ * left alone, not that the line was cleared, so it never counts as a change.
+ *
+ * The LCP and NAP come out of the single LCP-NAP picker, which is why they are
+ * parsed here rather than read from two fields.
+ */
+const lineIdentityChanged = (current: { lcp: string; nap: string; port: string },
+                             next: { lcp: string; nap: string; port: string }): string[] => {
+  const normalize = (value?: string | null) => String(value ?? '').toLowerCase().trim();
+
+  return (['lcp', 'nap', 'port'] as const).filter(field => {
+    const proposed = normalize(next[field]);
+    return proposed !== '' && proposed !== normalize(current[field]);
+  });
+};
+
+/** Pull "LCP-008" and "NAP-02" out of the combined LCP-NAP picker value. */
+const parseLcpNap = (lcpnap?: string | null): { lcp: string; nap: string } => {
+  const value = String(lcpnap ?? '');
+  const lcpMatch = value.match(/LCP-\d+/i);
+  const napMatch = value.match(/NAP-\d+/i);
+
+  return {
+    lcp: lcpMatch ? lcpMatch[0].toUpperCase() : '',
+    nap: napMatch ? napMatch[0].toUpperCase() : '',
+  };
+};
+
 const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
   isOpen,
   onClose,
@@ -678,6 +791,13 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
         newNap: '',
         newPort: '',
         newVlan: '',
+        // Reset with the rest of the "new" fields rather than left behind. It was
+        // the only one of the group not cleared here, which was harmless while
+        // the field belonged to Migrate alone — the category had to be chosen
+        // again anyway. Reactivate now reads it too, and a value left over from
+        // the previous ticket in this session would read as "the line moved" and
+        // rename a PPPoE account that nobody touched.
+        newLcpnap: '',
         routerModel: '',
         address: serviceOrderData.contactAddress || serviceOrderData.contact_address || serviceOrderData.address || '',
         barangay: serviceOrderData.barangay || '',
@@ -715,11 +835,43 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     fetchBillingStatus();
   }, [isOpen, serviceOrderData]);
 
+  // A pulled-out account: both pickers collapse to reactivation.
+  const isPulledOut = billingStatusId === PULLOUT_BILLING_STATUS_ID;
+
+  // `concern` is a free string on service_orders and the update path never maps
+  // it back to support_concern.id, so a reactivation entry the catalog happens
+  // not to carry can still be offered and saved.
+  const reactivateConcerns = concerns.filter((c) => isReactivateCategory(c.concern_name));
+  const concernOptions = isPulledOut
+    ? (reactivateConcerns.length > 0
+        ? reactivateConcerns
+        : [{ concern_name: REACTIVATE_CONCERN_FALLBACK } as Concern])
+    : [{ concern_name: 'None' } as Concern, ...concerns];
+
+  const repairCategoryOptions = isPulledOut
+    ? [REACTIVATE_REPAIR_CATEGORY]
+    : REPAIR_CATEGORY_OPTIONS;
+
   const handleInputChange = (field: keyof ServiceOrderEditFormData, value: string) => {
     setFormData(prev => {
       const newState = { ...prev, [field]: value };
       if (field === 'newLcp' || field === 'newNap' || field === 'newLcpnap') {
         newState.newPort = '';
+      }
+      // Moving to a repair category that means something different by the LCP-NAP
+      // and Port fields starts them empty.
+      //
+      // The two groups read the same fields for different purposes: under a
+      // relocation they are the new installation and are required, under a
+      // reactivation they are the optional "came back on a different line" and
+      // are what triggers the RADIUS rename. Carrying a half-filled relocation
+      // into a reactivation would silently rename a working PPPoE account.
+      // Re-picking the same category is not a change and clears nothing.
+      if (field === 'repairCategory' && lineFieldGroup(value) !== lineFieldGroup(prev.repairCategory)) {
+        newState.newLcpnap = '';
+        newState.newPort = '';
+        newState.newLcp = '';
+        newState.newNap = '';
       }
       // Closing the ticket closes its visit with it — see CLOSING_VISIT_STATUS.
       if (field === 'supportStatus' && CLOSING_VISIT_STATUS[value]) {
@@ -886,8 +1038,9 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     const isForVisit = formData.supportStatus === 'For Visit';
     const isVisitDone = isForVisit && formData.visitStatus === 'Done';
     const isVisitRescheduledOrFailed = isForVisit && (formData.visitStatus === 'Reschedule' || formData.visitStatus === 'Failed');
-    const isMigrateGroup = isVisitDone && ['Migrate', 'Relocate', 'Relocate Router', 'Transfer LCP/NAP/PORT'].includes(formData.repairCategory);
+    const isMigrateGroup = isVisitDone && RELOCATION_CATEGORIES.includes(formData.repairCategory);
     const isReplaceRouter = isVisitDone && formData.repairCategory === 'Replace Router';
+    const isReactivate = isVisitDone && isReactivateCategory(formData.repairCategory);
 
     if (!formData.supportStatus.trim()) newErrors.supportStatus = 'Support Status is required';
 
@@ -941,6 +1094,16 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       if (!formData.newRouterModemSN.trim()) newErrors.newRouterModemSN = 'New Router Modem SN is required';
     }
 
+    // Reactivation: both fields are optional, because most reactivations put the
+    // customer back on the line they left on and there is nothing to record. A
+    // port on its own is the one combination that cannot be saved — the port
+    // number only means anything against an LCP-NAP, and sending one without the
+    // other would move the account to a port on whichever LCP-NAP it is already
+    // on, which is not what picking a port was meant to say.
+    if (isReactivate && formData.newPort.trim() && !formData.newLcpnap.trim()) {
+      newErrors.newLcpnap = 'Select the LCP-NAP this port belongs to';
+    }
+
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -961,6 +1124,26 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     const status = formData.supportStatus.toLowerCase();
     const concern = formData.concern.toLowerCase();
     return status === 'resolved' && (concern === 'restrict' || concern === 'disconnect');
+  };
+
+  /**
+   * The LCP/NAP/Port fields a reactivation is about to move, if any.
+   *
+   * Drives the warning below, and reads the form exactly as the save does, so
+   * what the banner promises is what gets sent. Empty means this save renames
+   * nothing in RADIUS.
+   */
+  const reactivateLineMove = (): string[] => {
+    if (formData.visitStatus.toLowerCase() !== 'done' || !isReactivateCategory(formData.repairCategory)) {
+      return [];
+    }
+
+    const { lcp, nap } = parseLcpNap(formData.newLcpnap);
+
+    return lineIdentityChanged(
+      { lcp: formData.lcp, nap: formData.nap, port: formData.port },
+      { lcp, nap, port: formData.newPort }
+    );
   };
 
   const handleItemChange = (index: number, field: 'itemId' | 'quantity', value: string) => {
@@ -1057,8 +1240,13 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
     // SmartOLT Validation Logic
     if (formData.connectionType === 'Fiber') {
       // Check if New Router Modem SN field is visible
+      // The categories that draw the serial field: the relocation group, which
+      // replaces the whole installation, plus Replace Router, which replaces only
+      // the hardware. Reactivate is deliberately not among them — it restores an
+      // account onto a line, and the router it comes back on is the one it left
+      // with.
       const isNewRouterModemSNVisible = updatedFormData.visitStatus === 'Done' &&
-        ['Migrate', 'Relocate', 'Relocate Router', 'Transfer LCP/NAP/PORT', 'Replace Router'].includes(updatedFormData.repairCategory);
+        [...RELOCATION_CATEGORIES, 'Replace Router'].includes(updatedFormData.repairCategory);
 
       // Validate New Router Modem SN if provided and visible
       if (isNewRouterModemSNVisible && formData.newRouterModemSN?.trim()) {
@@ -1188,14 +1376,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       });
 
       // Parse New LCPNAP
-      let newLcp = '';
-      let newNap = '';
-      if (updatedFormData.newLcpnap) {
-        const lcpMatch = updatedFormData.newLcpnap.match(/LCP-\d+/i);
-        const napMatch = updatedFormData.newLcpnap.match(/NAP-\d+/i);
-        newLcp = lcpMatch ? lcpMatch[0].toUpperCase() : '';
-        newNap = napMatch ? napMatch[0].toUpperCase() : '';
-      }
+      const { lcp: newLcp, nap: newNap } = parseLcpNap(updatedFormData.newLcpnap);
 
       const isForVisit = updatedFormData.supportStatus === 'For Visit';
       const isVisitDone = isForVisit && updatedFormData.visitStatus === 'Done';
@@ -1217,13 +1398,37 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
        */
       const remarkIfPresent = (key: string, value: string | null | undefined) =>
         String(value ?? '').trim() === '' ? {} : { [key]: value };
-      const isMigrateGroup = isVisitDone && ['Migrate', 'Relocate', 'Relocate Router', 'Transfer LCP/NAP/PORT'].includes(updatedFormData.repairCategory);
+      const isMigrateGroup = isVisitDone && RELOCATION_CATEGORIES.includes(updatedFormData.repairCategory);
       const isReplaceRouter = isVisitDone && updatedFormData.repairCategory === 'Replace Router';
       const isUpdateVlan = isVisitDone && updatedFormData.repairCategory === 'Update Vlan';
+      const isReactivate = isVisitDone && isReactivateCategory(updatedFormData.repairCategory);
 
       const showNewRouterSN = isVisitDone && (isMigrateGroup || isReplaceRouter);
       const showNewTechDetails = isVisitDone && isMigrateGroup;
       const showNewVlan = isVisitDone && (isMigrateGroup || isUpdateVlan);
+
+      /**
+       * A reactivation that brings the customer back on a different line.
+       *
+       * Only the three fields the PPPoE username is built from are considered —
+       * LCP, NAP and port — because those are what make the stored credential
+       * describe the wrong line. Sending them is what tells the server to rename
+       * the RADIUS account; sending them when nothing moved would rename a
+       * working credential and drop the customer's session for no reason, so the
+       * keys are omitted entirely rather than sent unchanged.
+       *
+       * The same comparison runs server side against the row, which is the one
+       * that decides. This copy exists so the form can say what is about to
+       * happen before the save, not to be trusted in place of it.
+       */
+      const reactivateMovedFields = isReactivate
+        ? lineIdentityChanged(
+            { lcp: updatedFormData.lcp, nap: updatedFormData.nap, port: updatedFormData.port },
+            { lcp: newLcp, nap: newNap, port: updatedFormData.newPort }
+          )
+        : [];
+
+      const sendReactivateLineMove = reactivateMovedFields.length > 0;
 
       // Relocation address changes (customers table). All four fields are optional, so
       // only the ones that differ from the values loaded on open are sent.
@@ -1296,6 +1501,19 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
             router_model: updatedFormData.routerModel,
           } : {}),
           ...(showNewVlan ? { new_vlan: updatedFormData.newVlan } : {}),
+
+          // Reactivation onto a different line. Deliberately the LCP/NAP/port
+          // three and nothing else: the router serial, VLAN and model belong to
+          // a relocation, and a reactivation that also replaced the hardware is
+          // a different repair category. Sent only when one of the three moved,
+          // so an ordinary reactivation posts no new_* keys at all and the
+          // server's own comparison finds nothing to re-sync.
+          ...(sendReactivateLineMove ? {
+            new_lcpnap: updatedFormData.newLcpnap,
+            new_lcp: newLcp,
+            new_nap: newNap,
+            new_port: updatedFormData.newPort,
+          } : {}),
         } : {}),
 
         concern: updatedFormData.concern,
@@ -1377,6 +1595,13 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
           pullout_status?: string | null;
           restricted_status?: string | null;
           disconnect_status?: string | null;
+          // The reconnection half of a Reactivate ticket: billing back to Active
+          // and the plan re-applied in RADIUS. 'already_online' / 'already_active'
+          // mean the line was up and nothing was touched.
+          reactivate_status?: string | null;
+          // The RADIUS rename triggered when a reactivation moved the line.
+          // 'no_change' and null both mean nothing needed renaming.
+          reactivate_radius_status?: string | null;
           radius_queued?: boolean;
           radius_queue_failed?: boolean;
           radius_steps?: Array<{ step: string; operation: string; status: string }>;
@@ -1462,7 +1687,8 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
               : step.operation === 'disconnect' ? 'Disconnection'
                 : step.operation === 'pullout' ? 'Pullout'
                   : step.operation === 'migration' ? 'Migration'
-                    : 'RADIUS';
+                    : step.operation === 'reactivate' ? 'Reactivation PPPoE rename'
+                      : 'RADIUS';
 
           if (step.step === 'attempt_1') {
             stepMessage = `Attempting ${opLabel} via RADIUS...`;
@@ -1516,6 +1742,68 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
       // Pullout Messages
       if (response.data.pullout_status === 'success') {
         successMessage += '\n\nRADIUS account disabled for pullout.';
+      }
+
+      // Reactivation: the reconnection itself.
+      //
+      // Reported whatever the outcome, including the two "nothing to do"
+      // answers. A technician who files a reactivation and is told only
+      // "updated successfully" has no way to tell a line that came back up from
+      // one that was never touched, and those need different next steps.
+      switch (response.data.reactivate_status) {
+        case 'success':
+          successMessage += '\n\nAccount reactivated: billing set to Active and the plan re-applied in RADIUS.';
+          break;
+        case 'already_online':
+          successMessage += '\n\nAccount reactivated. RADIUS already had this account connected, so it was left alone.';
+          break;
+        case 'already_active':
+          successMessage += '\n\nAccount reactivated. Billing was already Active, so the RADIUS step was skipped.';
+          break;
+        case 'no_username':
+          successMessage += '\n\nWarning: no PPPoE username is recorded for this account, so it could not be reconnected in RADIUS.';
+          break;
+        case 'no_plan':
+          successMessage += '\n\nWarning: no plan is recorded for this account, so it could not be reconnected in RADIUS.';
+          break;
+        case 'no_account':
+          successMessage += '\n\nWarning: no billing account matches this service order, so it could not be reconnected.';
+          break;
+        case 'exception':
+          successMessage += '\n\nWarning: the reconnection could not be completed. Please check the technical details.';
+          break;
+        default:
+          // null: not a reactivation, or one whose ticket was already Resolved
+          // under this concern, so the reconnection had already run.
+          break;
+      }
+
+      // Reactivation onto a different LCP/NAP/Port.
+      //
+      // Every outcome is reported, not just the failures. The PPPoE username
+      // encodes the line, so a rename changes what the customer's router has to
+      // authenticate with — the technician standing at the ONU is the one person
+      // who can act on that, and they only find out here.
+      switch (response.data.reactivate_radius_status) {
+        case 'success':
+          successMessage += '\n\nPPPoE username updated in RADIUS for the new LCP/NAP/Port.';
+          break;
+        case 'radius_failed':
+          successMessage += '\n\nWarning: the PPPoE username was updated in the database but RADIUS could not be reached. The rename has been queued and will be retried automatically — the customer may not reconnect until it lands.';
+          break;
+        case 'no_username':
+          successMessage += '\n\nNote: no PPPoE username is recorded for this account, so there was nothing to rename in RADIUS.';
+          break;
+        case 'no_account':
+          successMessage += '\n\nNote: no billing account matches this service order, so the RADIUS rename was skipped.';
+          break;
+        case 'exception':
+          successMessage += '\n\nWarning: the RADIUS rename could not be attempted. Please check the technical details.';
+          break;
+        default:
+          // 'no_change' and null: the line did not move, or the generated name
+          // was the one already in use. Nothing happened and nothing to say.
+          break;
       }
 
       // Restriction / Disconnection Messages (Joined logic)
@@ -1894,21 +2182,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                       label="Repair Category"
                       value={formData.repairCategory}
                       onSelect={(val) => handleInputChange('repairCategory', val)}
-                      options={[
-                        { name: 'None' },
-                        { name: 'Fiber Relaying' },
-                        { name: 'Migrate' },
-                        { name: 'others' },
-                        { name: 'Pullout' },
-                        { name: 'Reboot/Reconfig Router' },
-                        { name: 'Relocate Router' },
-                        { name: 'Relocate' },
-                        { name: 'Replace Patch Cord' },
-                        { name: 'Replace Router' },
-                        { name: 'Resplice' },
-                        { name: 'Transfer LCP/NAP/PORT' },
-                        { name: 'Update Vlan' }
-                      ]}
+                      options={repairCategoryOptions}
                       optionLabelKey="name"
                       isDarkMode={isDarkMode}
                       error={errors.repairCategory}
@@ -1917,7 +2191,65 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                     />
 
 
-                    {(formData.repairCategory === 'Migrate' || formData.repairCategory === 'Relocate' || formData.repairCategory === 'Relocate Router' || formData.repairCategory === 'Transfer LCP/NAP/PORT') && (
+                    {/* Reactivation: the line the account is coming back on.
+                        Both optional — most reactivations restore the customer to
+                        the port they left on, and leaving these blank says exactly
+                        that. Filling either one is what renames the PPPoE account
+                        in RADIUS, because the username is built from LCP, NAP and
+                        port. The router serial, VLAN and model are not offered:
+                        replacing hardware is a different repair category. */}
+                    {isReactivateCategory(formData.repairCategory) && (
+                      <>
+                        <div className={`px-3 py-2 rounded text-xs ${isDarkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-100 text-gray-600'}`}>
+                          Leave both blank if the account is coming back on the same line.
+                          Setting either one renames the customer's PPPoE username in RADIUS
+                          to match the new LCP / NAP / Port.
+                        </div>
+
+                        <SearchableField
+                          label="New LCP-NAP"
+                          value={formData.newLcpnap}
+                          onSelect={(val) => handleInputChange('newLcpnap', val)}
+                          options={lcpnaps}
+                          optionLabelKey="lcpnap_name"
+                          isDarkMode={isDarkMode}
+                          error={errors.newLcpnap}
+                          placeholder="Search LCP-NAP..."
+                        />
+
+                        <div>
+                          <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
+                            }`}>New Port</label>
+                          <div className="relative">
+                            <select
+                              value={formData.newPort}
+                              onChange={(e) => handleInputChange('newPort', e.target.value)}
+                              className={`w-full px-3 py-2 border rounded focus:outline-none focus:border-orange-500 appearance-none ${isDarkMode ? 'bg-gray-800 text-white border-gray-700' : 'bg-white text-gray-900 border-gray-300'
+                                } ${errors.newPort ? 'border-red-500' : ''}`}
+                            >
+                              <option value="">{formData.newLcpnap ? 'Select Port' : 'Select LCP-NAP first'}</option>
+                              {Array.from({ length: totalPorts }, (_, i) => {
+                                const portVal = `P${(i + 1).toString().padStart(2, '0')}`;
+                                const isUsed = usedPorts.includes(portVal);
+                                const isSelected = formData.newPort === portVal;
+
+                                if (isUsed && !isSelected) return null;
+
+                                return (
+                                  <option key={portVal} value={portVal}>
+                                    {portVal}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <ChevronDown className={`absolute right-3 top-2.5 pointer-events-none ${isDarkMode ? 'text-gray-400' : 'text-gray-600'
+                              }`} size={20} />
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {RELOCATION_CATEGORIES.includes(formData.repairCategory) && (
                       <>
                         <div>
                           <label className={`block text-sm font-medium mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
@@ -2459,7 +2791,7 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                 label="Concern"
                 value={formData.concern}
                 onSelect={(val) => handleInputChange('concern', val)}
-                options={[{ concern_name: 'None' }, ...concerns]}
+                options={concernOptions}
                 optionLabelKey="concern_name"
                 isDarkMode={isDarkMode}
                 error={errors.concern}
@@ -2671,6 +3003,23 @@ const ServiceOrderEditModal: React.FC<ServiceOrderEditModalProps> = ({
                   </p>
                   <p className={`text-xs mt-1 ${isDarkMode ? 'text-amber-400/80' : 'text-amber-700/80'}`}>
                     Saving this service order with "Done" visit status and "Migrate" repair category will automatically regenerate the RADIUS username based on the technical details pattern (same as Job Order). The password will remain unchanged.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {reactivateLineMove().length > 0 && (
+              <div className={`p-3 rounded-lg flex items-start space-x-3 mb-4 ${isDarkMode ? 'bg-amber-900/30 border border-amber-800' : 'bg-amber-50 border border-amber-200'
+                }`}>
+                <div className={`mt-0.5 ${isDarkMode ? 'text-amber-400' : 'text-amber-600'}`}>
+                  <CheckCircle size={18} />
+                </div>
+                <div>
+                  <p className={`text-sm font-medium ${isDarkMode ? 'text-amber-300' : 'text-amber-800'}`}>
+                    Reactivation Moves the Line ({reactivateLineMove().map(f => f.toUpperCase()).join(', ')})
+                  </p>
+                  <p className={`text-xs mt-1 ${isDarkMode ? 'text-amber-400/80' : 'text-amber-700/80'}`}>
+                    This reactivation puts the account on a different LCP / NAP / Port, so saving it will regenerate the customer's PPPoE username and rename the account in RADIUS. The password stays the same. The customer's router must be reconfigured with the new username before it can reconnect.
                   </p>
                 </div>
               </div>

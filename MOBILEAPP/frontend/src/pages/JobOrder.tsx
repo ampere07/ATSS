@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, Alert, Dimensions, DeviceEventEmitter, RefreshControl, StyleSheet, Modal } from 'react-native';
-import { Search, ListFilter, Menu, X, ArrowLeft, RefreshCw, LogOut, Filter, Check } from 'lucide-react-native';
+import { Search, ListFilter, Menu, X, ArrowLeft, RefreshCw, LogOut, Filter, Check, Download } from 'lucide-react-native';
 import { FlashList } from '@shopify/flash-list';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import JobOrderDetails from '../components/JobOrderDetails';
@@ -12,6 +12,8 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { techInOutService } from '../services/techInOutService';
 import TimeInOutModal from '../modals/TimeInOutModal';
 import { agentJobOrderBand, createAgentReferralMatcher } from '../utils/agentReferral';
+import { exportToCSV } from '../utils/exportUtils';
+import { JOB_ORDER_EXPORT_COLUMNS, jobOrderExportValue } from '../utils/exportColumns';
 import {
   buildTechnicianLockedJobOrderIds,
   isTechnicianUser,
@@ -756,6 +758,13 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
     });
   }, [filteredJobOrders, isTechnician, isAgentViewer]);
 
+  /** The rows as filtered and sorted on screen, in the web export's columns. */
+  const handleExport = useCallback(() => {
+    if (!sortedJobOrders || sortedJobOrders.length === 0) return;
+    exportToCSV('job_orders_export', JOB_ORDER_EXPORT_COLUMNS, sortedJobOrders, jobOrderExportValue);
+  }, [sortedJobOrders]);
+
+
 
   const shouldPaginate = true; // Consistently paginate for all roles to prevent UI jumping
 
@@ -856,6 +865,20 @@ const JobOrderPage: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
                 </View>
               </View>
               <View style={jo.actionsRow}>
+                {/* Exports what the list is currently showing — the filters and
+                    the search box have already been applied to sortedJobOrders. */}
+                <Pressable
+                  onPress={handleExport}
+                  disabled={sortedJobOrders.length === 0}
+                  style={[jo.actionBtn, {
+                    backgroundColor: '#f3f4f6',
+                    borderWidth: 1,
+                    borderColor: '#d1d5db',
+                    opacity: sortedJobOrders.length === 0 ? 0.4 : 1,
+                  }]}
+                >
+                  <Download size={20} color="#4b5563" />
+                </Pressable>
                 <Pressable
                   onPress={() => setShowStatusModal(true)}
                   style={[jo.actionBtn, { 
