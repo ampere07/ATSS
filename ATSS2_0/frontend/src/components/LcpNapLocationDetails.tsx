@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Suspense } from 'react';
-import { X, MapPin, Search, ChevronLeft, ChevronRight, Info, Users, Activity, ExternalLink, Loader2, User, Pencil } from 'lucide-react';
+import { X, MapPin, Search, ChevronLeft, ChevronRight, Info, Users, Activity, ExternalLink, Loader2, User, Pencil, Copy, Check } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -27,6 +27,102 @@ const MapUpdater: React.FC<{ center: [number, number] }> = ({ center }) => {
     map.setView(center, map.getZoom());
   }, [center, map]);
   return null;
+};
+
+/**
+ * Put text on the clipboard, whether or not the page is on https.
+ *
+ * navigator.clipboard exists only in a secure context. Served over plain http
+ * on the office LAN it is undefined, so it cannot be the only path — the
+ * hidden-textarea fallback is what actually runs there.
+ */
+const writeToClipboard = async (text: string): Promise<boolean> => {
+  try {
+    if (window.isSecureContext && navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Permission refused or the API is present but blocked: try the fallback.
+  }
+
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    // Parked off-screen rather than hidden: display:none cannot be selected,
+    // and a fixed position stops the page jumping as it takes focus.
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    // iOS ignores select() on its own and needs the range set explicitly.
+    area.setSelectionRange(0, area.value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * A field value that copies itself when clicked.
+ *
+ * These get read out to field crews over the phone, so the useful thing is the
+ * text on the clipboard rather than a selection made by hand — a coordinate
+ * pair in particular is easy to mis-drag.
+ */
+const CopyableValue: React.FC<{
+  value: string;
+  isDarkMode: boolean;
+  className?: string;
+}> = ({ value, isDarkMode, className = '' }) => {
+  const [copied, setCopied] = useState(false);
+  const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The row can be unmounted by picking another location while the badge is
+  // still up, and the timer would then set state on a component that is gone.
+  useEffect(() => () => {
+    if (resetRef.current) clearTimeout(resetRef.current);
+  }, []);
+
+  const handleCopy = async () => {
+    if (!(await writeToClipboard(value))) return;
+
+    setCopied(true);
+    if (resetRef.current) clearTimeout(resetRef.current);
+    resetRef.current = setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      title="Click to copy"
+      aria-label={`Copy ${value}`}
+      className={`group inline-flex items-center gap-1.5 text-left rounded px-1 -mx-1 transition-colors ${
+        isDarkMode ? 'hover:bg-gray-800' : 'hover:bg-gray-200'
+      } ${className}`}
+    >
+      <span className="min-w-0 break-words">{value}</span>
+      {copied ? (
+        <span className="inline-flex items-center gap-1 flex-shrink-0 text-xs font-medium text-green-500">
+          <Check size={13} />
+          Copied
+        </span>
+      ) : (
+        // Only on hover, so a screen of these does not read as a row of buttons.
+        <Copy
+          size={13}
+          className={`flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity ${
+            isDarkMode ? 'text-gray-500' : 'text-gray-400'
+          }`}
+        />
+      )}
+    </button>
+  );
 };
 
 interface LocationMarker {
@@ -317,7 +413,11 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
             {location.street && (
               <div className={`flex border-b pb-4 ${isDarkMode ? "border-gray-800" : "border-gray-200"}`}>
                 <div className={`w-40 text-sm ${isDarkMode ? "text-gray-400" : "text-gray-600"}`}>Street:</div>
-                <div className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}>{location.street}</div>
+                <CopyableValue
+                  value={location.street}
+                  isDarkMode={isDarkMode}
+                  className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}
+                />
               </div>
             )}
 
@@ -325,7 +425,11 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
             {location.barangay && (
               <div className={`flex border-b pb-4 ${isDarkMode ? "border-gray-800" : "border-gray-200"}`}>
                 <div className={`w-40 text-sm ${isDarkMode ? "text-gray-400" : "text-gray-600"}`}>Barangay:</div>
-                <div className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}>{location.barangay}</div>
+                <CopyableValue
+                  value={location.barangay}
+                  isDarkMode={isDarkMode}
+                  className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}
+                />
               </div>
             )}
 
@@ -333,7 +437,11 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
             {location.city && (
               <div className={`flex border-b pb-4 ${isDarkMode ? "border-gray-800" : "border-gray-200"}`}>
                 <div className={`w-40 text-sm ${isDarkMode ? "text-gray-400" : "text-gray-600"}`}>City:</div>
-                <div className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}>{location.city}</div>
+                <CopyableValue
+                  value={location.city}
+                  isDarkMode={isDarkMode}
+                  className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}
+                />
               </div>
             )}
 
@@ -341,7 +449,11 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
             {location.region && (
               <div className={`flex border-b pb-4 ${isDarkMode ? "border-gray-800" : "border-gray-200"}`}>
                 <div className={`w-40 text-sm ${isDarkMode ? "text-gray-400" : "text-gray-600"}`}>Region:</div>
-                <div className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}>{location.region}</div>
+                <CopyableValue
+                  value={location.region}
+                  isDarkMode={isDarkMode}
+                  className={`flex-1 ${isDarkMode ? "text-white" : "text-gray-900"}`}
+                />
               </div>
             )}
 
@@ -563,8 +675,16 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
                   <span className={`text-sm ${isDarkMode ? "text-gray-500" : "text-gray-400"}`}>No valid coordinates available for this location.</span>
                 </div>
               )}
-              <div className="text-xs mt-2 text-gray-500">
-                long and lat : {location.latitude?.toFixed(6) || 'N/A'}, {location.longitude?.toFixed(6) || 'N/A'}
+              <div className="text-xs mt-2 text-gray-500 flex items-center gap-1 flex-wrap">
+                <span>long and lat :</span>
+                {location.latitude !== undefined && location.longitude !== undefined ? (
+                  <CopyableValue
+                    value={`${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`}
+                    isDarkMode={isDarkMode}
+                  />
+                ) : (
+                  <span>N/A, N/A</span>
+                )}
               </div>
             </div>
 

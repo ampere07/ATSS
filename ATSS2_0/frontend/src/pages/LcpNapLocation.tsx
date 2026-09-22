@@ -16,6 +16,9 @@ import {
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { getAllLCPNAPsForMap, clearLCPNAPMapCache } from '../services/lcpnapService';
 import apiClient from '../config/api';
+// The shape the Live Monitor already receives from /technician-locations.
+// Reused rather than redeclared so the two stay in step.
+import type { TechLocation } from '../components/TechLiveLocationMap';
 
 interface LocationMarker {
   id: number;
@@ -104,6 +107,12 @@ const LcpNapLocation: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [addressSuggestions, setAddressSuggestions] = useState<AddressSuggestion[]>([]);
+
+  // Technician locations, shown over the LCP/NAP pins when the toggle is on.
+  const [showTechnicians, setShowTechnicians] = useState(false);
+  const [technicians, setTechnicians] = useState<TechLocation[]>([]);
+  const [isLoadingTechnicians, setIsLoadingTechnicians] = useState(false);
+
   const searchRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -115,6 +124,11 @@ const LcpNapLocation: React.FC = () => {
   /** The provisional marker shown while a pin is being placed. */
   const pinMarkerRef = useRef<L.Marker | null>(null);
   const allMarkersMapRef = useRef<Map<number, L.CircleMarker>>(new Map());
+  /**
+   * Technician pins live in their own layer group so the toggle can add and
+   * remove them in one call without touching the LCP/NAP markers underneath.
+   */
+  const technicianLayerRef = useRef<L.LayerGroup | null>(null);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -314,6 +328,132 @@ const LcpNapLocation: React.FC = () => {
     const raf = requestAnimationFrame(() => map.invalidateSize());
     return () => cancelAnimationFrame(raf);
   }, [isMapReady, sidebarWidth, mobileViewMode, isMobile]);
+
+  /**
+   * Technician locations are an administrator's view of staff, so the toggle is
+   * only offered to administrators and superadmins.
+   *
+   * Role is read the same way Live Monitor reads it — authData carries the role
+   * as a string on some logins and as an object on others, and the id is the
+   * only field always present. This gate matches
+   * TechnicianLocationController::ADMIN_ROLE_IDS, which answers 403 to everyone
+   * else, so hiding the checkbox is presentation rather than the actual control.
+   */
+  const canSeeTechnicians = (() => {
+    try {
+      const authData = JSON.parse(localStorage.getItem('authData') || '{}');
+      const roleRaw: any = authData.role;
+      const roleName = (typeof roleRaw === 'string'
+        ? roleRaw
+        : (roleRaw?.role_name || roleRaw?.name || authData.role_name || '')
+      ).toString().toLowerCase().replace(/[\s_-]/g, '');
+      const roleId = String(authData.role_id ?? '');
+
+      return roleName === 'administrator'
+        || roleName === 'admin'
+        || roleName === 'superadmin'
+        || roleId === '1'
+        || roleId === '7';
+    } catch {
+      return false;
+    }
+  })();
+
+  /**
+   * Fetches the live technician list the Live Monitor map is fed from, narrowed
+   * to the technicians who have timed in today — this map is about who is out
+   * working now, not everyone who has ever reported a position.
+   */
+  const loadTechnicians = async () => {
+    setIsLoadingTechnicians(true);
+    try {
+      const res: any = await apiClient.get('/technician-locations', {
+        params: { timed_in_today: 1 },
+      });
+      const list = Array.isArray(res.data?.data) ? res.data.data : [];
+      setTechnicians(list);
+    } catch (error) {
+      console.error('Error loading technician locations:', error);
+      setTechnicians([]);
+    } finally {
+      setIsLoadingTechnicians(false);
+    }
+  };
+
+  // Fetch only when the toggle is switched on; unticking drops the pins and the
+  // data with them, so nothing is held for a view nobody asked for.
+  useEffect(() => {
+    if (showTechnicians) {
+      loadTechnicians();
+    } else {
+      setTechnicians([]);
+    }
+  }, [showTechnicians]);
+
+  /** Centre the map on one technician, close enough to read the street. */
+  const focusTechnician = (tech: TechLocation) => {
+    const map = mapInstanceRef.current;
+    if (!map || tech.latitude == null || tech.longitude == null) return;
+
+    map.setView([Number(tech.latitude), Number(tech.longitude)], 19, { animate: true });
+  };
+
+  /**
+   * Draw the technician pins: a blue circle with the technician's name on a
+   * label above it.
+   *
+   * A permanent tooltip rather than a divIcon, because the label has to sit
+   * above the dot and stay readable at every zoom — the same circleMarker +
+   * bindTooltip pairing the LCP/NAP pins already use.
+   */
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !isMapReady) return;
+
+    if (!technicianLayerRef.current) {
+      technicianLayerRef.current = L.layerGroup().addTo(map);
+    }
+
+    const layer = technicianLayerRef.current;
+    layer.clearLayers();
+
+    if (!showTechnicians) return;
+
+    technicians.forEach((tech) => {
+      if (tech.latitude == null || tech.longitude == null) return;
+
+      const marker = L.circleMarker([Number(tech.latitude), Number(tech.longitude)], {
+        radius: 8,
+        fillColor: '#3b82f6',
+        fillOpacity: 1,
+        color: '#ffffff',
+        weight: 2,
+      });
+
+      // An element rather than an HTML string: textContent cannot be parsed as
+      // markup, so a name carrying angle brackets stays a name.
+      const label = document.createElement('span');
+      label.textContent = tech.full_name || tech.username || 'Technician';
+      label.style.cssText = 'font-size:11px;font-weight:600;color:#1f2937;';
+
+      marker.bindTooltip(label, {
+        permanent: true,
+        direction: 'top',
+        offset: [0, -10],
+      });
+
+      layer.addLayer(marker);
+    });
+  }, [showTechnicians, technicians, isMapReady]);
+
+  // Drop the layer with the page so a remount never inherits stale pins.
+  useEffect(() => {
+    return () => {
+      technicianLayerRef.current?.clearLayers();
+      technicianLayerRef.current?.remove();
+      technicianLayerRef.current = null;
+    };
+  }, []);
 
   const parseCoordinates = (coordString: string): { latitude: number; longitude: number } | null => {
     if (!coordString) return null;
@@ -969,6 +1109,28 @@ const LcpNapLocation: React.FC = () => {
                 )}
               </div>
 
+              {/* Administrators and superadmins only — the endpoint behind it
+                  refuses everyone else, so the checkbox is simply not offered. */}
+              {canSeeTechnicians && (
+                <label
+                  className={`flex items-center gap-2 px-3 py-2 rounded text-sm cursor-pointer select-none whitespace-nowrap transition-colors ${isDarkMode
+                    ? 'bg-gray-800 text-gray-200 hover:bg-gray-700'
+                    : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-200'
+                    }`}
+                  title="Show where technicians are right now"
+                >
+                  <input
+                    type="checkbox"
+                    checked={showTechnicians}
+                    onChange={(e) => setShowTechnicians(e.target.checked)}
+                    className="h-4 w-4 rounded cursor-pointer"
+                    style={{ accentColor: colorPalette?.primary || '#7c3aed' }}
+                  />
+                  <span>Show Technician Locations</span>
+                  {isLoadingTechnicians && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                </label>
+              )}
+
               {!isMobile && (
                 <button
                   onClick={startPinPlacement}
@@ -999,6 +1161,70 @@ const LcpNapLocation: React.FC = () => {
               ref={mapRef}
               className="absolute inset-0 w-full h-full z-0"
             />
+
+            {/* Technician list, shown while the toggle is on. Sits over the map
+                rather than in the sidebar so the pins and their names stay in
+                view while a technician is picked out of the list. */}
+            {canSeeTechnicians && showTechnicians && (
+              <div
+                className={`absolute top-4 right-4 z-[700] w-60 rounded-xl shadow-2xl border overflow-hidden ${isDarkMode
+                  ? 'bg-gray-900/95 border-gray-700'
+                  : 'bg-white/95 border-gray-200'
+                  }`}
+              >
+                <div
+                  className={`px-3 py-2 flex items-center justify-between border-b ${isDarkMode
+                    ? 'border-gray-700 text-gray-200'
+                    : 'border-gray-200 text-gray-700'
+                    }`}
+                >
+                  <span className="text-sm font-semibold">Technicians</span>
+                  <span className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {technicians.length}
+                  </span>
+                </div>
+
+                <div className="max-h-64 overflow-y-auto">
+                  {isLoadingTechnicians ? (
+                    <div className={`px-3 py-4 flex items-center gap-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Loading...
+                    </div>
+                  ) : technicians.length === 0 ? (
+                    <div className={`px-3 py-4 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                      No technicians reporting a location.
+                    </div>
+                  ) : (
+                    technicians.map((tech) => {
+                      const hasLocation = tech.latitude != null && tech.longitude != null;
+
+                      return (
+                        <button
+                          key={tech.user_id}
+                          onClick={() => focusTechnician(tech)}
+                          disabled={!hasLocation}
+                          title={hasLocation
+                            ? `Zoom to ${tech.full_name || tech.username || 'technician'}`
+                            : 'No location reported yet'}
+                          className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 border-b last:border-0 transition-colors ${isDarkMode
+                            ? 'border-gray-800 text-gray-200 hover:bg-gray-800 disabled:text-gray-500'
+                            : 'border-gray-100 text-gray-700 hover:bg-gray-50 disabled:text-gray-400'
+                            } disabled:cursor-not-allowed disabled:hover:bg-transparent`}
+                        >
+                          <span
+                            className="h-2.5 w-2.5 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: hasLocation ? '#3b82f6' : '#9ca3af' }}
+                          />
+                          <span className="truncate">
+                            {tech.full_name || tech.username || 'Technician'}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Pin-drop crosshair. Fixed to the centre of the viewport and click-through,
                 so the map underneath still pans and zooms normally. */}

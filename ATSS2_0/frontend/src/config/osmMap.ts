@@ -57,13 +57,36 @@ const AERIAL_LABELS = `${ARCGIS}/Reference/World_Transportation/MapServer/tile/{
  * page uses to frame a chosen location.
  */
 const CANVAS_MAX_ZOOM = 16;
-/** Aerial has 18 everywhere in the country and 19 only over the metros. */
-const AERIAL_NATIVE_MAX = 18;
-/** The label overlay thins out a level sooner than the imagery under it. */
-const LABELS_NATIVE_MAX = 17;
+/**
+ * Aerial has 18 everywhere in the country and 19 over the metros.
+ *
+ * Set to 19 because that is where the accounts are: measured against the
+ * service on 2026-09-22, z19 returns real photography over Antipolo/Rizal and
+ * Davao, and the placeholder over Nueva Ecija, Palawan, Samar and Batanes
+ * (every missing tile is the same 2,521-byte grey image).
+ *
+ * The trade is deliberate. At 18 nothing anywhere showed a placeholder, but
+ * every level past 18 was an upscale, which is what made a close zoom look
+ * pixelated. At 19 the metros gain a full level of real detail and everything
+ * above it upscales from twice the resolution — at the cost of the placeholder
+ * appearing past z18 in the rural areas that genuinely have no imagery there.
+ *
+ * Put it back to 18 if that grey tile turns up somewhere it matters.
+ */
+const AERIAL_NATIVE_MAX = 19;
+/** Measured the same way: the label overlay has real content through 18. */
+const LABELS_NATIVE_MAX = 18;
 
-/** As far as the map lets anyone zoom. */
-export const MAX_ZOOM = 19;
+/**
+ * As far as the map lets anyone zoom.
+ *
+ * Past the native caps above there is no more imagery to fetch, so these last
+ * levels are the real tiles scaled up — progressively softer, but they keep
+ * going in close enough to tell one house from the next, which is what placing
+ * a pin on a specific roof needs. maxNativeZoom is what makes that safe: the
+ * extra levels cost no requests and can never hit a missing tile.
+ */
+export const MAX_ZOOM = 22;
 
 /** Credit required by the tile service. */
 export const TILE_ATTRIBUTION =

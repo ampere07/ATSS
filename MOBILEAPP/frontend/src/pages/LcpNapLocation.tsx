@@ -12,6 +12,35 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import apiClient from '../config/api';
 import axios from 'axios';
 
+// ─── Basemap tiles ─────────────────────────────────────────────────────────────
+
+/**
+ * How deep each ESRI service actually has tiles over the Philippines.
+ *
+ * These are the limits the web build measured (see the web app's
+ * src/config/osmMap.ts, which draws the same two tiers): every one of these
+ * services advertises 23 levels, and past its real data each answers 200 with
+ * "Map data not yet available" drawn INTO the tile image. Nothing errors and
+ * nothing is logged, so the only symptom is that sentence tiled across the map
+ * once the reader zooms in.
+ *
+ * Canvas is the strict one — it simply stops at 16, well short of the zoom used
+ * to frame a chosen location, which is why zooming in went grey.
+ */
+const CANVAS_MAX_ZOOM = 16;
+/** Aerial has 18 everywhere in the country and 19 only over the metros. */
+const AERIAL_NATIVE_MAX = 18;
+/** The label overlay thins out a level sooner than the imagery under it. */
+const LABELS_NATIVE_MAX = 17;
+/** As far as the map lets anyone zoom — matches MapView's maxZoomLevel. */
+const MAX_ZOOM = 19;
+
+const ARCGIS = 'https://services.arcgisonline.com/ArcGIS/rest/services';
+const CANVAS_BASE = `${ARCGIS}/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`;
+const CANVAS_REFERENCE = `${ARCGIS}/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}`;
+const AERIAL = `${ARCGIS}/World_Imagery/MapServer/tile/{z}/{y}/{x}`;
+const AERIAL_LABELS = `${ARCGIS}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`;
+
 // ─── Interfaces ────────────────────────────────────────────────────────────────
 
 interface LocationMarker {
@@ -647,19 +676,54 @@ const LcpNapLocation: React.FC = () => {
                 showsTraffic={false}
                 showsIndoors={false}
               >
+                {/*
+                  Two tiers, because no single free service covers the whole
+                  zoom range. The grey canvas is the better overview and carries
+                  the country-wide view, but it has nothing past z16; from z17
+                  the aerial takes over, which is also the more useful thing to
+                  be looking at when the job is finding a pole.
+
+                  Each layer is capped at the zoom it genuinely has, so a tile
+                  that does not exist is never requested and the "Map data not
+                  yet available" placeholder can no longer be drawn.
+                */}
+
                 {/* ESRI ArcGIS World Light Gray Base — free tiles, no API key, designed for app use, hides POIs */}
                 <UrlTile
-                  urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-                  maximumZ={19}
+                  urlTemplate={CANVAS_BASE}
+                  maximumZ={CANVAS_MAX_ZOOM}
+                  flipY={false}
+                  tileSize={256}
+                  // @ts-ignore
+                  zIndex={-4}
+                />
+                {/* ESRI ArcGIS World Light Gray Reference — provides clean labels without POIs */}
+                <UrlTile
+                  urlTemplate={CANVAS_REFERENCE}
+                  maximumZ={CANVAS_MAX_ZOOM}
+                  flipY={false}
+                  tileSize={256}
+                  // @ts-ignore
+                  zIndex={-3}
+                />
+                {/* From z17 up: aerial photography. maximumNativeZ stretches the
+                    last real tile over the levels the service does not have. */}
+                <UrlTile
+                  urlTemplate={AERIAL}
+                  minimumZ={CANVAS_MAX_ZOOM + 1}
+                  maximumZ={MAX_ZOOM}
+                  maximumNativeZ={AERIAL_NATIVE_MAX}
                   flipY={false}
                   tileSize={256}
                   // @ts-ignore
                   zIndex={-2}
                 />
-                {/* ESRI ArcGIS World Light Gray Reference — provides clean labels without POIs */}
+                {/* Roads and place names over the imagery. */}
                 <UrlTile
-                  urlTemplate="https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
-                  maximumZ={19}
+                  urlTemplate={AERIAL_LABELS}
+                  minimumZ={CANVAS_MAX_ZOOM + 1}
+                  maximumZ={MAX_ZOOM}
+                  maximumNativeZ={LABELS_NATIVE_MAX}
                   flipY={false}
                   tileSize={256}
                   // @ts-ignore

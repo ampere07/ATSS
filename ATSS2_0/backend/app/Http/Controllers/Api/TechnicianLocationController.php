@@ -270,6 +270,26 @@ class TechnicianLocationController extends Controller
             $query->where('tl.organization_id', $organizationId);
         }
 
+        /*
+         * Opt-in: only technicians who have timed in today.
+         *
+         * Off unless asked for, so existing callers — the Live Monitor widget
+         * among them — keep seeing every technician that reports a position.
+         *
+         * tech_in_out holds one row per technician rather than one per day, so
+         * "timed in today" is that single row's time_in falling on today's date.
+         * A technician who last timed in yesterday and has not timed in since
+         * therefore drops out, which is the point. The date is computed in
+         * Asia/Manila here rather than left to the database's CURDATE(), because
+         * time_in is written with the app timezone (config/app.php) and the two
+         * need not agree.
+         */
+        if ($request && filter_var($request->input('timed_in_today', false), FILTER_VALIDATE_BOOLEAN)) {
+            $query->join('tech_in_out as tio', 'tio.tech_id', '=', 'tl.user_id')
+                ->whereNotNull('tio.time_in')
+                ->whereDate('tio.time_in', Carbon::now('Asia/Manila')->toDateString());
+        }
+
         $rows = $query->select(
             'tl.user_id',
             'tl.latitude',
