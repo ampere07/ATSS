@@ -211,7 +211,15 @@ class ImageProcessingService
                 throw new \Exception("Upload did not return URL for field: {$imageQueue->field_name}.");
             }
 
-            if ($isJobOrderQueue || (isset($imageQueue->table_process) && $imageQueue->table_process === 'job_orders')) {
+            // The house front photo describes the address, not the visit, so it is
+            // stored on the application even when a technician captures it from the
+            // job order form.
+            if ($imageQueue->field_name === 'house_front_image') {
+                $application->forceFill([
+                    'house_front_picture_url' => $gdriveUrl
+                ])->save();
+                Log::info("Updated application {$application->id} field house_front_picture_url with URL: {$gdriveUrl}");
+            } elseif ($isJobOrderQueue || (isset($imageQueue->table_process) && $imageQueue->table_process === 'job_orders')) {
                 $jobOrderToUpdate = $isJobOrderQueue ? $jobOrder : \App\Models\JobOrder::where('application_id', $imageQueue->application_id)->latest()->first();
                 if ($jobOrderToUpdate) {
                     $dbColumn = $this->getJobOrderDbColumn($imageQueue->field_name);

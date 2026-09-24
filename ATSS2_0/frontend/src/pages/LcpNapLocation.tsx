@@ -843,11 +843,10 @@ const LcpNapLocation: React.FC = () => {
           on a phone this panel was a bare `flex` — the header and the list sat
           side by side and the list was squeezed to a sliver, truncating every
           label to "L...". */}
-      <div className={`${
-        isMobile
-          ? mobileViewMode === 'sidebar' ? 'flex w-full flex-col' : 'hidden'
-          : 'flex-shrink-0 flex flex-col border-r relative'
-      } ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
+      <div className={`${isMobile
+        ? mobileViewMode === 'sidebar' ? 'flex w-full flex-col' : 'hidden'
+        : 'flex-shrink-0 flex flex-col border-r relative'
+        } ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
         }`} style={!isMobile ? { width: `${sidebarWidth}px` } : undefined}>
         <div className={`p-4 border-b flex-shrink-0 ${isDarkMode ? 'border-gray-700' : 'border-gray-200'
           }`}>
@@ -938,7 +937,7 @@ const LcpNapLocation: React.FC = () => {
 
               {expandedGroups.has(group.lcp_name) && (
                 <div className={`${isDarkMode ? 'bg-gray-900/50' : 'bg-gray-50'}`}>
-                  {group.locations.sort((a,b) => a.lcpnap_name.localeCompare(b.lcpnap_name)).map((loc) => (
+                  {group.locations.sort((a, b) => a.lcpnap_name.localeCompare(b.lcpnap_name)).map((loc) => (
                     <button
                       key={loc.id}
                       onClick={() => {
@@ -957,7 +956,7 @@ const LcpNapLocation: React.FC = () => {
                       <span className="truncate min-w-0">{loc.lcpnap_name}</span>
                       {loc.total_technical_details !== undefined && (
                         <span className="opacity-60 flex-shrink-0 whitespace-nowrap">
-                           {loc.total_technical_details}/{loc.port_total}
+                          {loc.total_technical_details}/{loc.port_total}
                         </span>
                       )}
                     </button>
@@ -973,25 +972,24 @@ const LcpNapLocation: React.FC = () => {
             there at all. It also had no positioned ancestor on that branch,
             which is what put the stray bar at the screen edge. */}
         {!isMobile && (
-        <div
-          className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize transition-colors z-10"
-          style={{
-            backgroundColor: 'transparent'
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = colorPalette?.primary || '#7c3aed';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = 'transparent';
-          }}
-          onMouseDown={handleMouseDownSidebarResize}
-        />
+          <div
+            className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize transition-colors z-10"
+            style={{
+              backgroundColor: 'transparent'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = colorPalette?.primary || '#7c3aed';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'transparent';
+            }}
+            onMouseDown={handleMouseDownSidebarResize}
+          />
         )}
       </div>
 
-      <div className={`${
-        isMobile && mobileViewMode !== 'map' ? 'hidden' : 'flex-1'
-      } overflow-hidden ${isDarkMode ? 'bg-gray-900' : 'bg-white'
+      <div className={`${isMobile && mobileViewMode !== 'map' ? 'hidden' : 'flex-1'
+        } overflow-hidden ${isDarkMode ? 'bg-gray-900' : 'bg-white'
         }`}>
         <div className="flex flex-col h-full">
           <div className={`p-4 border-b flex-shrink-0 relative z-10 ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'
@@ -1003,9 +1001,8 @@ const LcpNapLocation: React.FC = () => {
                   {isMobile && mobileViewMode === 'map' && (
                     <button
                       onClick={() => setMobileViewMode('sidebar')}
-                      className={`p-1 mr-1 rounded-lg transition-colors ${
-                        isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-100 text-gray-500 hover:text-gray-900'
-                      }`}
+                      className={`p-1 mr-1 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-100 text-gray-500 hover:text-gray-900'
+                        }`}
                     >
                       <ChevronLeft size={20} />
                     </button>
@@ -1126,7 +1123,7 @@ const LcpNapLocation: React.FC = () => {
                     className="h-4 w-4 rounded cursor-pointer"
                     style={{ accentColor: colorPalette?.primary || '#7c3aed' }}
                   />
-                  <span>Show Technician Locations</span>
+                  <span>Show Technician</span>
                   {isLoadingTechnicians && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                 </label>
               )}
@@ -1251,9 +1248,8 @@ const LcpNapLocation: React.FC = () => {
             {isPlacingPin && (
               <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[700] w-[min(92%,30rem)]">
                 <div
-                  className={`rounded-xl shadow-2xl border p-3 flex flex-col gap-3 ${
-                    isDarkMode ? 'bg-gray-900/95 border-gray-700' : 'bg-white/95 border-gray-200'
-                  }`}
+                  className={`rounded-xl shadow-2xl border p-3 flex flex-col gap-3 ${isDarkMode ? 'bg-gray-900/95 border-gray-700' : 'bg-white/95 border-gray-200'
+                    }`}
                 >
                   <div className="flex items-start gap-2">
                     <MapPin
@@ -1287,11 +1283,10 @@ const LcpNapLocation: React.FC = () => {
                     </button>
                     <button
                       onClick={cancelPinPlacement}
-                      className={`flex-1 px-4 py-2 rounded flex items-center justify-center gap-2 text-sm border transition-colors ${
-                        isDarkMode
-                          ? 'border-gray-700 text-gray-300 hover:bg-gray-800'
-                          : 'border-gray-300 text-gray-700 hover:bg-gray-100'
-                      }`}
+                      className={`flex-1 px-4 py-2 rounded flex items-center justify-center gap-2 text-sm border transition-colors ${isDarkMode
+                        ? 'border-gray-700 text-gray-300 hover:bg-gray-800'
+                        : 'border-gray-300 text-gray-700 hover:bg-gray-100'
+                        }`}
                     >
                       <X className="h-4 w-4" />
                       Cancel

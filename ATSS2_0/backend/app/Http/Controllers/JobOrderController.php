@@ -2185,7 +2185,11 @@ class JobOrderController extends Controller
                     ]);
 
                     $dbColumn = $dbColumnMap[$field] ?? $field;
-                    $oldData[$dbColumn] = $jobOrder->$dbColumn;
+                    // The house front photo is written to the application, so the
+                    // value being replaced has to be read from there too.
+                    $oldData[$dbColumn] = $field === 'house_front_image'
+                        ? $jobOrder->application?->house_front_picture_url
+                        : $jobOrder->$dbColumn;
                     $newData[$dbColumn] = 'Queueing upload: ' . $file->getClientOriginalName();
 
                     $queuedCount++;

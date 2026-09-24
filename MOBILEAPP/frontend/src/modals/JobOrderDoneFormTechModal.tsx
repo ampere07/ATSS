@@ -107,6 +107,7 @@ interface JobOrderDoneFormData {
   ip: string;
   addressCoordinates: string;
   proofImage: File | null;
+  houseFrontImage: File | null;
 }
 
 interface OrderItem {
@@ -300,7 +301,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     visit_with_other: '',
     ip: '',
     addressCoordinates: '',
-    proofImage: null
+    proofImage: null,
+    houseFrontImage: null
   });
 
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -339,6 +341,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     clientSignatureImage: string | null;
     clientTaggingImage: string | null;
     proofImage: string | null;
+    houseFrontImage: string | null;
   }>({
     signedContractImage: null,
     setupImage: null,
@@ -347,7 +350,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     portLabelImage: null,
     clientSignatureImage: null,
     clientTaggingImage: null,
-    proofImage: null
+    proofImage: null,
+    houseFrontImage: null
   });
 
   const [showModal, setShowModal] = useState(false);
@@ -549,7 +553,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         visit_with_other: '',
         ip: '',
         addressCoordinates: '',
-        proofImage: null
+        proofImage: null,
+        houseFrontImage: null
       }));
       setErrors({});
       setOrderItems([{ itemId: '', quantity: '' }]);
@@ -907,7 +912,9 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
       addressCoordinates: getValue((appData?.long_lat) || jobOrderData.Address_Coordinates || jobOrderData.address_coordinates)
     });
 
-    const buildImagePreviews = (safeConvert: (val: any) => string | null) => ({
+    // appData is optional because the application fetch can fail or be skipped;
+    // the house front photo is the one preview that lives on the application.
+    const buildImagePreviews = (safeConvert: (val: any) => string | null, appData?: any) => ({
       signedContractImage: safeConvert(jobOrderData.signed_contract_image_url || jobOrderData.Signed_Contract_Image_URL),
       setupImage: safeConvert(jobOrderData.setup_image_url || jobOrderData.Setup_Image_URL),
       boxReadingImage: safeConvert(jobOrderData.box_reading_image_url || jobOrderData.Box_Reading_Image_URL),
@@ -915,7 +922,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
       portLabelImage: safeConvert(jobOrderData.port_label_image_url || jobOrderData.Port_Label_Image_URL),
       clientSignatureImage: safeConvert(jobOrderData.client_signature_url || jobOrderData.Client_Signature_URL),
       clientTaggingImage: safeConvert(jobOrderData.client_tagging_url || jobOrderData.Client_Tagging_URL),
-      proofImage: safeConvert(jobOrderData.proof_image_url || jobOrderData.Proof_Image_URL)
+      proofImage: safeConvert(jobOrderData.proof_image_url || jobOrderData.Proof_Image_URL),
+      houseFrontImage: safeConvert(appData?.house_front_picture_url || jobOrderData.house_front_picture_url || jobOrderData.House_Front_Picture_URL)
     });
 
     const safeConvertUrl = (val: any): string | null => {
@@ -940,7 +948,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 
           if (appResponse.data.success && appResponse.data.application) {
             setFormData(prev => ({ ...prev, ...buildFormData(appResponse.data.application) }));
-            setImagePreviews(buildImagePreviews(safeConvertUrl));
+            setImagePreviews(buildImagePreviews(safeConvertUrl, appResponse.data.application));
           } else {
             setFormData(prev => ({ ...prev, ...buildFormData() }));
             setImagePreviews(buildImagePreviews(safeConvertUrl));
@@ -990,7 +998,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     });
   }, []);
 
-  const handleImageUpload = useCallback((field: 'signedContractImage' | 'setupImage' | 'boxReadingImage' | 'routerReadingImage' | 'portLabelImage' | 'clientSignatureImage' | 'clientTaggingImage' | 'proofImage', file: any) => {
+  const handleImageUpload = useCallback((field: 'signedContractImage' | 'setupImage' | 'boxReadingImage' | 'routerReadingImage' | 'portLabelImage' | 'clientSignatureImage' | 'clientTaggingImage' | 'proofImage' | 'houseFrontImage', file: any) => {
     setFormData(prev => ({ ...prev, [field]: file }));
     setImagePreviews(prev => ({ ...prev, [field]: file ? file.uri : null }));
     setErrors(prev => prev[field] ? { ...prev, [field]: '' } : prev);
@@ -1392,6 +1400,9 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
           safeAppendImage('client_signature_image', formData.clientSignatureImage);
           safeAppendImage('client_tagging_image', formData.clientTaggingImage);
           safeAppendImage('proof_image', formData.proofImage);
+          // Filed by the backend on the application's house_front_picture_url,
+          // not on the job order.
+          safeAppendImage('house_front_image', formData.houseFrontImage);
         }
 
         if (updatedFormData.onsiteStatus === 'Failed' || updatedFormData.onsiteStatus === 'Reschedule') {
@@ -3358,6 +3369,16 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                               </View>
                             )}
                           </View>
+
+                          <ImagePreview
+                            imageUrl={imagePreviews.houseFrontImage}
+                            label="House Front Picture"
+                            required={false}
+                            onUpload={(file) => handleImageUpload('houseFrontImage', file)}
+                            error={errors.houseFrontImage}
+                            colorPrimary={colorPalette?.primary || '#7c3aed'}
+                            saveToGalleryOnCapture={false}
+                          />
 
                           <ImagePreview
                             imageUrl={imagePreviews.boxReadingImage}

@@ -186,6 +186,7 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
   const [relatedCustomers, setRelatedCustomers] = useState<any[]>([]);
   const [customerPage, setCustomerPage] = useState<number>(1);
+  const [isCustomersExpanded, setIsCustomersExpanded] = useState<boolean>(false);
 
   const [isLoadingRelated, setIsLoadingRelated] = useState(false);
   const [selectedCustomerRecord, setSelectedCustomerRecord] = useState<BillingDetailRecord | null>(null);
@@ -271,6 +272,14 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
     setIsResizing(true);
     startXRef.current = e.clientX;
     startWidthRef.current = detailsWidth;
+  };
+
+  const handleExpandModalOpen = () => {
+    setIsCustomersExpanded(true);
+  };
+
+  const handleExpandModalClose = () => {
+    setIsCustomersExpanded(false);
   };
 
   const handleCustomerClick = async (accountNo: string) => {
@@ -697,6 +706,18 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
                     {relatedCustomers.length}
                   </span>
                 </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleExpandModalOpen();
+                    }}
+                    className="text-xs sm:text-sm transition-colors hover:underline"
+                    style={{ color: colorPalette?.primary || '#7c3aed' }}
+                  >
+                    Expand
+                  </button>
+                </div>
               </div>
               <div className="pb-4 space-y-3">
                 {isLoadingRelated ? (
@@ -802,6 +823,84 @@ const LcpNapLocationDetails: React.FC<LcpNapLocationDetailsProps> = ({
       </div>
 
       {/* Overlays */}
+      {isCustomersExpanded && (
+        <div className="absolute inset-0 flex flex-col" style={{ backgroundColor: isDarkMode ? '#111827' : '#ffffff', zIndex: 10000 }}>
+          {/* Header */}
+          <div className={`px-4 md:px-6 py-4 flex items-center justify-between border-b ${isDarkMode ? 'bg-gray-900 border-gray-700' : 'bg-white border-gray-200'}`}>
+            <div className="flex items-center space-x-2 md:space-x-4">
+              <div className="flex items-center space-x-2 md:space-x-3">
+                <h2 className={`text-lg md:text-xl font-bold truncate max-w-[200px] md:max-w-none ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                  All Related Customers
+                </h2>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] md:text-xs font-bold border transition-colors ${isDarkMode
+                    ? 'bg-gray-800 text-gray-400 border-gray-700'
+                    : 'bg-gray-100 text-gray-500 border-gray-200'
+                  }`}>
+                  {relatedCustomers.length} items
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={handleExpandModalClose}
+              className={`p-2 rounded-full transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-gray-400 hover:text-white' : 'hover:bg-gray-100 text-gray-600 hover:text-gray-900'}`}
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          {/* Table Content */}
+          <div className="flex-1 overflow-auto relative">
+            {relatedCustomers.length > 0 ? (
+              <table className="w-full text-left text-xs">
+                <thead className={`sticky top-0 ${isDarkMode ? 'bg-gray-900 text-gray-400' : 'bg-gray-100 text-gray-600'}`}>
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Account No</th>
+                    <th className="px-3 py-2 font-medium">Full Name</th>
+                    <th className="px-3 py-2 font-medium text-center">Port</th>
+                    <th className="px-3 py-2 font-medium">Billing Status</th>
+                    <th className="px-3 py-2 font-medium text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className={`divide-y ${isDarkMode ? 'divide-gray-800' : 'divide-gray-200'}`}>
+                  {relatedCustomers.map((customer, idx) => (
+                    <tr
+                      key={idx}
+                      className={`cursor-pointer transition-all ${isDarkMode ? "hover:bg-gray-800" : "hover:bg-gray-100"} shadow-sm`}
+                      onClick={() => {
+                        setIsCustomersExpanded(false);
+                        handleCustomerClick(customer.id || customer.account_no);
+                      }}
+                    >
+                      <td className={`px-3 py-2 font-mono ${isDarkMode ? "text-gray-300" : "text-gray-700"}`}>{customer.account_no}</td>
+                      <td className={`px-3 py-2 ${isDarkMode ? "text-white" : "text-gray-900"}`}>{customer.full_name}</td>
+                      <td className={`px-3 py-2 text-center ${isDarkMode ? "text-gray-300" : "text-gray-700"}`}>{customer.port}</td>
+                      <td className={`px-3 py-2 ${isDarkMode ? "text-gray-300" : "text-gray-700"}`}>{customer.billing_status || 'N/A'}</td>
+                      <td className="px-3 py-2 text-right">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                          (customer.status?.toLowerCase() === 'online' || customer.status?.toLowerCase() === 'active')
+                            ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                            : customer.status?.toLowerCase() === 'offline'
+                              ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                              : 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
+                        }`}>
+                          {customer.status || 'Unknown'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className={`text-center py-6 m-4 border-2 border-dashed rounded-lg ${isDarkMode ? 'border-gray-800 text-gray-500' : 'border-gray-200 text-gray-400'}`}>
+                <User size={24} className="mx-auto mb-2 opacity-20" />
+                <p className="text-sm">No customers related to this LCPNAP</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {selectedCustomerRecord && (
         <div className="absolute inset-0 z-[100] animate-in slide-in-from-right duration-300 flex">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={() => setSelectedCustomerRecord(null)} />

@@ -73,6 +73,7 @@ interface JobOrderDoneFormData {
   portLabelImage: File | null;
   clientSignatureImage: File | null;
   speedTestImage: File | null;
+  houseFrontImage: File | null;
   modifiedBy: string;
   modifiedDate: string;
   itemName1: string;
@@ -179,6 +180,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     portLabelImage: null,
     clientSignatureImage: null,
     speedTestImage: null,
+    houseFrontImage: null,
     modifiedBy: currentUserEmail,
     modifiedDate: new Date().toLocaleString('en-US', {
       month: '2-digit',
@@ -224,6 +226,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     portLabelImage: string | null;
     clientSignatureImage: string | null;
     speedTestImage: string | null;
+    houseFrontImage: string | null;
   }>({
     signedContractImage: null,
     setupImage: null,
@@ -231,7 +234,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     routerReadingImage: null,
     portLabelImage: null,
     clientSignatureImage: null,
-    speedTestImage: null
+    speedTestImage: null,
+    houseFrontImage: null
   });
 
   const [showModal, setShowModal] = useState(false);
@@ -447,7 +451,11 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         routerReadingImage: convertGoogleDriveUrl(jobOrderData?.router_reading_image_url || jobOrderData?.Router_Reading_Image_URL),
         portLabelImage: convertGoogleDriveUrl(jobOrderData?.port_label_image_url || jobOrderData?.Port_Label_Image_URL),
         clientSignatureImage: convertGoogleDriveUrl(getImageUrl(clientSignatureVariations)),
-        speedTestImage: convertGoogleDriveUrl(jobOrderData?.speedtest_image_url || jobOrderData?.Speedtest_Image_URL)
+        speedTestImage: convertGoogleDriveUrl(jobOrderData?.speedtest_image_url || jobOrderData?.Speedtest_Image_URL),
+        // Lives on the application row; this only picks it up when the job order
+        // payload already carries a copy. The application fetch below is what
+        // fills it in for real.
+        houseFrontImage: convertGoogleDriveUrl(jobOrderData?.house_front_picture_url || jobOrderData?.House_Front_Picture_URL)
       };
 
       setImagePreviews(newImagePreviews);
@@ -460,6 +468,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
       if (newImagePreviews.portLabelImage) errorsToClear.push('portLabelImage');
       if (newImagePreviews.clientSignatureImage) errorsToClear.push('clientSignatureImage');
       if (newImagePreviews.speedTestImage) errorsToClear.push('speedTestImage');
+      if (newImagePreviews.houseFrontImage) errorsToClear.push('houseFrontImage');
 
       if (errorsToClear.length > 0) {
         setErrors(prev => {
@@ -476,7 +485,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         routerReadingImage: null,
         portLabelImage: null,
         clientSignatureImage: null,
-        speedTestImage: null
+        speedTestImage: null,
+        houseFrontImage: null
       });
     }
   }, [jobOrderData, isOpen]);
@@ -864,7 +874,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                 routerReadingImage: safeConvert(jobOrderData.router_reading_image_url || jobOrderData.Router_Reading_Image_URL),
                 portLabelImage: safeConvert(jobOrderData.port_label_image_url || jobOrderData.Port_Label_Image_URL),
                 clientSignatureImage: safeConvert(jobOrderData.client_signature_url || jobOrderData.Client_Signature_URL),
-                speedTestImage: safeConvert(jobOrderData.speedtest_image_url || jobOrderData.Speedtest_Image_URL)
+                speedTestImage: safeConvert(jobOrderData.speedtest_image_url || jobOrderData.Speedtest_Image_URL),
+                houseFrontImage: safeConvert(appData.house_front_picture_url)
               });
             }
           } else {
@@ -924,7 +935,8 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
           routerReadingImage: safeConvertDefault(jobOrderData.router_reading_image_url || jobOrderData.Router_Reading_Image_URL),
           portLabelImage: safeConvertDefault(jobOrderData.port_label_image_url || jobOrderData.Port_Label_Image_URL),
           clientSignatureImage: safeConvertDefault(jobOrderData.client_signature_url || jobOrderData.Client_Signature_URL),
-          speedTestImage: safeConvertDefault(jobOrderData.speedtest_image_url || jobOrderData.Speedtest_Image_URL)
+          speedTestImage: safeConvertDefault(jobOrderData.speedtest_image_url || jobOrderData.Speedtest_Image_URL),
+          houseFrontImage: safeConvertDefault(jobOrderData.house_front_picture_url || jobOrderData.House_Front_Picture_URL)
         });
       };
 
@@ -958,7 +970,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
     }
   };
 
-  const handleImageUpload = async (field: 'signedContractImage' | 'setupImage' | 'boxReadingImage' | 'routerReadingImage' | 'portLabelImage' | 'clientSignatureImage' | 'speedTestImage', file: File) => {
+  const handleImageUpload = async (field: 'signedContractImage' | 'setupImage' | 'boxReadingImage' | 'routerReadingImage' | 'portLabelImage' | 'clientSignatureImage' | 'speedTestImage' | 'houseFrontImage', file: File) => {
     try {
       let processedFile = file;
       const originalSize = (file.size / 1024 / 1024).toFixed(2);
@@ -1344,6 +1356,12 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
         if (formData.speedTestImage) {
           console.log(`[APPEND] Speed Test: ${(formData.speedTestImage.size / 1024 / 1024).toFixed(2)}MB`);
           imageFormData.append('speed_test_image', formData.speedTestImage, formData.speedTestImage.name);
+        }
+        // Uploaded with the rest, but the backend files it on the application's
+        // house_front_picture_url, not on the job order.
+        if (formData.houseFrontImage) {
+          console.log(`[APPEND] House Front: ${(formData.houseFrontImage.size / 1024 / 1024).toFixed(2)}MB`);
+          imageFormData.append('house_front_image', formData.houseFrontImage, formData.houseFrontImage.name);
         }
 
         console.log('[UPLOAD] FormData prepared, sending to backend...');
@@ -2542,6 +2560,13 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
                     </div>
                   )}
                 </div>
+
+                <ImagePreview
+                  imageUrl={imagePreviews.houseFrontImage}
+                  label="House Front Picture"
+                  onUpload={(file) => handleImageUpload('houseFrontImage', file)}
+                  error={errors.houseFrontImage}
+                />
 
                 <ImagePreview
                   imageUrl={imagePreviews.boxReadingImage}
