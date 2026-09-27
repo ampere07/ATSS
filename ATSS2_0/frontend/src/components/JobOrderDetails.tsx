@@ -2478,6 +2478,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsProps> = ({ jobOrder, onClose, on
           setIsAttachmentModalOpen(false);
         }}
         jobOrderData={jobOrder}
+        applicationHouseFrontUrl={applicationData?.house_front_picture_url ?? null}
       />
 
       <ApprovalConfirmationModal

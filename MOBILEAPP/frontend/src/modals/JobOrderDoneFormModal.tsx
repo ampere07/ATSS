@@ -171,7 +171,7 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
     clientSignatureImage: null,
     speedTestImage: null,
         modifiedBy: currentUserEmail,
-    modifiedDate: dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss'),
+    modifiedDate: dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss'),
     contractLink: '',
     contractTemplate: '1',
     assignedEmail: '',
@@ -715,7 +715,7 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
         clientSignatureImage: null,
         speedTestImage: null,
         modifiedBy: currentUserEmail,
-        modifiedDate: dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss'),
+        modifiedDate: dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss'),
         contractLink: '',
         contractTemplate: '1',
         assignedEmail: '',
@@ -1024,7 +1024,7 @@ const JobOrderDoneFormModal: React.FC<JobOrderDoneFormModalProps> = ({
     const updatedFormData = {
       ...formData,
       modifiedBy: currentUserEmail,
-      modifiedDate: dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss')
+      modifiedDate: dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss')
     };
 
     setFormData(updatedFormData);

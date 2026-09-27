@@ -9,7 +9,7 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import { useServiceOrderContext } from '../contexts/ServiceOrderContext';
 import { useJobOrderContext } from '../contexts/JobOrderContext';
 import { useWorkOrderStore } from '../store/workOrderStore';
-import { formatToGMT8MySQL } from '../utils/dateUtils';
+import { formatToGMT8MySQL, manilaTimeToEpoch } from '../utils/dateUtils';
 import { updateServiceOrder, enableServiceOrderForTechnician } from '../services/serviceOrderService';
 import { getCustomerDetail, CustomerDetailData } from '../services/customerDetailService';
 import { techInOutService } from '../services/techInOutService';
@@ -329,7 +329,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
   const [successMessage, setSuccessMessage] = useState<string>('');
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(dayjs().tz('Asia/Manila').add(8, 'hour'));
+  const [now, setNow] = useState(dayjs());
   const [techStatus, setTechStatus] = useState<'online' | 'offline'>('offline');
   const [showTimeInWarning, setShowTimeInWarning] = useState(false);
   const [isEnablingTechnician, setIsEnablingTechnician] = useState(false);
@@ -420,10 +420,10 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
     let interval: NodeJS.Timeout;
     if (isStarted && !isEnded) {
       interval = setInterval(() => {
-        setNow(dayjs().tz('Asia/Manila').add(8, 'hour'));
+        setNow(dayjs());
       }, 1000);
     } else {
-      setNow(dayjs().tz('Asia/Manila').add(8, 'hour'));
+      setNow(dayjs());
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -656,7 +656,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
       setLoading(true);
       if (!serviceOrder.id) throw new Error('Cannot update service order: Missing ID');
 
-      const currentTime = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
+      const currentTime = dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
       await updateServiceOrder(serviceOrder.id, {
         start_time: currentTime,
         end_time: null,
@@ -685,7 +685,7 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
       setLoading(true);
       if (!serviceOrder.id) throw new Error('Cannot update service order: Missing ID');
 
-      const currentTime = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
+      const currentTime = dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
       await updateServiceOrder(serviceOrder.id, {
         end_time: currentTime,
       } as any);
@@ -770,8 +770,8 @@ const ServiceOrderDetails: React.FC<ServiceOrderDetailsProps> = ({
   const getDurationString = (start?: string | null, end?: string | null): string => {
     if (!start) return 'N/A';
     try {
-      const startTime = dayjs.tz(start, 'Asia/Manila').valueOf();
-      const endTime = end ? dayjs.tz(end, 'Asia/Manila').valueOf() : now.valueOf();
+      const startTime = manilaTimeToEpoch(start);
+      const endTime = end ? manilaTimeToEpoch(end) : now.valueOf();
       
       if (isNaN(startTime) || isNaN(endTime)) return 'N/A';
       

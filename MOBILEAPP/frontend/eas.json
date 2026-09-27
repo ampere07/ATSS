@@ -36,8 +36,8 @@
   "submit": {
     "production": {
       "ios": {
-        "ascApiKeyPath": "./AuthKey_A7D46LVYN7.p8",
-        "ascApiKeyId": "A7D46LVYN7",
+        "ascApiKeyPath": "./AuthKey_TJ87AS465P.p8",
+        "ascApiKeyId": "TJ87AS465P",
         "ascApiKeyIssuerId": "d51b0d4d-88f3-4d65-83e4-8fc55318a946",
         "appleTeamId": "9TA37RSCJG",
         "bundleIdentifier": "com.atss.sync",

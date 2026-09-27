@@ -3,7 +3,7 @@ import { Camera, Trash2, CheckCircle, Upload, ExternalLink } from 'lucide-react'
 import ModalUITemplate from './ui-modal/ModalUITemplate';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import { getActiveImageSize, resizeImage, ImageSizeSetting } from '../services/imageSettingsService';
-import apiClient from '../config/api';
+import apiClient, { API_BASE_URL } from '../config/api';
 import { updateJobOrder } from '../services/jobOrderService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 
@@ -13,7 +13,30 @@ interface JOAttachmentModalProps {
     onSave: (formData: any) => void;
     jobOrderData?: any;
     loading?: boolean;
+    // The house front photo is stored on the application, not the job order, so
+    // the parent — which already loads the application — hands it down here.
+    applicationHouseFrontUrl?: string | null;
 }
+
+/**
+ * Drive will not serve its images to an <img> on another origin: both
+ * drive.google.com/uc and the lh3.googleusercontent.com thumbnail host answer a
+ * hotlinked request with a redirect or a 403, which is why these boxes came up
+ * empty for rows that did have a URL. The backend proxy fetches the bytes and
+ * serves them from our own origin, and is what every other image preview in the
+ * app already goes through.
+ *
+ * Only the src is rewritten — previews keep the original Drive URL, so opening
+ * one in a new tab still lands on Drive.
+ */
+const toDisplaySrc = (url: string | null): string => {
+    if (!url) return '';
+    if (url.startsWith('data:') || url.startsWith('blob:')) return url;
+    if (url.includes('drive.google.com') || url.includes('googleusercontent.com')) {
+        return `${API_BASE_URL}/proxy/image?url=${encodeURIComponent(url)}`;
+    }
+    return url;
+};
 
 const ImageUploadField = ({ 
     label, 
@@ -29,33 +52,49 @@ const ImageUploadField = ({
     isDarkMode: boolean,
     handleFileChange: (e: React.ChangeEvent<HTMLInputElement>, field: string) => void,
     clearFile: (field: string) => void
-}) => (
+}) => {
+    const [loadFailed, setLoadFailed] = useState(false);
+
+    // A new pick replaces the src, so a previous failure must not stick.
+    useEffect(() => {
+        setLoadFailed(false);
+    }, [preview]);
+
+    return (
     <div className="space-y-2">
         <label className={`text-sm font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{label}</label>
-        <div 
+        <div
             className={`relative group border-2 border-dashed rounded-xl overflow-hidden aspect-video flex flex-col items-center justify-center transition-all ${
-                preview 
-                ? 'border-transparent' 
+                preview
+                ? 'border-transparent'
                 : (isDarkMode ? 'border-gray-700 hover:border-gray-500 bg-gray-800/50' : 'border-gray-300 hover:border-gray-400 bg-gray-50')
             }`}
         >
             {preview ? (
                 <>
-                    <img 
-                        src={preview} 
-                        alt={label} 
-                        className="w-full h-full object-cover" 
-                        onError={(e) => {
-                            // Fallback to direct drive link if thumbnail fails
-                            const currentSrc = e.currentTarget.src;
-                            if (currentSrc.includes('lh3.googleusercontent.com')) {
-                                const fileId = currentSrc.split('/d/')[1]?.split('=')[0];
-                                if (fileId) {
-                                    e.currentTarget.src = `https://drive.google.com/uc?export=view&id=${fileId}`;
-                                }
-                            }
-                        }}
-                    />
+                    {loadFailed ? (
+                        // The record has an image, it just could not be rendered here.
+                        // Say so and offer the real link rather than showing an empty box.
+                        <div className={`w-full h-full flex flex-col items-center justify-center gap-1 px-3 text-center ${isDarkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-50 text-gray-500'}`}>
+                            <Camera size={28} className="opacity-50" />
+                            <span className="text-xs font-medium">Preview unavailable</span>
+                            <a
+                                href={preview}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs font-semibold text-blue-500 hover:underline"
+                            >
+                                Open image
+                            </a>
+                        </div>
+                    ) : (
+                        <img
+                            src={toDisplaySrc(preview)}
+                            alt={label}
+                            className="w-full h-full object-cover"
+                            onError={() => setLoadFailed(true)}
+                        />
+                    )}
                     <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-3">
                         <div className="flex items-center gap-4">
                             <button 
@@ -97,14 +136,16 @@ const ImageUploadField = ({
             )}
         </div>
     </div>
-);
+    );
+};
 
 const JOAttachmentModal: React.FC<JOAttachmentModalProps> = ({
     isOpen,
     onClose,
     onSave,
     jobOrderData,
-    loading = false
+    loading = false,
+    applicationHouseFrontUrl = null
 }) => {
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -171,33 +212,32 @@ const JOAttachmentModal: React.FC<JOAttachmentModalProps> = ({
         fetchImageSettings();
     }, []);
 
-    const convertGoogleDriveUrl = (url: string | null | undefined): string | null => {
-        if (!url) return null;
-        if (url.startsWith('data:')) return url; // Already a data URL
-        
-        const fileIdMatch = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-        if (fileIdMatch && fileIdMatch[1]) {
-            return `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}=s1000`;
-        }
-        const idMatch = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-        if (idMatch && idMatch[1]) {
-            return `https://lh3.googleusercontent.com/d/${idMatch[1]}=s1000`;
-        }
-        return url;
+    // A stored value is only a preview if it is actually a URL. Rows carrying
+    // '', 'null' or a queue placeholder were being treated as images, which put
+    // an "Uploaded" badge on an empty box.
+    const asImageUrl = (value: any): string | null => {
+        if (!value || typeof value !== 'string') return null;
+        const trimmed = value.trim();
+        if (!trimmed || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined') return null;
+        if (!trimmed.startsWith('http') && !trimmed.startsWith('data:')) return null;
+        return trimmed;
     };
 
     useEffect(() => {
         if (isOpen && jobOrderData) {
-            // Load existing images if available
+            // Load existing images if available. These stay the original URLs —
+            // toDisplaySrc turns them into something an <img> can load.
             setPreviews({
-                setupImage: convertGoogleDriveUrl(jobOrderData.setup_image_url || jobOrderData.Setup_Image_URL),
-                speedTestImage: convertGoogleDriveUrl(jobOrderData.speedtest_image_url || jobOrderData.Speedtest_Image_URL),
-                signedContract: convertGoogleDriveUrl(jobOrderData.signed_contract_image_url || jobOrderData.Signed_Contract_Image_URL),
-                boxReadingImage: convertGoogleDriveUrl(jobOrderData.box_reading_image_url || jobOrderData.Box_Reading_Image_URL),
-                routerReading: convertGoogleDriveUrl(jobOrderData.router_reading_image_url || jobOrderData.Router_Reading_Image_URL),
-                portLabel: convertGoogleDriveUrl(jobOrderData.port_label_image_url || jobOrderData.Port_Label_Image_URL),
-                houseFrontImage: convertGoogleDriveUrl(jobOrderData.house_front_image_url || jobOrderData.house_front_picture_url || jobOrderData.houseFrontPicture || jobOrderData.House_Front_Image_URL),
-                clientTagging: convertGoogleDriveUrl(jobOrderData.client_tagging_url || jobOrderData.Client_Tagging_URL),
+                setupImage: asImageUrl(jobOrderData.setup_image_url || jobOrderData.Setup_Image_URL),
+                speedTestImage: asImageUrl(jobOrderData.speedtest_image_url || jobOrderData.Speedtest_Image_URL),
+                signedContract: asImageUrl(jobOrderData.signed_contract_image_url || jobOrderData.Signed_Contract_Image_URL),
+                boxReadingImage: asImageUrl(jobOrderData.box_reading_image_url || jobOrderData.Box_Reading_Image_URL),
+                routerReading: asImageUrl(jobOrderData.router_reading_image_url || jobOrderData.Router_Reading_Image_URL),
+                portLabel: asImageUrl(jobOrderData.port_label_image_url || jobOrderData.Port_Label_Image_URL),
+                // Newer job orders keep this on the application; older ones still
+                // have a copy on the job order itself.
+                houseFrontImage: asImageUrl(applicationHouseFrontUrl || jobOrderData.house_front_picture_url || jobOrderData.House_Front_Picture_URL),
+                clientTagging: asImageUrl(jobOrderData.client_tagging_url || jobOrderData.Client_Tagging_URL),
             });
         } else if (!isOpen) {
             // Reset
@@ -222,7 +262,7 @@ const JOAttachmentModal: React.FC<JOAttachmentModalProps> = ({
                 clientTagging: null,
             });
         }
-    }, [isOpen, jobOrderData]);
+    }, [isOpen, jobOrderData, applicationHouseFrontUrl]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>, field: string) => {
         if (e.target.files && e.target.files[0]) {

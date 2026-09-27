@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, Text, Pressable, ScrollView, Modal, ActivityIndicator, Linking, Platform, useWindowDimensions, StyleSheet, Alert, DeviceEventEmitter } from 'react-native';
 import { X, ExternalLink, Edit, ChevronLeft, Play, Square, MapPin, Paperclip, Lock } from 'lucide-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { formatToGMT8MySQL } from '../utils/dateUtils';
+import { formatToGMT8MySQL, manilaTimeToEpoch } from '../utils/dateUtils';
 import { updateJobOrder, approveJobOrder, enableJobOrderForTechnician } from '../services/jobOrderService';
 import { getBillingStatuses, BillingStatus } from '../services/lookupService';
 import { JobOrderDetailsProps } from '../types/jobOrder';
@@ -90,16 +90,16 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
 
   const [isStarted, setIsStarted] = useState(checkIsStarted((jobOrder as any).start_time));
   const [isEnded, setIsEnded] = useState(checkIsStarted((jobOrder as any).end_time));
-  const [now, setNow] = useState(dayjs().tz('Asia/Manila').add(8, 'hour'));
+  const [now, setNow] = useState(dayjs());
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isStarted && !isEnded) {
       interval = setInterval(() => {
-        setNow(dayjs().tz('Asia/Manila').add(8, 'hour'));
+        setNow(dayjs());
       }, 1000);
     } else {
-      setNow(dayjs().tz('Asia/Manila').add(8, 'hour'));
+      setNow(dayjs());
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -839,7 +839,7 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
       setLoading(true);
       if (!jobOrder.id) throw new Error('Cannot update job order: Missing ID');
 
-      const currentTime = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
+      const currentTime = dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
       await updateJobOrder(jobOrder.id, {
         start_time: currentTime,
         end_time: null,
@@ -865,8 +865,8 @@ const JobOrderDetails: React.FC<JobOrderDetailsPropsExtended> = ({ jobOrder, onC
   const getDurationString = (start?: string | null, end?: string | null): string => {
     if (!start) return 'N/A';
     try {
-      const startTime = dayjs.tz(start, 'Asia/Manila').valueOf();
-      const endTime = end ? dayjs.tz(end, 'Asia/Manila').valueOf() : now.valueOf();
+      const startTime = manilaTimeToEpoch(start);
+      const endTime = end ? manilaTimeToEpoch(end) : now.valueOf();
       
       if (isNaN(startTime) || isNaN(endTime)) return 'N/A';
       

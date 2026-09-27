@@ -1311,7 +1311,7 @@ const JobOrderDoneFormTechModal: React.FC<JobOrderDoneFormTechModalProps> = ({
 
 
 
-      const manilaNow = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
+      const manilaNow = dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
 
       let jobOrderUpdateData: any = {
         updated_by_user_email: updatedFormData.modifiedBy,

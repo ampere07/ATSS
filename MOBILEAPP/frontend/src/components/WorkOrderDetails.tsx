@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
+import { manilaTimeToEpoch } from '../utils/dateUtils';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -56,8 +57,8 @@ const formatDate = (dateStr?: string | null): string => {
 const getDurationString = (start?: string | null, end?: string | null, now?: any): string => {
   if (!start) return 'N/A';
   try {
-    const startTime = dayjs.tz(start, 'Asia/Manila').valueOf();
-    const endTime = end ? dayjs.tz(end, 'Asia/Manila').valueOf() : now.valueOf();
+    const startTime = manilaTimeToEpoch(start);
+    const endTime = end ? manilaTimeToEpoch(end) : now.valueOf();
     
     if (isNaN(startTime) || isNaN(endTime)) return 'N/A';
     
@@ -246,16 +247,16 @@ const WorkOrderDetails: React.FC<WorkOrderDetailsProps & { isDarkMode?: boolean;
   useEffect(() => {
     setTechnicianEnabledOverride(null);
   }, [workOrder?.id]);
-  const [now, setNow] = useState(dayjs().tz('Asia/Manila').add(8, 'hour'));
+  const [now, setNow] = useState(dayjs());
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isStarted && !isEnded) {
       interval = setInterval(() => {
-        setNow(dayjs().tz('Asia/Manila').add(8, 'hour'));
+        setNow(dayjs());
       }, 1000);
     } else {
-      setNow(dayjs().tz('Asia/Manila').add(8, 'hour'));
+      setNow(dayjs());
     }
     return () => {
       if (interval) clearInterval(interval);
@@ -357,7 +358,7 @@ const WorkOrderDetails: React.FC<WorkOrderDetailsProps & { isDarkMode?: boolean;
       setLoading(true);
       if (!workOrder?.id) throw new Error('Cannot update work order: Missing ID');
 
-      const currentTime = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
+      const currentTime = dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
       await updateWorkOrder(workOrder.id!, {
         start_time: currentTime,
         end_time: null,
@@ -383,7 +384,7 @@ const WorkOrderDetails: React.FC<WorkOrderDetailsProps & { isDarkMode?: boolean;
       setLoading(true);
       if (!workOrder?.id) throw new Error('Cannot update work order: Missing ID');
 
-      const currentTime = dayjs().tz('Asia/Manila').add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
+      const currentTime = dayjs().utc().add(8, 'hour').format('YYYY-MM-DD HH:mm:ss');
       await updateWorkOrder(workOrder.id!, {
         end_time: currentTime,
       } as any);

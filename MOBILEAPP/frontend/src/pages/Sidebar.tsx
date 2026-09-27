@@ -5,7 +5,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 import {
-  FileCheck, Wrench, MapPinned, Settings, LayoutDashboard, ReceiptText, LifeBuoy,
+  FileCheck, Wrench, MapPinned, Settings, LayoutDashboard, ReceiptText, LifeBuoy, Home,
   Menu as MenuIcon, Package, List, ClipboardCheck, X, ChevronUp,
   CreditCard, FileText, Receipt, Clock,
   MessageSquare, Network, AlertCircle, Router, Server, Wifi, Send, Cable, MapPin, Mail,
@@ -133,7 +133,8 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
     {
       title: 'Operations',
       items: [
-        // The agent and customer dashboards are deliberately not listed.
+        // The agent dashboard is deliberately not listed here (the customer's
+        // is, as Home under Account).
         //
         // Both are landing pages: ROLE_HOME sends an agent to 'agent-dashboard'
         // and a customer to 'customer-dashboard' at sign-in, and the switch in
@@ -271,7 +272,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
     {
       title: 'Account',
       items: [
-        // Listed ahead of Support so a customer's bar reads Bills, Support,
+        // Listed ahead of Support so a customer's bar reads Home, Bills, Support,
         // Menu — the order they had when Bills sat in the Billing group, which
         // is the order the collapsed bar takes its first three from.
         // The customer portal. Listed for the Customer role alone: a SuperAdmin
@@ -279,6 +280,9 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
         // account's Bills and Support screens on an administrator's bar. The
         // web sidebar has no equivalent entries at all — it returns null for a
         // customer and renders their portal as its own layout.
+        // Home leads so a customer can always get back to their dashboard from
+        // Bills or Support — without it the landing page had no tab at all.
+        { id: 'customer-dashboard', label: 'Home', icon: Home, requires: 'customer-dashboard', onlyRoles: [ROLE.CUSTOMER] },
         { id: 'customer-bills', label: 'Bills', icon: ReceiptText, onlyRoles: [ROLE.CUSTOMER] },
         { id: 'customer-support', label: 'Support', icon: LifeBuoy, onlyRoles: [ROLE.CUSTOMER] },
         { id: 'menu', label: 'Menu', icon: MenuIcon, isMenuPage: true },
