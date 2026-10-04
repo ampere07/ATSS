@@ -14,6 +14,9 @@ class AgentCommissionHistory extends Model
     protected $fillable = [
         'ref_number',
         'total_amount',
+        // Allowance entered on the payout form. Written onto the invoice the
+        // payout settles when it is approved — see CommissionController.
+        'allowance',
         'created_by',
         'remarks',
         'proof_of_payment',

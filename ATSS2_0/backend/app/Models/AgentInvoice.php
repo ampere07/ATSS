@@ -70,6 +70,9 @@ class AgentInvoice extends Model
         'installation_fee',
         'total_amount',
         'commission',
+        // Added when the payout that settles this invoice is approved, and
+        // included in the subtotal.
+        'allowance',
         'subtotal',
         'pdf_path',
         // The rendered PDF lives on Google Drive, not on this server. `pdf_path`
@@ -95,6 +98,7 @@ class AgentInvoice extends Model
         'installation_fee' => 'decimal:2',
         'total_amount'     => 'decimal:2',
         'commission'       => 'decimal:2',
+        'allowance'        => 'decimal:2',
         'subtotal'         => 'decimal:2',
         'organization_id'  => 'integer',
     ];

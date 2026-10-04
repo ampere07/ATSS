@@ -199,6 +199,10 @@
         /* On the subtotal row only the figure is picked out in red; the label
            stays white with the rest of the block. */
         table.totals tr.grand td.value { color: #ff5a5a; }
+        /* A rule over each result line, the way a sum is written by hand:
+           clients x rate = TOTAL AMOUNT, then the additions = SUBTOTAL. */
+        table.totals tr.computed td,
+        table.totals tr.grand td { border-top: 1px solid #8ea0b8; }
 
         .signature {
             color: #d0202f;

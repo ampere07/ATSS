@@ -189,6 +189,7 @@ class CommissionController extends Controller
                     'id' => $item->id,
                     'ref_number' => $item->ref_number,
                     'total_amount' => $item->total_amount,
+                    'allowance' => (float) ($item->allowance ?? 0),
                     'created_by' => $item->created_by,
                     'created_at' => $item->created_at,
                     'remarks' => $item->remarks,
@@ -267,12 +268,16 @@ class CommissionController extends Controller
                 // bucket silently and irreversibly.
                 'type'          => ['nullable', 'string', 'max:50', Rule::in(self::PAYOUT_TYPES)],
                 'from_invoice'  => 'nullable|boolean',
+                // Paid on top of the invoice. Held on the payout while it is
+                // Pending and only written onto the invoice on approval.
+                'allowance'     => 'nullable|numeric|min:0',
             ]);
 
             $jobOrderIds = $validated['job_order_ids'] ?? [];
             unset($validated['job_order_ids'], $validated['from_invoice']);
 
             $validated['type'] = $validated['type'] ?? 'commission';
+            $validated['allowance'] = round((float) ($validated['allowance'] ?? 0), 2);
 
             // The columns are written either way, so an omitted field becomes an
             // explicit zero or empty string rather than a NULL the reports would
@@ -289,7 +294,11 @@ class CommissionController extends Controller
                 // paying it should draw exactly that.
                 $named = AgentInvoice::where('invoice_number', trim((string) $validated['ref_number']))->first();
 
-                $validated['total_amount']     = $validated['total_amount'] ?? ($named->subtotal ?? 0);
+                // The allowance is paid out with the invoice, so it is part of
+                // what this payout amounts to. It is not in the stored subtotal
+                // yet — that only happens when the payout is approved.
+                $validated['total_amount']     = $validated['total_amount']
+                    ?? round((float) ($named->commission ?? 0) + (float) ($named->total_amount ?? 0) + $validated['allowance'], 2);
                 $validated['remarks']          = $validated['remarks'] ?? '';
                 $validated['proof_of_payment'] = $validated['proof_of_payment'] ?? '';
             }
@@ -1206,6 +1215,32 @@ class CommissionController extends Controller
         return ['invoices' => $invoicesPaid, 'job_orders' => $jobOrdersPaid];
     }
 
+    /**
+     * Write the payout's allowance onto the invoice it settles.
+     *
+     * The subtotal is rebuilt from its parts — referral total + incentive +
+     * allowance — rather than adjusted, so approving again or changing the
+     * allowance can never add it twice.
+     *
+     * `pdf_path` is cleared so the next open renders the PDF again with the
+     * allowance on it, instead of handing back the copy already on Drive.
+     */
+    private function applyAllowanceToInvoice(AgentInvoice $invoice, AgentCommissionHistory $history): void
+    {
+        $allowance = round(max(0, (float) ($history->allowance ?? 0)), 2);
+
+        if (abs($allowance - (float) ($invoice->allowance ?? 0)) < 0.005) {
+            return;
+        }
+
+        $invoice->forceFill([
+            'allowance'  => $allowance,
+            'subtotal'   => round((float) $invoice->commission + (float) $invoice->total_amount + $allowance, 2),
+            'pdf_path'   => null,
+            'updated_by' => 'agent-payout #' . $history->id,
+        ])->save();
+    }
+
     /** The job orders a commission payout settles, as stored when it was raised. */
     private function jobOrderIdsFor(AgentCommissionHistory $history): array
     {
@@ -1271,6 +1306,9 @@ class CommissionController extends Controller
                 'type'             => 'nullable|string|max:50',
                 'remarks'          => 'nullable|string',
                 'proof_of_payment' => 'nullable|string',
+                // Zero is a real answer here — it clears an allowance entered
+                // when the payout was raised — so it survives the filter below.
+                'allowance'        => 'nullable|numeric|min:0',
             ]);
 
             $details = array_filter($details, fn ($v) => $v !== null && $v !== '');
@@ -1306,6 +1344,10 @@ class CommissionController extends Controller
             $named = AgentInvoice::where('invoice_number', trim((string) $history->ref_number))->first();
 
             if ($named) {
+                // Written before the invoice is settled: settleNamedInvoice()
+                // leaves an already-Paid invoice alone, and the allowance
+                // belongs on the invoice either way.
+                $this->applyAllowanceToInvoice($named, $history);
                 $settled = $this->settleNamedInvoice($named, $history);
             } elseif ($history->type === 'all' && $this->clearedEveryBucket($history)) {
                 // Only when the payout ACTUALLY emptied the agent, which is the

@@ -32,6 +32,7 @@ export interface AgentInvoiceRecord {
     installation_fee: number;
     total_amount: number;
     commission: number;
+    allowance?: number;
     subtotal: number;
     status: string;
     has_pdf: boolean;

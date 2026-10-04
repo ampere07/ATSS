@@ -35,6 +35,8 @@ interface AgentPayoutModalProps {
     approveId?: number;
     /** Reference of the record being approved, shown read-only. */
     approveRefNumber?: string;
+    /** Allowance already entered on the record being approved, pre-filled. */
+    approveAllowance?: number;
 }
 
 interface PayoutFormData {
@@ -44,6 +46,7 @@ interface PayoutFormData {
     remarks: string;
     proof_of_payment: string;
     payout_type: string;
+    allowance: string;
     [key: string]: string | number;
 }
 
@@ -57,7 +60,8 @@ const AgentPayoutForm: React.FC<{
     invoiceNumber?: string;
     approveId?: number;
     approveRefNumber?: string;
-}> = ({ agentId, agentName, onClose, onSuccess, isOpen, fromInvoice = false, invoiceNumber, approveId, approveRefNumber }) => {
+    approveAllowance?: number;
+}> = ({ agentId, agentName, onClose, onSuccess, isOpen, fromInvoice = false, invoiceNumber, approveId, approveRefNumber, approveAllowance }) => {
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
 
     useEffect(() => {
@@ -179,7 +183,8 @@ const AgentPayoutForm: React.FC<{
         total_amount: '',
         remarks: '',
         proof_of_payment: '',
-        payout_type: 'all'
+        payout_type: 'all',
+        allowance: ''
     });
 
     const getAgentBalances = (agentObj: any) => {
@@ -252,7 +257,8 @@ const AgentPayoutForm: React.FC<{
                 total_amount: fromInvoice ? '' : initialAmount,
                 remarks: '',
                 proof_of_payment: '',
-                payout_type: 'all'
+                payout_type: 'all',
+                allowance: approveAllowance && approveAllowance > 0 ? String(approveAllowance) : ''
             });
             setImageFile(null);
             setImagePreview(null);
@@ -265,7 +271,7 @@ const AgentPayoutForm: React.FC<{
             setImageFile(null);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isOpen, agentId, agentName, agents, fromInvoice, invoiceNumber, approveRefNumber]);
+    }, [isOpen, agentId, agentName, agents, fromInvoice, invoiceNumber, approveRefNumber, approveAllowance]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
@@ -396,6 +402,7 @@ const AgentPayoutForm: React.FC<{
             const payload = {
               ...formData,
               proof_of_payment: proofUrl,
+              allowance: Number(formData.allowance || 0),
               // Send the payout type the user actually picked. The option values
               // (commission / incentives_payout / Bonus_payout / all) map 1:1 onto the
               // balance branches in CommissionController::storeHistory — a literal
@@ -418,6 +425,9 @@ const AgentPayoutForm: React.FC<{
                     type: formData.payout_type,
                     remarks: formData.remarks,
                     proof_of_payment: proofUrl,
+                    // Written onto the invoice this payout settles when it
+                    // is approved, and added to that invoice's subtotal.
+                    allowance: Number(formData.allowance || 0),
                 })
                 : await apiClient.post('/commissions/history', payload);
 
@@ -583,6 +593,29 @@ const AgentPayoutForm: React.FC<{
                         title="Auto-generated reference number"
                     />
                 </div>
+
+                {/* Allowance — paid on top of the invoice. Only offered where
+                    there is an invoice to add it to: raised from one, or
+                    approving a payout that was. Nothing changes on the invoice
+                    until the payout is approved. */}
+                {(fromInvoice || approveId) && (
+                <div>
+                    <label className={labelClass}>Allowance</label>
+                    <input
+                        name="allowance"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={formData.allowance}
+                        onChange={handleInputChange}
+                        className={inputClass}
+                        placeholder="0.00"
+                    />
+                    <p className={`text-[11px] mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        Optional. Added to the agent's invoice subtotal once this payout is approved.
+                    </p>
+                </div>
+                )}
 
                 {/* Total Amount — not asked for on an invoice payout.
                     Locked on "All Balance": that option means every bucket is

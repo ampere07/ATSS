@@ -395,7 +395,7 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
                   {errors.agent_id && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.agent_id}</p>}
                 </div>
 
-                <div className="col-span-1 animate-in fade-in slide-in-from-top-1 duration-200">
+                <div className="col-span-2 animate-in fade-in slide-in-from-top-1 duration-200">
                   <label className={labelClass}>Commission*</label>
                   <input type="number" step="0.01" name="commission" value={formData.commission ?? ''} onChange={handleInputChange} className={`${inputClass} ${errors.commission ? 'border-red-500' : ''}`} placeholder="0.00" />
                   {errors.commission && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.commission}</p>}
@@ -407,7 +407,7 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
                   {errors.quota && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.quota}</p>}
                 </div>
 
-                <div className="col-span-2 animate-in fade-in slide-in-from-top-1 duration-200">
+                <div className="col-span-1 animate-in fade-in slide-in-from-top-1 duration-200">
                   <label className={labelClass}>Incentives*</label>
                   <input type="number" step="0.01" name="incentives_value" value={formData.incentives_value ?? ''} onChange={handleInputChange} className={`${inputClass} ${errors.incentives_value ? 'border-red-500' : ''}`} placeholder="0.00" />
                   {errors.incentives_value && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.incentives_value}</p>}

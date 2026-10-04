@@ -70,8 +70,11 @@ class AgentInvoicePdfService
      *   6  the sheet is exactly A4 — 21.0cm wide by 29.7cm tall — rather than
      *      Dompdf's rounded-off stand-in for it, and the footer artwork lifted
      *      clear of the bottom edge instead of finishing flush against it
+     *   7  installation fee dropped from the totals, which now read as a sum:
+     *      clients x commission = total amount, + allowance (when there is
+     *      one) + incentive = subtotal
      */
-    private const LAYOUT_VERSION = 6;
+    private const LAYOUT_VERSION = 7;
 
     /**
      * The sheet: A4 portrait, 21.0cm x 29.7cm, in points.

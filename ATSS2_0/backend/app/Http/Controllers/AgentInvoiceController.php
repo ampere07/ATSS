@@ -568,6 +568,7 @@ class AgentInvoiceController extends Controller
             'installation_fee'=> (float) $invoice->installation_fee,
             'total_amount'    => (float) $invoice->total_amount,
             'commission'      => (float) $invoice->commission,
+            'allowance'       => (float) ($invoice->allowance ?? 0),
             'subtotal'        => (float) $invoice->subtotal,
             'status'          => $invoice->status,
             // A rendering exists somewhere — on Drive, or locally when an upload

@@ -198,6 +198,7 @@ const AgentInvoiceDetails: React.FC<AgentInvoiceDetailsProps> = ({
             <Row label="Installation Fee">{peso(invoiceRecord.installation_fee)}</Row>
             <Row label="Total Amount">{peso(invoiceRecord.total_amount)}</Row>
             <Row label="Commission">{peso(invoiceRecord.commission)}</Row>
+            <Row label="Allowance">{peso(invoiceRecord.allowance || 0)}</Row>
             <Row label="Subtotal">
               <span className="font-semibold">{peso(invoiceRecord.subtotal)}</span>
             </Row>

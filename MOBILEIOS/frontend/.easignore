@@ -1,0 +1,32 @@
+# Files excluded from the archive uploaded to EAS Build.
+#
+# When this file exists it REPLACES .gitignore for upload purposes, so
+# everything that should stay out of the archive must be listed here.
+
+# Reinstalled on the build server from package-lock.json
+node_modules/
+
+# Build-time vars come from the "env" block in eas.json
+.env
+.env.*
+!.env.example
+
+# Signing credentials — used locally by `eas submit`, never inside the archive
+*.p8
+*.p12
+*.mobileprovision
+credentials.json
+
+# Local caches and tooling
+.expo/
+.git/
+.vscode/
+.idea/
+dist/
+*.log
+npm-debug.log*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini

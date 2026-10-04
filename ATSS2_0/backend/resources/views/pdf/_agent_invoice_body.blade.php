@@ -102,20 +102,16 @@
             <td style="width: 52%;"></td>
             <td style="width: 48%;">
                 <table class="totals">
-                    <tr>
-                        <td>TOTAL CLIENT INSTALLED</td>
-                        <td class="value">{{ (int) $invoice->total_customers }}</td>
-                    </tr>
-                    <tr>
-                        <td>INSTALLATION FEE</td>
-                        <td class="value">{{ $peso }} {{ number_format((float) $invoice->installation_fee, 2) }}</td>
-                    </tr>
-                    {{-- TOTAL AMOUNT is what the referrals on this invoice come
-                         to: the customer table's TOTAL column added up, which is
-                         clients x the referring agent's rate. The stored
-                         `commission` column is that sum, so it is what is
-                         printed here — the reader can check the figure against
-                         the rows above it.
+                    {{-- Laid out as a sum the reader can follow:
+                         TOTAL CLIENT INSTALLED x COMMISSION = TOTAL AMOUNT,
+                         then the allowance and incentive added on top to give
+                         the SUBTOTAL.
+
+                         TOTAL AMOUNT is the stored `commission` column — the
+                         customer table's TOTAL column added up. The per-client
+                         COMMISSION is `unit_price`. On a mixed-rate team no one
+                         rate multiplies out to that total, so the rate reads
+                         VARIES rather than printing a sum that does not add up.
 
                          INCENTIVE is the completed-quota payout, held in the
                          stored `total_amount` column. The two column names read
@@ -123,12 +119,39 @@
                          accident on the table rather than a swap: `commission`
                          has always been the per-referral sum and `total_amount`
                          has always been the incentive. --}}
+                    @php
+                        $clients     = (int) $invoice->total_customers;
+                        $rate        = (float) $invoice->unit_price;
+                        $referrals   = (float) $invoice->commission;
+                        $rateIsExact = abs($clients * $rate - $referrals) < 0.005;
+                        $allowance   = (float) ($invoice->allowance ?? 0);
+                    @endphp
                     <tr>
-                        <td>TOTAL AMOUNT</td>
-                        <td class="value">{{ $peso }} {{ number_format((float) $invoice->commission, 2) }}</td>
+                        <td>TOTAL CLIENT INSTALLED</td>
+                        <td class="value">{{ $clients }}</td>
                     </tr>
                     <tr>
-                        <td>INCENTIVE</td>
+                        <td>x COMMISSION</td>
+                        <td class="value">
+                            @if ($rateIsExact)
+                                {{ $peso }} {{ number_format($rate, 2) }}
+                            @else
+                                VARIES
+                            @endif
+                        </td>
+                    </tr>
+                    <tr class="computed">
+                        <td>= TOTAL AMOUNT</td>
+                        <td class="value">{{ $peso }} {{ number_format($referrals, 2) }}</td>
+                    </tr>
+                    @if ($allowance > 0)
+                        <tr>
+                            <td>+ ALLOWANCE</td>
+                            <td class="value">{{ $peso }} {{ number_format($allowance, 2) }}</td>
+                        </tr>
+                    @endif
+                    <tr>
+                        <td>+ INCENTIVE</td>
                         <td class="value">{{ $peso }} {{ number_format((float) $invoice->total_amount, 2) }}</td>
                     </tr>
                     <tr class="grand">
