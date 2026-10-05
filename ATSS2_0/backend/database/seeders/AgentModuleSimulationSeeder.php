@@ -108,6 +108,14 @@ class AgentModuleSimulationSeeder extends Seeder
 
     public function run(): void
     {
+        // clear() truncates users, applications and job_orders. `db:seed --force`
+        // is all it takes to run in production, so refuse there outright.
+        if (app()->environment('production')) {
+            $this->command->error('Refusing to run: APP_ENV is production, and this seeder truncates users, '
+                . 'applications and job_orders. Point the app at a local database with APP_ENV=local first.');
+            return;
+        }
+
         // Deterministic: the same command produces the same database.
         mt_srand(20260904);
 

@@ -463,24 +463,26 @@ class AgentIncentiveService
             return;
         }
 
-        $nameVariants = $this->nameVariants($user);
-
+        // Matched exactly the way commission, invoices and achievements match:
+        // AgentReferral::narrow() to find the candidates in SQL, then
+        // AgentProgramme::referralBelongsToAgent() to decide. The name used is
+        // "first last", as JobOrderAgentPaymentService uses.
+        //
+        // This used to be its own LIKE '%first last%', with nothing deciding
+        // afterwards. It disagreed with the rest of the scheme both ways: "Mark
+        // A. Lim" or "Lim, Mark" was paid commission and invoiced to Mark Lim
+        // but never counted toward his quota, while "Juana Cruz" — nobody's
+        // agent — completed a quota for agent Ana Cruz.
+        //
         // Referrals made through the agent picker are stored as the agent's user
-        // id rather than their name, so the id is matched alongside the name
-        // variants. Without it every referral made since the picker started
-        // writing ids would earn this agent no quota progress at all — the value
-        // holds none of the words the LIKEs below look for.
-        $taggedId = \App\Support\AgentReferral::encode($user->id ?? null);
+        // id, which narrow() matches as a whole value.
+        $first    = trim((string) ($user->first_name ?? ''));
+        $last     = trim((string) ($user->last_name ?? ''));
+        $email    = trim((string) ($user->email_address ?? ''));
+        $fullName = trim($first . ' ' . $last);
 
-        if (empty($nameVariants) && $taggedId === null) {
-            $summary['skipped']++;
-            $this->runLog->skipped((string) $agentId);
-            $this->writeLog("  [SKIP] Unable to build a name to match job orders");
-            $this->writeLog("[{$counter}/{$total}] ⊘ SKIPPED");
-            return;
-        }
         $this->writeLog("  [MATCH] Matching job orders via referred_by: "
-            . implode(' | ', array_filter(array_merge($nameVariants, [$taggedId]))));
+            . implode(' | ', array_filter([$fullName, $email, (string) $agentId])));
 
         // Base query for this agent's countable job orders, matched by the
         // related application's referred_by — the agent's id where the referral
@@ -537,17 +539,10 @@ class AgentIncentiveService
                             self::abandonedOnsiteStatuses()
                         );
                   });
-            })
-            ->where(function ($q) use ($nameVariants, $taggedId) {
-                // Matched as a whole value, not a fragment: an id is exact, and
-                // a LIKE on it would let "agent:3" also match "agent:37".
-                if ($taggedId !== null) {
-                    $q->orWhere('applications.referred_by', $taggedId);
-                }
-                foreach ($nameVariants as $variant) {
-                    $q->orWhereRaw('LOWER(applications.referred_by) LIKE ?', ['%' . $variant . '%']);
-                }
             });
+
+        // A superset only — the exact decision is made per row below.
+        \App\Support\AgentReferral::narrow($completedBase, 'applications.referred_by', $agentId, $first, $last, $email);
 
         // Referrals onboarded before the programme began earn nothing. Applied
         // to the base query so they are neither awarded nor reported as skipped
@@ -566,22 +561,37 @@ class AgentIncentiveService
             $this->writeLog("  [SCOPE] Counting referrals onboarded on or after {$startDate->format('Y-m-d')}");
         }
 
-        // Total countable (for logging how many are skipped because already processed).
-        $totalCompleted = (clone $completedBase)->count();
-
-        // Only the countable job orders NOT yet recorded in history are available.
+        // Every countable job order that really is this agent's referral, with
+        // whether it has already been recorded in history.
         //
         // Each carries the incentive value it was approved at. That snapshot is
         // what the award is built from, so an administrator raising the rate
         // tomorrow does not restate work already settled at the old one.
-        $countable = (clone $completedBase)
-            ->whereNotExists(function ($q) {
-                $q->select(DB::raw(1))
-                    ->from('agent_incentive_history as aih')
-                    ->whereColumn('aih.job_order_id', 'job_orders.id');
-            })
+        $candidates = $completedBase
             ->orderBy('job_orders.id', 'asc')
-            ->get(['job_orders.id', 'job_orders.incentive_value']);
+            ->get([
+                'job_orders.id',
+                'job_orders.incentive_value',
+                'job_orders.agent_paid_to',
+                'applications.referred_by',
+                DB::raw('EXISTS (SELECT 1 FROM agent_incentive_history aih WHERE aih.job_order_id = job_orders.id) AS recorded'),
+            ])
+            ->filter(function ($row) use ($fullName, $email, $agentId) {
+                // Once a job order is approved, the agent its commission was
+                // settled with is the agent whose referral it is. Counting it
+                // for anybody else would split one referral between two agents.
+                if ($row->agent_paid_to !== null && (int) $row->agent_paid_to !== $agentId) {
+                    return false;
+                }
+
+                return \App\Support\AgentProgramme::referralBelongsToAgent($row->referred_by, $fullName, $email, $agentId);
+            });
+
+        // Total countable (for logging how many are skipped because already processed).
+        $totalCompleted = $candidates->count();
+
+        // Only the countable job orders NOT yet recorded in history are available.
+        $countable = $candidates->filter(fn ($row) => !(int) $row->recorded);
 
         $jobOrderIds = [];
         // job order id => the rate it was approved at.
@@ -760,33 +770,6 @@ class AgentIncentiveService
         $this->runLog->processed((string) $agentId);
         $this->writeLog("  [COMPLETE] {$agentName} (#{$agentId}) — awarded incentive x{$cycles}, recorded {$processCount} job order(s)");
         $this->writeLog("[{$counter}/{$total}] ✓ SUCCESS");
-    }
-
-    /**
-     * Build all lowercased name variants used to match against applications.referred_by.
-     * Mirrors the matching used by CommissionController for consistency.
-     */
-    private function nameVariants(object $user): array
-    {
-        $first  = trim((string) ($user->first_name ?? ''));
-        $middle = trim((string) ($user->middle_initial ?? ''));
-        $last   = trim((string) ($user->last_name ?? ''));
-
-        $variants = [];
-
-        // first last
-        $simple = trim($first . ' ' . $last);
-        if ($simple !== '') {
-            $variants[] = strtolower($simple);
-        }
-
-        // first M. last  (matches the User::full_name accessor format)
-        $full = trim($first . ' ' . ($middle !== '' ? $middle . '. ' : '') . $last);
-        if ($full !== '') {
-            $variants[] = strtolower($full);
-        }
-
-        return array_values(array_unique(array_filter($variants)));
     }
 
     /**

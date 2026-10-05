@@ -1082,6 +1082,7 @@ const AgentPayout: React.FC = () => {
                 approveId={approveRecord?.id}
                 approveRefNumber={approveRecord?.ref_number}
                 approveAllowance={Number(approveRecord?.allowance || 0)}
+                approveInvoiceAmount={approveRecord?.invoice_amount ?? null}
                 agentId={approveRecord?.agent_id}
                 agentName={approveRecord?.agent_name}
             />

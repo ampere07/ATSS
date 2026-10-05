@@ -37,6 +37,13 @@ interface AgentPayoutModalProps {
     approveRefNumber?: string;
     /** Allowance already entered on the record being approved, pre-filled. */
     approveAllowance?: number;
+    /**
+     * What the invoice the record settles bills, before the allowance — null
+     * when it settles none. Approving pays exactly this plus the allowance, so
+     * the amount is shown that way and locked rather than pre-filled with the
+     * agent's whole balance.
+     */
+    approveInvoiceAmount?: number | null;
 }
 
 interface PayoutFormData {
@@ -61,7 +68,14 @@ const AgentPayoutForm: React.FC<{
     approveId?: number;
     approveRefNumber?: string;
     approveAllowance?: number;
-}> = ({ agentId, agentName, onClose, onSuccess, isOpen, fromInvoice = false, invoiceNumber, approveId, approveRefNumber, approveAllowance }) => {
+    approveInvoiceAmount?: number | null;
+}> = ({ agentId, agentName, onClose, onSuccess, isOpen, fromInvoice = false, invoiceNumber, approveId, approveRefNumber, approveAllowance, approveInvoiceAmount }) => {
+    // Approving a payout that settles an invoice: the amount is the invoice
+    // plus the allowance, whatever the agent's balance happens to be.
+    const settlesInvoice = !!approveId && approveInvoiceAmount !== null && approveInvoiceAmount !== undefined;
+    const invoicePayoutAmount = (allowance: string | number) =>
+        (Math.round((Number(approveInvoiceAmount || 0) + Math.max(0, Number(allowance || 0))) * 100) / 100).toFixed(2);
+
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
 
     useEffect(() => {
@@ -241,7 +255,9 @@ const AgentPayoutForm: React.FC<{
             setSelectedAgentId(resolvedId);
 
             let initialAmount = '';
-            if (resolvedId && agents.length > 0) {
+            if (settlesInvoice) {
+                initialAmount = invoicePayoutAmount(approveAllowance || 0);
+            } else if (resolvedId && agents.length > 0) {
                 const selectedAgentObj = agents.find(a => Number(a.id) === Number(resolvedId));
                 const { total } = getAgentBalances(selectedAgentObj);
                 initialAmount = total > 0 ? String(total) : '';
@@ -271,14 +287,22 @@ const AgentPayoutForm: React.FC<{
             setImageFile(null);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isOpen, agentId, agentName, agents, fromInvoice, invoiceNumber, approveRefNumber, approveAllowance]);
+    }, [isOpen, agentId, agentName, agents, fromInvoice, invoiceNumber, approveRefNumber, approveAllowance, approveInvoiceAmount]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
         
         setFormData(prev => {
             const newData = { ...prev, [name]: value };
-            
+
+            // Settling an invoice: the amount follows the allowance.
+            if (settlesInvoice) {
+                if (name === 'allowance') {
+                    newData.total_amount = invoicePayoutAmount(value);
+                }
+                return newData;
+            }
+
             // Auto-fill total amount based on payout type selection
             if (name === 'payout_type' || name === 'agent_id') {
                 const currentAgentId = name === 'agent_id' ? value : prev.agent_id;
@@ -453,7 +477,7 @@ const AgentPayoutForm: React.FC<{
     // The only payout type there is now — but the field is still editable when
     // approving, so the lock is expressed as "locked" rather than "is all".
     const isAllBalance = formData.payout_type === 'all';
-    const amountLocked = isAllBalance && !approveId;
+    const amountLocked = (isAllBalance && !approveId) || settlesInvoice;
 
     const inputClass = `w-full px-3 py-2.5 rounded-lg border text-sm transition-all duration-200 outline-none focus:ring-2 focus:ring-opacity-50 ${isDarkMode
         ? 'bg-gray-800 border-gray-700 text-white placeholder-gray-500 focus:ring-gray-600 focus:border-gray-600'
@@ -641,13 +665,17 @@ const AgentPayoutForm: React.FC<{
                         readOnly={amountLocked}
                         className={`${inputClass}${amountLocked ? ' cursor-not-allowed opacity-75' : ''}`}
                         placeholder="0.00"
-                        title={amountLocked
-                            ? 'A payout cashes out the agent\'s whole balance, so the amount is filled in automatically.'
-                            : undefined}
+                        title={settlesInvoice
+                            ? 'Paying this invoice draws exactly what it bills, plus the allowance.'
+                            : amountLocked
+                                ? 'A payout cashes out the agent\'s whole balance, so the amount is filled in automatically.'
+                                : undefined}
                     />
                     {amountLocked && (
                         <p className={`text-[11px] mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                            Paying the agent's full balance — amount is set automatically.
+                            {settlesInvoice
+                                ? `Invoice ${approveRefNumber || ''} — ₱${Number(approveInvoiceAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} plus allowance. Set automatically.`
+                                : 'Paying the agent\'s full balance — amount is set automatically.'}
                         </p>
                     )}
                 </div>

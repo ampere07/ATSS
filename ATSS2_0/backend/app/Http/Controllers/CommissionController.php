@@ -184,12 +184,29 @@ class CommissionController extends Controller
                 ->limit($limit)
                 ->get();
 
-            $data = $history->map(function($item) {
+            // The invoices these payouts settle, in one query, so the approval
+            // form can show what paying one actually amounts to.
+            $invoices = AgentInvoice::whereIn(
+                'invoice_number',
+                $history->pluck('ref_number')->map(fn ($r) => trim((string) $r))->filter()->unique()->values()
+            )->get(['invoice_number', 'commission', 'total_amount'])->keyBy('invoice_number');
+
+            $data = $history->map(function($item) use ($invoices) {
+                $invoice = in_array($item->type ?? 'commission', self::INVOICE_SETTLING_TYPES, true)
+                    ? ($invoices[trim((string) $item->ref_number)] ?? null)
+                    : null;
+
                 return [
                     'id' => $item->id,
                     'ref_number' => $item->ref_number,
                     'total_amount' => $item->total_amount,
                     'allowance' => (float) ($item->allowance ?? 0),
+                    // What the invoice this payout settles bills, before the
+                    // allowance — null when it settles none. Approving pays
+                    // exactly this plus the allowance, whatever the form says.
+                    'invoice_amount' => $invoice
+                        ? round((float) $invoice->commission + (float) $invoice->total_amount, 2)
+                        : null,
                     'created_by' => $item->created_by,
                     'created_at' => $item->created_at,
                     'remarks' => $item->remarks,
@@ -279,6 +296,24 @@ class CommissionController extends Controller
             $validated['type'] = $validated['type'] ?? 'commission';
             $validated['allowance'] = round((float) ($validated['allowance'] ?? 0), 2);
 
+            // A payout that names an invoice settles that invoice, so an invoice
+            // can only be paid once: not after it is Paid, and not while another
+            // payout for it is still waiting for approval. Two payouts raised for
+            // one invoice used to both be approved, the second debiting the agent
+            // again for money already paid.
+            $named = $this->settledInvoiceFor($validated['ref_number'], $validated['type']);
+
+            if ($named) {
+                if ($refusal = $this->refuseInvoicePayout($named)) {
+                    return $refusal;
+                }
+
+                // The invoice says what is owed, so it — not a typed figure — is
+                // what the payout amounts to. The allowance is paid on top; it is
+                // not in the stored subtotal yet, that only happens on approval.
+                $validated['total_amount'] = $this->invoicePayoutAmount($named, $validated['allowance']);
+            }
+
             // The columns are written either way, so an omitted field becomes an
             // explicit zero or empty string rather than a NULL the reports would
             // have to special-case.
@@ -292,13 +327,10 @@ class CommissionController extends Controller
                 // was still sitting there and could be — and was — paid a second
                 // time through the payout screen. The invoice says what is owed;
                 // paying it should draw exactly that.
-                $named = AgentInvoice::where('invoice_number', trim((string) $validated['ref_number']))->first();
+                $invoice = $named ?? AgentInvoice::where('invoice_number', trim((string) $validated['ref_number']))->first();
 
-                // The allowance is paid out with the invoice, so it is part of
-                // what this payout amounts to. It is not in the stored subtotal
-                // yet — that only happens when the payout is approved.
                 $validated['total_amount']     = $validated['total_amount']
-                    ?? round((float) ($named->commission ?? 0) + (float) ($named->total_amount ?? 0) + $validated['allowance'], 2);
+                    ?? ($invoice ? $this->invoicePayoutAmount($invoice, $validated['allowance']) : $validated['allowance']);
                 $validated['remarks']          = $validated['remarks'] ?? '';
                 $validated['proof_of_payment'] = $validated['proof_of_payment'] ?? '';
             }
@@ -896,6 +928,71 @@ class CommissionController extends Controller
         'achievement',
     ];
 
+    /**
+     * Payout types that settle the invoice their reference names.
+     *
+     * 'all' is what the payout form sends, and 'commission' is the default and
+     * what the mobile app sends. Both mean "pay this invoice", so both debit
+     * exactly what the invoice bills. An operator who deliberately recorded an
+     * incentives_payout or a Bonus_payout against an invoice number meant that
+     * type, and gets it.
+     */
+    private const INVOICE_SETTLING_TYPES = ['commission', 'all'];
+
+    /**
+     * The invoice a payout settles, or null.
+     *
+     * @param  bool  $lock  take a row lock, for use inside the approval transaction
+     */
+    private function settledInvoiceFor(?string $refNumber, ?string $type, bool $lock = false): ?AgentInvoice
+    {
+        $refNumber = trim((string) $refNumber);
+
+        if ($refNumber === '' || !in_array($type ?? 'commission', self::INVOICE_SETTLING_TYPES, true)) {
+            return null;
+        }
+
+        $query = AgentInvoice::where('invoice_number', $refNumber);
+
+        return ($lock ? $query->lockForUpdate() : $query)->first();
+    }
+
+    /**
+     * Refuse paying an invoice that is already paid or already being paid.
+     *
+     * @param  int|null  $exceptHistoryId  the payout being approved, which is
+     *                                     itself a pending payout for the invoice
+     */
+    private function refuseInvoicePayout(AgentInvoice $invoice, ?int $exceptHistoryId = null)
+    {
+        if ($invoice->status === AgentInvoice::STATUS_PAID) {
+            return response()->json([
+                'success' => false,
+                'message' => "Invoice {$invoice->invoice_number} has already been paid.",
+            ], 409);
+        }
+
+        $pending = AgentCommissionHistory::where('ref_number', $invoice->invoice_number)
+            ->where('status', self::STATUS_PENDING)
+            ->when($exceptHistoryId !== null, fn ($q) => $q->where('id', '!=', $exceptHistoryId))
+            ->value('id');
+
+        if ($pending !== null) {
+            return response()->json([
+                'success' => false,
+                'message' => "A payout for invoice {$invoice->invoice_number} is already awaiting approval (#{$pending}). Approve or reject that one instead.",
+            ], 409);
+        }
+
+        return null;
+    }
+
+    /** What paying an invoice amounts to: everything it bills, plus the allowance on top. */
+    private function invoicePayoutAmount(AgentInvoice $invoice, $allowance): float
+    {
+        return round((float) $invoice->commission + (float) $invoice->total_amount + max(0, (float) $allowance), 2);
+    }
+
     /** Message shown when a payout has been recorded and is awaiting approval. */
     private function pendingMessageFor(?string $type): string
     {
@@ -993,8 +1090,27 @@ class CommissionController extends Controller
      * type only ever moves its own bucket; touching `balance` as well would
      * double-count the money.
      */
-    private function applyCommissionMovement(AgentCommissionHistory $history): void
+    private function applyCommissionMovement(AgentCommissionHistory $history, ?AgentInvoice $named = null): void
     {
+        // A payout that names an invoice draws each bucket by what that invoice
+        // actually bills, rather than taking the whole amount out of commission.
+        //
+        // An agent invoice is two figures — commission earned per referral, and
+        // the incentive claimed from the quota ledger — and the agent's balance
+        // holds those in two separate columns. Debiting the lot from
+        // `commission_value` would leave the incentive still owed and still
+        // payable, which is the double-payment this is here to close.
+        //
+        // This used to apply only to the 'commission' type, but the payout form
+        // sends 'all' — so paying one invoice from the screen drained the agent's
+        // WHOLE balance (or, with a typed amount, took the allowance and the
+        // incentive out of commission). See INVOICE_SETTLING_TYPES.
+        if ($named) {
+            $this->debitInvoiceFromBalances($named, $history);
+
+            return;
+        }
+
         $agentBalance = AgentBalance::where('agent_id', $history->agent_id)->first();
         if (!$agentBalance) {
             return;
@@ -1007,31 +1123,6 @@ class CommissionController extends Controller
         $commission = max(0, (float) ($agentBalance->commission_value ?? 0));
         $incentives = max(0, (float) $agentBalance->incentives);
         $bonus      = max(0, (float) ($agentBalance->bonus ?? 0));
-
-        // A payout that names an invoice draws each bucket by what that invoice
-        // actually bills, rather than taking the whole subtotal out of commission.
-        //
-        // An agent invoice is two figures — commission earned per referral, and
-        // the incentive claimed from the quota ledger — and the agent's balance
-        // holds those in two separate columns. Debiting the lot from
-        // `commission_value` would leave the incentive still owed and still
-        // payable, which is the double-payment this is here to close.
-        //
-        // Only the default type takes this path; an operator who deliberately
-        // recorded an `incentives_payout` or a `Bonus_payout` against an invoice
-        // number meant that type, and gets it.
-        $named = $history->type === 'commission'
-            ? AgentInvoice::where('invoice_number', trim((string) $history->ref_number))->first()
-            : null;
-
-        if ($named) {
-            $agentBalance->update([
-                'commission_value' => max(0, $commission - (float) $named->commission),
-                'incentives'       => max(0, $incentives - (float) $named->total_amount),
-            ]);
-
-            return;
-        }
 
         if ($history->type === 'incentives') {
             $agentBalance->update(['incentives' => $incentives + $amount]);
@@ -1065,6 +1156,72 @@ class CommissionController extends Controller
             // 'commission' and anything unrecognised: the commission earnings,
             // which is where an approved job order credits its payment.
             $agentBalance->update(['commission_value' => max(0, $commission - $amount)]);
+        }
+    }
+
+    /**
+     * Take what an invoice bills off the balances of the agents it bills for.
+     *
+     * Per agent, not per payout: a team invoice bills every member's referrals
+     * and quotas, and each member's own balance holds what they earned. Debiting
+     * the team's total from whichever member the payout was raised for took
+     * money that member had not been paid for, and left the other members still
+     * holding — and able to be paid again — what this invoice had just paid.
+     *
+     * The invoice's own records say who earned what: each customer line names
+     * its referring agent, and each claimed quota names its agent. Anything the
+     * header bills beyond those (an invoice written before lines carried an
+     * agent) falls to the agent the payout was raised for.
+     *
+     * The allowance is not debited from anybody — it is paid on top.
+     */
+    private function debitInvoiceFromBalances(AgentInvoice $invoice, AgentCommissionHistory $history): void
+    {
+        $payee  = (int) $history->agent_id;
+        $debits = [];
+
+        $add = function ($agentId, string $bucket, float $amount) use (&$debits, $payee) {
+            $agentId = (int) $agentId ?: $payee;
+            $debits[$agentId][$bucket] = ($debits[$agentId][$bucket] ?? 0.0) + $amount;
+        };
+
+        $commissionByAgent = AgentInvoiceCustomer::where('agent_invoice_id', $invoice->id)
+            ->selectRaw('referred_by_agent_id as agent_id, SUM(total) as amount')
+            ->groupBy('referred_by_agent_id')
+            ->get();
+
+        $incentiveByAgent = DB::table('agent_incentive_history')
+            ->where('agent_invoice_id', $invoice->id)
+            ->selectRaw('agent_id, SUM(incentive_value) as amount')
+            ->groupBy('agent_id')
+            ->get();
+
+        foreach ($commissionByAgent as $row) {
+            $add($row->agent_id, 'commission_value', (float) $row->amount);
+        }
+        foreach ($incentiveByAgent as $row) {
+            $add($row->agent_id, 'incentives', (float) $row->amount);
+        }
+
+        $commissionRest = (float) $invoice->commission - (float) $commissionByAgent->sum('amount');
+        $incentiveRest  = (float) $invoice->total_amount - (float) $incentiveByAgent->sum('amount');
+        if ($commissionRest > 0.005) {
+            $add($payee, 'commission_value', $commissionRest);
+        }
+        if ($incentiveRest > 0.005) {
+            $add($payee, 'incentives', $incentiveRest);
+        }
+
+        foreach ($debits as $agentId => $debit) {
+            $agentBalance = AgentBalance::where('agent_id', $agentId)->lockForUpdate()->first();
+            if (!$agentBalance) {
+                continue;
+            }
+
+            $agentBalance->update([
+                'commission_value' => round(max(0, (float) ($agentBalance->commission_value ?? 0) - ($debit['commission_value'] ?? 0)), 2),
+                'incentives'       => round(max(0, (float) $agentBalance->incentives - ($debit['incentives'] ?? 0)), 2),
+            ]);
         }
     }
 
@@ -1224,9 +1381,16 @@ class CommissionController extends Controller
      *
      * `pdf_path` is cleared so the next open renders the PDF again with the
      * allowance on it, instead of handing back the copy already on Drive.
+     *
+     * An invoice already Paid is left alone: its subtotal is what was paid, and
+     * a later payout naming it (with no allowance, say) used to rewrite it.
      */
     private function applyAllowanceToInvoice(AgentInvoice $invoice, AgentCommissionHistory $history): void
     {
+        if ($invoice->status === AgentInvoice::STATUS_PAID) {
+            return;
+        }
+
         $allowance = round(max(0, (float) ($history->allowance ?? 0)), 2);
 
         if (abs($allowance - (float) ($invoice->allowance ?? 0)) < 0.005) {
@@ -1272,7 +1436,9 @@ class CommissionController extends Controller
 
             DB::beginTransaction();
 
-            $history = AgentCommissionHistory::find($id);
+            // Locked, so two approvals of the same payout racing cannot both see
+            // it Pending.
+            $history = AgentCommissionHistory::lockForUpdate()->find($id);
             if (!$history) {
                 DB::rollBack();
                 return response()->json(['success' => false, 'message' => 'Payout record not found'], 404);
@@ -1303,7 +1469,10 @@ class CommissionController extends Controller
             // record was created with.
             $details = $request->validate([
                 'total_amount'     => 'nullable|numeric|min:0',
-                'type'             => 'nullable|string|max:50',
+                // Refused rather than guessed at, as storeHistory() does. A type
+                // outside the list falls through to a commission debit and skips
+                // the invoice settlement, so a typo here moved the wrong money.
+                'type'             => ['nullable', 'string', 'max:50', Rule::in(self::PAYOUT_TYPES)],
                 'remarks'          => 'nullable|string',
                 'proof_of_payment' => 'nullable|string',
                 // Zero is a real answer here — it clears an allowance entered
@@ -1318,7 +1487,28 @@ class CommissionController extends Controller
                 $history->refresh();
             }
 
-            $this->applyCommissionMovement($history);
+            // The invoice this payout settles, locked so two payouts for it
+            // cannot both be approved. An invoice already Paid — by another
+            // payout, or by an "All Balance" payout that cleared the agent — is
+            // refused: approving would debit the agent a second time.
+            $named = $this->settledInvoiceFor($history->ref_number, $history->type, true);
+
+            if ($named) {
+                if ($refusal = $this->refuseInvoicePayout($named, (int) $history->id)) {
+                    DB::rollBack();
+                    return $refusal;
+                }
+
+                // What is actually paid: the invoice plus the allowance as it
+                // stands now, including one first entered at approval. The
+                // invoice decides the balance movement, so a figure typed on the
+                // form (the screen pre-fills the agent's whole balance) is not it.
+                $history->forceFill([
+                    'total_amount' => $this->invoicePayoutAmount($named, $history->allowance),
+                ])->save();
+            }
+
+            $this->applyCommissionMovement($history, $named);
 
             // The referrals this payout settles are marked paid now, so they can
             // never be included in a second payout.
@@ -1341,14 +1531,14 @@ class CommissionController extends Controller
             // its reference, so exactly one invoice is settled — the one being
             // paid — rather than every outstanding one the owner has. Checked
             // first, because it is the more specific answer of the two.
-            $named = AgentInvoice::where('invoice_number', trim((string) $history->ref_number))->first();
+            $invoice = $named ?? AgentInvoice::where('invoice_number', trim((string) $history->ref_number))->first();
 
-            if ($named) {
-                // Written before the invoice is settled: settleNamedInvoice()
-                // leaves an already-Paid invoice alone, and the allowance
-                // belongs on the invoice either way.
-                $this->applyAllowanceToInvoice($named, $history);
-                $settled = $this->settleNamedInvoice($named, $history);
+            if ($invoice) {
+                // Written before the invoice is settled. applyAllowanceToInvoice()
+                // leaves an invoice that is already Paid alone, as
+                // settleNamedInvoice() does.
+                $this->applyAllowanceToInvoice($invoice, $history);
+                $settled = $this->settleNamedInvoice($invoice, $history);
             } elseif ($history->type === 'all' && $this->clearedEveryBucket($history)) {
                 // Only when the payout ACTUALLY emptied the agent, which is the
                 // premise the comment above rests on. applyCommissionMovement()
@@ -1391,6 +1581,15 @@ class CommissionController extends Controller
                 'settled_invoices'            => $settled['invoices'],
                 'settled_invoice_job_orders'  => $settled['job_orders'],
             ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            // Caught on its own, as in storeHistory(), so a bad field is a 422
+            // with its errors rather than a 500.
+            DB::rollBack();
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors'  => $e->errors(),
+            ], 422);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json([

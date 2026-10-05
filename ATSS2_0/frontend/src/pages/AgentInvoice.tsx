@@ -811,7 +811,8 @@ const AgentInvoice: React.FC = () => {
                         onNext={selectedIndex >= 0 && selectedIndex < records.length - 1 ? handleNextRecord : undefined}
                         onViewPdf={() => handlePdf(selected, false)}
                         onDownloadPdf={() => handlePdf(selected, true)}
-                        onPayOut={can('agent-invoices.payout') ? () => setPayoutFor(selected) : undefined}
+                        // A Paid invoice cannot be paid again; the API refuses it too.
+                        onPayOut={can('agent-invoices.payout') && selected.status !== 'Paid' ? () => setPayoutFor(selected) : undefined}
                     />
                 </div>
             )}
