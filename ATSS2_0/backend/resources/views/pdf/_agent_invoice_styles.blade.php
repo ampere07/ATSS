@@ -196,6 +196,14 @@
             padding: 3px 14px;
         }
         table.totals td.value { text-align: right; }
+        /* The allowance's coverage dates, on their own line under the label so
+           the label column keeps its width for the figures beside it. */
+        table.totals td .coverage {
+            display: block;
+            color: #c9d3e0;
+            font-size: 8px;
+            margin-top: 1px;
+        }
         /* On the subtotal row only the figure is picked out in red; the label
            stays white with the rest of the block. */
         table.totals tr.grand td.value { color: #ff5a5a; }

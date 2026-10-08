@@ -10,7 +10,8 @@
      document, and each document template carries one.
 
      Expects: $invoice, $customerPages, $showReferrer, $peso, $invoiceDateLabel,
-              $billedToLabel, $periodLabel, $headerImage --}}
+              $billedToLabel, $periodLabel, $allowanceLines, $allowanceCoverageLabel,
+              $headerImage --}}
 {{-- Header artwork: the ATSS FIBER mark and watermark, full page width. --}}
 @if ($headerImage)
     <img class="header-art" src="{{ $headerImage }}" alt="">
@@ -125,6 +126,15 @@
                         $referrals   = (float) $invoice->commission;
                         $rateIsExact = abs($clients * $rate - $referrals) < 0.005;
                         $allowance   = (float) ($invoice->allowance ?? 0);
+                        // Set only on invoices given an allowance coverage by
+                        // hand; they print the allowance after the incentive.
+                        $coverage    = $allowanceCoverageLabel ?? null;
+                        // The standing allowances the invoice pays, each with
+                        // its period and coverage. Whatever the invoice's
+                        // allowance holds beyond them was entered on a payout
+                        // when it was approved, and keeps its old line.
+                        $allowanceLines = $allowanceLines ?? [];
+                        $otherAllowance = max(0, round($allowance - array_sum(array_column($allowanceLines, 'amount')), 2));
                     @endphp
                     <tr>
                         <td>TOTAL CLIENT INSTALLED</td>
@@ -144,16 +154,33 @@
                         <td>= TOTAL AMOUNT</td>
                         <td class="value">{{ $peso }} {{ number_format($referrals, 2) }}</td>
                     </tr>
-                    @if ($allowance > 0)
+                    @if ($otherAllowance > 0 && !$coverage)
                         <tr>
                             <td>+ ALLOWANCE</td>
-                            <td class="value">{{ $peso }} {{ number_format($allowance, 2) }}</td>
+                            <td class="value">{{ $peso }} {{ number_format($otherAllowance, 2) }}</td>
                         </tr>
                     @endif
                     <tr>
                         <td>+ INCENTIVE</td>
                         <td class="value">{{ $peso }} {{ number_format((float) $invoice->total_amount, 2) }}</td>
                     </tr>
+                    {{-- Allowance lines appear only when there is an allowance to
+                         pay: an agent with no allowance value gets no line and
+                         no coverage, rather than a zero. --}}
+                    @foreach ($allowanceLines as $line)
+                        @if ($line['amount'] > 0)
+                            <tr>
+                                <td>+ ALLOWANCE<span class="coverage">{{ $line['detail'] }}</span></td>
+                                <td class="value">{{ $peso }} {{ number_format($line['amount'], 2) }}</td>
+                            </tr>
+                        @endif
+                    @endforeach
+                    @if ($coverage && $allowanceLines === [] && $otherAllowance > 0)
+                        <tr>
+                            <td>+ ALLOWANCE<span class="coverage">{{ $coverage }}</span></td>
+                            <td class="value">{{ $peso }} {{ number_format($otherAllowance, 2) }}</td>
+                        </tr>
+                    @endif
                     <tr class="grand">
                         <td>SUBTOTAL</td>
                         <td class="value">{{ $peso }} {{ number_format((float) $invoice->subtotal, 2) }}</td>

@@ -73,6 +73,10 @@ class AgentInvoice extends Model
         // Added when the payout that settles this invoice is approved, and
         // included in the subtotal.
         'allowance',
+        // The period the allowance covers. Set by hand; when present the PDF
+        // prints the allowance below the incentive with these dates, when there is one.
+        'allowance_coverage_start',
+        'allowance_coverage_end',
         'subtotal',
         'pdf_path',
         // The rendered PDF lives on Google Drive, not on this server. `pdf_path`
@@ -99,6 +103,8 @@ class AgentInvoice extends Model
         'total_amount'     => 'decimal:2',
         'commission'       => 'decimal:2',
         'allowance'        => 'decimal:2',
+        'allowance_coverage_start' => 'date',
+        'allowance_coverage_end'   => 'date',
         'subtotal'         => 'decimal:2',
         'organization_id'  => 'integer',
     ];
@@ -123,6 +129,37 @@ class AgentInvoice extends Model
     public function customers(): HasMany
     {
         return $this->hasMany(AgentInvoiceCustomer::class, 'agent_invoice_id');
+    }
+
+    /** The standing allowances this invoice bills — see AgentInvoiceAllowance. */
+    public function allowances(): HasMany
+    {
+        return $this->hasMany(AgentInvoiceAllowance::class, 'agent_invoice_id');
+    }
+
+    /**
+     * The allowance lines this invoice bills, oldest coverage first; empty on a
+     * deployment that has not created the ledger table yet.
+     *
+     * @return \Illuminate\Support\Collection<int, AgentInvoiceAllowance>
+     */
+    public function allowanceLines()
+    {
+        if (!self::allowanceLedgerExists() || !$this->exists) {
+            return collect();
+        }
+
+        return $this->relationLoaded('allowances')
+            ? $this->allowances->sortBy('coverage_start')->values()
+            : $this->allowances()->orderBy('coverage_start')->orderBy('id')->get();
+    }
+
+    /** Whether agent_invoice_allowances exists on this deployment, checked once per request. */
+    public static function allowanceLedgerExists(): bool
+    {
+        static $exists = null;
+
+        return $exists ??= \Illuminate\Support\Facades\Schema::hasTable('agent_invoice_allowances');
     }
 
     public function team(): BelongsTo

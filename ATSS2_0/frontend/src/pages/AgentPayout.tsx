@@ -35,7 +35,6 @@ const payoutColumns: ColumnDefinition[] = [
     { key: 'type', label: 'Type', minWidth: 120 },
     { key: 'ref_number', label: 'Ref Number', minWidth: 150 },
     { key: 'total_amount', label: 'Total Amount', minWidth: 150 },
-    { key: 'commission_id_list', label: 'Job Orders', minWidth: 200 },
     // Who raised the record, and who signed it off. Paired deliberately, the
     // same way the Transaction List shows them.
     { key: 'created_by', label: 'Created By', minWidth: 180 },
@@ -990,10 +989,6 @@ const AgentPayout: React.FC = () => {
                                                             </span>
                                                         ) : colKey === 'ref_number' ? (
                                                             <span className="font-mono text-blue-500 font-medium">{val}</span>
-                                                        ) : colKey === 'commission_id_list' ? (
-                                                            <span className="font-mono text-xs text-blue-400 font-medium">
-                                                                {val ? val.split(',').map((id: string) => `#${id.trim()}`).join(', ') : '---'}
-                                                            </span>
                                                         ) : colKey === 'incentive_value' ? (
                                                             <span className="font-bold tracking-tight text-green-500">
                                                                 +{typeof val === 'number' ? `₱${val.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : !isNaN(Number(val)) ? `₱${Number(val).toLocaleString(undefined, { minimumFractionDigits: 2 })}` : val}
@@ -1045,6 +1040,17 @@ const AgentPayout: React.FC = () => {
                         approvalPending={approvalPending}
                         onApprove={canApprove ? (record) => handleApproval(record, 'approve') : undefined}
                         onReject={canApprove ? (record) => handleApproval(record, 'reject') : undefined}
+                        // Correcting a payout's proof is an approver's job, the
+                        // same as signing it off.
+                        canEditProof={canApprove}
+                        onProofUpdated={(recordId, proof) => {
+                            // The panel shows the new images straight away; the
+                            // refresh brings the list in line with them.
+                            setSelectedRecord((current: any) =>
+                                current && current.id === recordId ? { ...current, ...proof } : current
+                            );
+                            handleRefresh();
+                        }}
                         onClose={() => { setShowDetails(false); setSelectedRecord(null); }}
                         onPrevious={currentData.findIndex(r => r.id === (selectedRecord as any).id) > 0 ? handlePrevious : undefined}
                         onNext={currentData.findIndex(r => r.id === (selectedRecord as any).id) < currentData.length - 1 ? handleNext : undefined}

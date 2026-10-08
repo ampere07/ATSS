@@ -12,6 +12,7 @@ import { getRegions, Region } from '../services/regionService';
 import { barangayService, Barangay } from '../services/barangayService';
 import { paymentMethodService, PaymentMethod } from '../services/paymentMethodService';
 import PaymentPortalFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/PaymentPortalFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import pusher from '../services/pusherService';
 import { exportToCSV } from '../utils/exportUtils';
 
@@ -650,6 +651,25 @@ const PaymentPortal: React.FC = () => {
     }
   }, []);
 
+  // Reads a column's value for the funnel filter
+  const getPaymentPortalFilterValue = (item: any, k: string) => {
+    switch (k) {
+      case 'fullName': return item.fullName ?? item.full_name;
+      case 'accountNo': return item.accountNo ?? item.account_no;
+      case 'reference_no': return item.reference_no ?? item.referenceNo;
+      case 'payment_method': {
+        const channel = item.payment_channel;
+        if (!channel) return null;
+        // Try to find the numeric ID for this channel string
+        const pm = paymentMethods.find(m =>
+          m.payment_method.toLowerCase().trim() === channel.toLowerCase().trim()
+        );
+        return pm ? String(pm.id) : channel;
+      }
+      default: return item[k];
+    }
+  };
+
   // 1. Initial search/funnel filtering (Global filtered set for sidebar counts)
   const globalFilteredRecords = useMemo(() => {
     const normalizedQuery = searchQuery.toLowerCase().replace(/\s+/g, '');
@@ -677,25 +697,7 @@ const PaymentPortal: React.FC = () => {
     if (activeFilters && Object.keys(activeFilters).length > 0) {
       filtered = filtered.filter((record: any) => {
         return Object.entries(activeFilters).every(([key, filter]: [string, any]) => {
-          const getValForFilter = (item: any, k: string) => {
-            switch (k) {
-              case 'fullName': return item.fullName ?? item.full_name;
-              case 'accountNo': return item.accountNo ?? item.account_no;
-              case 'reference_no': return item.reference_no ?? item.referenceNo;
-              case 'payment_method': {
-                const channel = item.payment_channel;
-                if (!channel) return null;
-                // Try to find the numeric ID for this channel string
-                const pm = paymentMethods.find(m => 
-                  m.payment_method.toLowerCase().trim() === channel.toLowerCase().trim()
-                );
-                return pm ? String(pm.id) : channel;
-              }
-              default: return item[k];
-            }
-          };
-
-          const val = getValForFilter(record, key);
+          const val = getPaymentPortalFilterValue(record, key);
 
           if (filter.type === 'checklist') {
             if (!filter.value || !Array.isArray(filter.value) || filter.value.length === 0) return true;
@@ -776,6 +778,27 @@ const PaymentPortal: React.FC = () => {
 
     return filtered;
   }, [records, searchQuery, activeFilters, dateTimeFrom, dateTimeTo, userOrgId]);
+
+  // The records this user may see — mirrors the organization filter in globalFilteredRecords above
+  const accessibleRecords = useMemo(() => {
+    return records.filter(record => {
+      if (userOrgId) {
+        if (record.organization_id !== userOrgId) return false;
+      } else {
+        if (record.organization_id) return false;
+      }
+      return true;
+    });
+  }, [records, userOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // records this user can see, read exactly as the filter reads them.
+  // `paymentMethods` is a dependency because the getter reads it.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleRecords, getPaymentPortalFilterValue),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [accessibleRecords, paymentMethods]
+  );
 
   // Generate location items with hierarchy - Now using globalFilteredRecords
   const locationItems = useMemo(() => {
@@ -1755,6 +1778,7 @@ const PaymentPortal: React.FC = () => {
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
       />
     </div>
   );

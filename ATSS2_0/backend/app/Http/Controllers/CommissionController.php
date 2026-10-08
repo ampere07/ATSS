@@ -13,10 +13,12 @@ use App\Models\AgentBalance;
 use App\Models\BillingConfig;
 use App\Models\User;
 use App\Models\AuditTrailLog;
+use App\Support\AuditTrail;
 use App\Support\Permissions;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Carbon\Carbon;
 
@@ -201,16 +203,19 @@ class CommissionController extends Controller
                     'ref_number' => $item->ref_number,
                     'total_amount' => $item->total_amount,
                     'allowance' => (float) ($item->allowance ?? 0),
-                    // What the invoice this payout settles bills, before the
-                    // allowance — null when it settles none. Approving pays
-                    // exactly this plus the allowance, whatever the form says.
+                    // What the invoice this payout settles bills, its own
+                    // standing allowance included — null when it settles none.
+                    // Approving pays exactly this plus any allowance on the
+                    // payout itself, whatever the form says.
                     'invoice_amount' => $invoice
-                        ? round((float) $invoice->commission + (float) $invoice->total_amount, 2)
+                        ? round((float) $invoice->commission + (float) $invoice->total_amount + (float) ($invoice->allowance ?? 0), 2)
                         : null,
                     'created_by' => $item->created_by,
                     'created_at' => $item->created_at,
                     'remarks' => $item->remarks,
                     'proof_of_payment' => $item->proof_of_payment,
+                    // Every proof image; null on a payout recorded with one.
+                    'proof_images' => $item->proof_images ?: null,
                     'agent_id' => $item->agent_id,
                     'agent_name' => $item->agent ? ($item->agent->full_name ?? ($item->agent->first_name . ' ' . $item->agent->last_name)) : 'Unknown',
                     'commission_id_list' => $item->commission_id_list,
@@ -277,6 +282,8 @@ class CommissionController extends Controller
                 'total_amount'  => $optional . '|numeric|min:0',
                 'remarks'       => $optional . '|string',
                 'proof_of_payment' => $optional . '|string',
+                'proof_images'  => 'nullable|array|max:10',
+                'proof_images.*' => 'string|max:2048',
                 'job_order_ids' => 'nullable|array',
                 'job_order_ids.*' => 'integer',
                 // Refused rather than guessed at. applyCommissionMovement()
@@ -292,6 +299,8 @@ class CommissionController extends Controller
 
             $jobOrderIds = $validated['job_order_ids'] ?? [];
             unset($validated['job_order_ids'], $validated['from_invoice']);
+
+            $validated = $this->proofFields($validated);
 
             $validated['type'] = $validated['type'] ?? 'commission';
             $validated['allowance'] = round((float) ($validated['allowance'] ?? 0), 2);
@@ -939,6 +948,25 @@ class CommissionController extends Controller
      */
     private const INVOICE_SETTLING_TYPES = ['commission', 'all'];
 
+    /** How a proof-image edit is tagged in audit_trail_logs, so auditTrail() can name it. */
+    private const PROOF_AUDIT_ACTION = 'proof_updated';
+
+    /**
+     * The payout fields its audit trail reports, as field => [label, kind].
+     * `proof` is the image list, read from proof_images or proof_of_payment.
+     * Bookkeeping columns (updated_at, created_by, ...) are left out: the entry
+     * itself already says who and when.
+     */
+    private const AUDITED_PAYOUT_FIELDS = [
+        'status'       => ['Status', 'text'],
+        'type'         => ['Type', 'text'],
+        'total_amount' => ['Total Amount', 'money'],
+        'allowance'    => ['Allowance', 'money'],
+        'remarks'      => ['Remarks', 'text'],
+        'approve_by'   => ['Approved By', 'text'],
+        'proof'        => ['Proof of Payment', 'images'],
+    ];
+
     /**
      * The invoice a payout settles, or null.
      *
@@ -987,10 +1015,20 @@ class CommissionController extends Controller
         return null;
     }
 
-    /** What paying an invoice amounts to: everything it bills, plus the allowance on top. */
+    /**
+     * What paying an invoice amounts to: everything it bills — referrals,
+     * incentive and the standing allowance the weekly run put on it — plus any
+     * allowance entered on the payout itself.
+     */
     private function invoicePayoutAmount(AgentInvoice $invoice, $allowance): float
     {
-        return round((float) $invoice->commission + (float) $invoice->total_amount + max(0, (float) $allowance), 2);
+        return round(
+            (float) $invoice->commission
+            + (float) $invoice->total_amount
+            + (float) ($invoice->allowance ?? 0)
+            + max(0, (float) $allowance),
+            2
+        );
     }
 
     /** Message shown when a payout has been recorded and is awaiting approval. */
@@ -1375,6 +1413,11 @@ class CommissionController extends Controller
     /**
      * Write the payout's allowance onto the invoice it settles.
      *
+     * The invoice's allowance is the standing allowances the weekly run billed
+     * on it (agent_invoice_allowances) plus whatever the payout carries — the
+     * payout's is added on top, never in place of them, so a payout with no
+     * allowance leaves an invoice's own allowance exactly as it was.
+     *
      * The subtotal is rebuilt from its parts — referral total + incentive +
      * allowance — rather than adjusted, so approving again or changing the
      * allowance can never add it twice.
@@ -1391,7 +1434,10 @@ class CommissionController extends Controller
             return;
         }
 
-        $allowance = round(max(0, (float) ($history->allowance ?? 0)), 2);
+        $allowance = round(
+            (float) $invoice->allowanceLines()->sum('amount') + max(0, (float) ($history->allowance ?? 0)),
+            2
+        );
 
         if (abs($allowance - (float) ($invoice->allowance ?? 0)) < 0.005) {
             return;
@@ -1403,6 +1449,231 @@ class CommissionController extends Controller
             'pdf_path'   => null,
             'updated_by' => 'agent-payout #' . $history->id,
         ])->save();
+    }
+
+    /**
+     * Replace the proof images on a payout, and record who changed them.
+     *
+     * Only the proof can be changed here — the amount, type and status are what
+     * moved money, and are not open to editing after the fact. The images can
+     * be, because a wrong screenshot or a missing page of a receipt is a common
+     * correction that changes nothing about what was paid.
+     *
+     * Every change writes an audit_trail_logs row holding the image list before
+     * and after, the editor's email and the time, and auditTrail() reads them
+     * back for the details panel. A save that changes nothing writes nothing.
+     */
+    public function updateProof(Request $request, $id)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            // The same people who sign a payout off may correct its evidence.
+            if ($denied = $this->denyUnlessMayApprove($user)) {
+                return $denied;
+            }
+
+            $validated = $request->validate([
+                'proof_images'   => 'required|array|min:1|max:10',
+                'proof_images.*' => 'required|string|url|max:2048',
+            ]);
+
+            // Refused rather than silently cut to the first image, which is what
+            // proofFields() does on a server without the column.
+            if (count($validated['proof_images']) > 1 && !$this->hasProofImagesColumn()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'This server cannot store more than one proof image yet. '
+                        . 'Run database/sql/add_proof_images_to_agent_commission_history.sql.',
+                ], 422);
+            }
+
+            $editor = $this->approverIdentity($user);
+
+            return DB::transaction(function () use ($id, $user, $validated, $editor) {
+                $history = AgentCommissionHistory::lockForUpdate()->find($id);
+                if (!$history) {
+                    return response()->json(['success' => false, 'message' => 'Payout record not found'], 404);
+                }
+
+                if (!$this->canActOnOrganization($user, $history->organization_id)) {
+                    return response()->json(['success' => false, 'message' => 'Unauthorized access to this payout'], 403);
+                }
+
+                $before = $this->proofImagesOf($history);
+                $fields = $this->proofFields(['proof_images' => $validated['proof_images']]);
+                $after  = $fields['proof_images'] ?? [$fields['proof_of_payment']];
+
+                if ($before === $after) {
+                    return response()->json([
+                        'success' => true,
+                        'message' => 'The proof images are unchanged.',
+                        'data'    => ['proof_of_payment' => $history->proof_of_payment, 'proof_images' => $before],
+                    ]);
+                }
+
+                $history->forceFill($fields + [
+                    'updated_by' => $editor,
+                    'updated_at' => now(),
+                ])->save();
+
+                AuditTrail::record(
+                    'agent_commission_histories',
+                    $history->id,
+                    ['proof_images' => $before],
+                    ['proof_images' => $after],
+                    $editor,
+                    self::PROOF_AUDIT_ACTION
+                );
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Proof images updated.',
+                    'data'    => ['proof_of_payment' => $fields['proof_of_payment'], 'proof_images' => $after],
+                ]);
+            });
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            throw $e;
+        } catch (\Exception $e) {
+            Log::error('[Agent Payout] Could not update proof images: ' . $e->getMessage(), ['payout_id' => $id]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update the proof images',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * A payout's audit trail: who did what to it and when, newest first.
+     *
+     * Read from audit_trail_logs, where raising, approving, rejecting and
+     * editing the proof each write a row — but not in one shape. Raising stores
+     * the whole record with no "before"; approval and rejection store the whole
+     * record after, with only the old status before; a proof edit stores just
+     * the images either side. So the rows are replayed oldest first, carrying
+     * the record forward, and each one's "before" is the state the previous
+     * rows left. That is what lets an approval show the amount going from what
+     * it was raised at to what was approved, rather than from nothing.
+     *
+     * Visible to whoever can see the payout itself: an administrator within
+     * their organization, or the agent it was paid to.
+     */
+    public function auditTrail($id)
+    {
+        try {
+            $user = auth()->user();
+            if (!$user) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized'], 401);
+            }
+
+            $history = AgentCommissionHistory::find($id);
+            if (!$history) {
+                return response()->json(['success' => false, 'message' => 'Payout record not found'], 404);
+            }
+
+            // The same scoping getHistory() applies: a non-admin sees only their own.
+            if (!$this->canActOnOrganization($user, $history->organization_id)
+                || (!$this->isAdminUser($user) && (int) $history->agent_id !== (int) $user->id)) {
+                return response()->json(['success' => false, 'message' => 'Unauthorized access to this payout'], 403);
+            }
+
+            return response()->json([
+                'success' => true,
+                'data'    => AuditTrail::entries('agent_commission_histories', $history->id, self::AUDITED_PAYOUT_FIELDS, [
+                    'value'   => ['proof' => fn (array $data) => $this->auditedProof($data)],
+                    'actions' => [self::PROOF_AUDIT_ACTION => 'Proof images updated'],
+                    // A status moving to Approved or Rejected names the entry;
+                    // anything else takes the default (Created / Updated / tag).
+                    'action'  => fn (array $new, array $before, array $newData, bool $isFirst) => match (true) {
+                        isset($new['action']) || $isFirst => null,
+                        ($newData['status'] ?? null) === self::STATUS_APPROVED
+                            && ($before['status'] ?? null) !== self::STATUS_APPROVED => 'Approved',
+                        ($newData['status'] ?? null) === self::STATUS_REJECTED
+                            && ($before['status'] ?? null) !== self::STATUS_REJECTED => 'Rejected',
+                        default => null,
+                    },
+                ]),
+            ]);
+        } catch (\Exception $e) {
+            Log::error('[Agent Payout] Could not read the audit trail: ' . $e->getMessage(), ['payout_id' => $id]);
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to load the audit trail',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * A payout snapshot's proof as an image list, from proof_images when it has
+     * one and proof_of_payment otherwise. ABSENT when it records neither.
+     */
+    private function auditedProof(array $data)
+    {
+        if (isset($data['proof_images']) && is_array($data['proof_images']) && $data['proof_images'] !== []) {
+            return array_values(array_map('strval', $data['proof_images']));
+        }
+        if (array_key_exists('proof_of_payment', $data)) {
+            return $data['proof_of_payment'] ? [(string) $data['proof_of_payment']] : [];
+        }
+        return array_key_exists('proof_images', $data) ? [] : AuditTrail::ABSENT;
+    }
+
+    /** Every proof image a payout carries, whether recorded as a list or a single link. */
+    private function proofImagesOf(AgentCommissionHistory $history): array
+    {
+        $images = $history->proof_images;
+
+        if (is_array($images) && $images !== []) {
+            return array_values(array_map('strval', $images));
+        }
+
+        return $history->proof_of_payment ? [(string) $history->proof_of_payment] : [];
+    }
+
+    /**
+     * The proof fields to write, from a request that may carry several images.
+     *
+     * `proof_images` is the full list and `proof_of_payment` is set to its first
+     * entry, so every reader of the old single-link column — older mobile builds
+     * included — still finds one proof. A request without a list is returned as
+     * it came.
+     *
+     * Where the column has not been added yet the list is dropped rather than
+     * failing the save; the first image is still recorded where it always was.
+     */
+    private function proofFields(array $fields): array
+    {
+        $images = array_values(array_filter(
+            array_map(fn ($url) => trim((string) $url), $fields['proof_images'] ?? []),
+            fn ($url) => $url !== ''
+        ));
+
+        unset($fields['proof_images']);
+
+        if ($images === []) {
+            return $fields;
+        }
+
+        $fields['proof_of_payment'] = $images[0];
+
+        if ($this->hasProofImagesColumn()) {
+            $fields['proof_images'] = $images;
+        }
+
+        return $fields;
+    }
+
+    /** Whether this deployment has `agent_commission_history.proof_images` yet. */
+    private function hasProofImagesColumn(): bool
+    {
+        static $has = null;
+
+        return $has ??= Schema::hasColumn('agent_commission_history', 'proof_images');
     }
 
     /** The job orders a commission payout settles, as stored when it was raised. */
@@ -1475,12 +1746,14 @@ class CommissionController extends Controller
                 'type'             => ['nullable', 'string', 'max:50', Rule::in(self::PAYOUT_TYPES)],
                 'remarks'          => 'nullable|string',
                 'proof_of_payment' => 'nullable|string',
+                'proof_images'     => 'nullable|array|max:10',
+                'proof_images.*'   => 'string|max:2048',
                 // Zero is a real answer here — it clears an allowance entered
                 // when the payout was raised — so it survives the filter below.
                 'allowance'        => 'nullable|numeric|min:0',
             ]);
 
-            $details = array_filter($details, fn ($v) => $v !== null && $v !== '');
+            $details = array_filter($this->proofFields($details), fn ($v) => $v !== null && $v !== '');
 
             if ($details !== []) {
                 $history->forceFill($details)->save();

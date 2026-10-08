@@ -100,6 +100,10 @@ export interface User {
     quota?: number;
     incentives_value?: number;
     remarks?: string;
+    /** Standing allowance, paid each `period`. */
+    allowance_value?: number | null;
+    /** 'weekly' or 'monthly'. */
+    period?: string | null;
     created_at?: string;
     updated_at?: string;
   } | null;
@@ -189,6 +193,8 @@ export interface CreateUserRequest {
   quota?: number;
   incentives_value?: number;
   remarks?: string;
+  allowance_value?: number;
+  period?: string;
 }
 
 export interface UpdateUserRequest {
@@ -208,6 +214,8 @@ export interface UpdateUserRequest {
   quota?: number;
   incentives_value?: number;
   remarks?: string;
+  allowance_value?: number;
+  period?: string;
 }
 
 export interface ApiResponse<T> {

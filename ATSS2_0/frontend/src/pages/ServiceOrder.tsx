@@ -3,6 +3,7 @@ import { FileText, X, Columns3, ArrowUp, ArrowDown, Menu, Filter, RefreshCw, Che
 import GlobalSearch from './globalfunctions/GlobalSearch';
 import ServiceOrderDetails from '../components/ServiceOrderDetails';
 import ServiceOrderFunnelFilter, { allColumns as filterColumns } from '../filter/ServiceOrderFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import SessionExpiredModal from '../components/SessionExpiredModal';
 import { useServiceOrderStore, type ServiceOrder } from '../store/serviceOrderStore';
 import { barangayService, Barangay } from '../services/barangayService';
@@ -832,6 +833,50 @@ const ServiceOrderPage: React.FC = () => {
 
     return filtered;
   }, [serviceOrders, searchQuery, activeFilters, userRole, roleId, getVal, currentUserOrgId]);
+
+  // The service orders this user may see, before search and funnel filters.
+  // Mirrors the organization and technician scoping in the global memo above.
+  const accessibleServiceOrders = useMemo(() => {
+    const isTechnician = roleId === 2 || userRole.toLowerCase() === 'technician';
+
+    return serviceOrders.filter(serviceOrder => {
+      if (currentUserOrgId) {
+        if (serviceOrder.organization_id !== currentUserOrgId) {
+          return false;
+        }
+      } else {
+        if (serviceOrder.organization_id) {
+          return false;
+        }
+      }
+
+      if (isTechnician) {
+        const supportStatus = (serviceOrder.supportStatus || '').toLowerCase().trim();
+        if (supportStatus === 'resolved') {
+          const updatedAt = serviceOrder.rawUpdatedAt;
+          if (updatedAt) {
+            const updatedDate = new Date(updatedAt);
+            if (!isNaN(updatedDate.getTime())) {
+              const sevenDaysAgo = new Date();
+              sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+              if (updatedDate < sevenDaysAgo) {
+                return false;
+              }
+            }
+          }
+        }
+      }
+
+      return true;
+    });
+  }, [serviceOrders, userRole, roleId, currentUserOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // service orders this user can see, read exactly as the filter reads them.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleServiceOrders, getVal),
+    [accessibleServiceOrders, getVal]
+  );
 
   const locationItems = useMemo(() => {
     const categories = [
@@ -2415,6 +2460,7 @@ const ServiceOrderPage: React.FC = () => {
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
       />
 
       <SessionExpiredModal 

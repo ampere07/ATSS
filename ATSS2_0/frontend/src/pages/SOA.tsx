@@ -9,6 +9,7 @@ import { useSOAStore, SOARecordUI } from '../store/soaStore';
 import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import SOAFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/SOAFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import pusher from '../services/pusherService';
 import { exportToCSV } from '../utils/exportUtils';
 
@@ -151,6 +152,16 @@ const customerColumns = [
   { key: 'id', label: 'ID', width: 'min-w-20' },
   { key: 'action', label: 'Action', width: 'min-w-32' },
 ];
+
+// Reads a column's value for the funnel filter
+const getSOAFilterValue = (item: any, k: string) => {
+  switch (k) {
+    case 'fullName': return item.fullName ?? item.full_name;
+    case 'accountNo': return item.accountNo ?? item.account_no;
+    case 'invoiceStatus': return item.invoiceStatus ?? item.status;
+    default: return item[k];
+  }
+};
 
 const SOA: React.FC = () => {
   const { soaRecords, totalCount, isLoading, error, fetchSOARecords, refreshSOARecords, pollLatestUpdates } = useSOAStore();
@@ -295,16 +306,7 @@ const SOA: React.FC = () => {
     if (activeFilters && Object.keys(activeFilters).length > 0) {
       filtered = filtered.filter(record => {
         return Object.entries(activeFilters).every(([key, filter]: [string, any]) => {
-          const getVal = (item: any, k: string) => {
-            switch (k) {
-              case 'fullName': return item.fullName ?? item.full_name;
-              case 'accountNo': return item.accountNo ?? item.account_no;
-              case 'invoiceStatus': return item.invoiceStatus ?? item.status;
-              default: return item[k];
-            }
-          };
-
-          const val = getVal(record, key);
+          const val = getSOAFilterValue(record, key);
 
           if (filter.type === 'checklist') {
             if (!filter.value || !Array.isArray(filter.value) || filter.value.length === 0) return true;
@@ -380,6 +382,25 @@ const SOA: React.FC = () => {
 
     return filtered;
   }, [soaRecords, searchQuery, activeFilters, statementDateFrom, statementDateTo, userOrgId]);
+
+  // The statements this user may see — mirrors the organization filter in globalFilteredRecords above
+  const accessibleRecords = useMemo(() => {
+    return soaRecords.filter((record: SOARecordUI) => {
+      if (userOrgId) {
+        if (record.organization_id !== userOrgId) return false;
+      } else {
+        if (record.organization_id) return false;
+      }
+      return true;
+    });
+  }, [soaRecords, userOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // statements this user can see, read exactly as the filter reads them.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleRecords, getSOAFilterValue),
+    [accessibleRecords]
+  );
 
   // Derive date items from context data instead of fetching separately or static - Now using globalFilteredRecords
   const dateItems = useMemo(() => {
@@ -1995,6 +2016,7 @@ const SOA: React.FC = () => {
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
         records={soaRecords}
       />
     </div>

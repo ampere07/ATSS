@@ -7,6 +7,7 @@ import 'leaflet/dist/leaflet.css';
 import {
   createBasemap,
   PH_BOUNDS,
+  pinIcon,
   selectedPinIcon,
   provisionalPinIcon,
   photonSearch,
@@ -65,6 +66,34 @@ interface ApiResponse<T = any> {
   message?: string;
 }
 
+/** Where the selected technician stands against the LCP/NAPs on the map. */
+type ClosestLcpNap =
+  | { status: 'no-tech-location' }
+  | { status: 'loading' }
+  | { status: 'no-lcpnap' }
+  | { status: 'found'; from: { lat: number; lng: number }; location: LocationMarker; meters: number };
+
+/** The selected technician's ring, and the dot in the panel that names them. */
+const TECH_COLOR = '#3b82f6';
+
+/**
+ * A technician position worth measuring from: present, finite, on the globe,
+ * and not the 0,0 a phone reports before it has a fix.
+ */
+const validTechPosition = (tech: TechLocation): { lat: number; lng: number } | null => {
+  if (tech.latitude == null || tech.longitude == null) return null;
+
+  const lat = Number(tech.latitude);
+  const lng = Number(tech.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+
+  return { lat, lng };
+};
+
+const formatKm = (meters: number) => `${(meters / 1000).toFixed(2)} km`;
+
 
 
 const LcpNapLocation: React.FC = () => {
@@ -112,6 +141,8 @@ const LcpNapLocation: React.FC = () => {
   const [showTechnicians, setShowTechnicians] = useState(false);
   const [technicians, setTechnicians] = useState<TechLocation[]>([]);
   const [isLoadingTechnicians, setIsLoadingTechnicians] = useState(false);
+  // The technician picked from the list or the map, measured against the LCP/NAPs.
+  const [selectedTechId, setSelectedTechId] = useState<number | null>(null);
 
   const searchRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<HTMLDivElement>(null);
@@ -129,6 +160,14 @@ const LcpNapLocation: React.FC = () => {
    * remove them in one call without touching the LCP/NAP markers underneath.
    */
   const technicianLayerRef = useRef<L.LayerGroup | null>(null);
+  /**
+   * The selected technician's trip — their ring and the closest LCP/NAP pin —
+   * kept apart from the technician pins so a new selection redraws the trip
+   * without redrawing every technician.
+   */
+  const techTripLayerRef = useRef<L.LayerGroup | null>(null);
+  /** What the trip covers, kept so a second click can frame it again. */
+  const techTripBoundsRef = useRef<L.LatLngBounds | null>(null);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
@@ -387,15 +426,77 @@ const LcpNapLocation: React.FC = () => {
       loadTechnicians();
     } else {
       setTechnicians([]);
+      setSelectedTechId(null);
     }
   }, [showTechnicians]);
 
-  /** Centre the map on one technician, close enough to read the street. */
-  const focusTechnician = (tech: TechLocation) => {
-    const map = mapInstanceRef.current;
-    if (!map || tech.latitude == null || tech.longitude == null) return;
+  // Looked up rather than stored, so a reload of the list that drops the
+  // technician drops the selection with it.
+  const selectedTechnician = selectedTechId == null
+    ? null
+    : technicians.find((t) => t.user_id === selectedTechId) ?? null;
 
-    map.setView([Number(tech.latitude), Number(tech.longitude)], 19, { animate: true });
+  /**
+   * The LCP/NAP closest to the selected technician, as the crow flies.
+   *
+   * Measured against every location this user can see, not only the group open
+   * in the sidebar — the nearest pole is the nearest pole whichever list is
+   * showing.
+   */
+  const closestLcpNap = React.useMemo<ClosestLcpNap | null>(() => {
+    if (!selectedTechnician) return null;
+
+    const from = validTechPosition(selectedTechnician);
+    if (!from) return { status: 'no-tech-location' };
+    if (isLoading) return { status: 'loading' };
+
+    const origin = L.latLng(from.lat, from.lng);
+    let nearest: LocationMarker | null = null;
+    let nearestMeters = Infinity;
+
+    for (const loc of filteredMarkers) {
+      if (!Number.isFinite(loc.latitude) || !Number.isFinite(loc.longitude)) continue;
+
+      const meters = origin.distanceTo([loc.latitude, loc.longitude]);
+      if (meters < nearestMeters) {
+        nearest = loc;
+        nearestMeters = meters;
+      }
+    }
+
+    if (!nearest) return { status: 'no-lcpnap' };
+    return { status: 'found', from, location: nearest, meters: nearestMeters };
+  }, [selectedTechnician, filteredMarkers, isLoading]);
+
+  /**
+   * Bring the selected technician's trip into view: the technician and their
+   * closest LCP/NAP, or the technician alone at street level when there is none.
+   */
+  const frameTechTrip = () => {
+    const map = mapInstanceRef.current;
+    const bounds = techTripBoundsRef.current;
+    if (!map || !bounds) return;
+
+    if (bounds.getNorthEast().equals(bounds.getSouthWest())) {
+      map.setView(bounds.getCenter(), 19, { animate: true });
+      return;
+    }
+
+    // Extra room on the right, where the technician panel sits over the map.
+    map.fitBounds(bounds, {
+      paddingTopLeft: [60, 60],
+      paddingBottomRight: [isMobile ? 60 : 300, 60],
+      maxZoom: 18,
+    });
+  };
+
+  const selectTechnician = (tech: TechLocation) => {
+    if (tech.user_id === selectedTechId) {
+      // Already drawn; clicking again brings it back into view.
+      frameTechTrip();
+    } else {
+      setSelectedTechId(tech.user_id);
+    }
   };
 
   /**
@@ -442,16 +543,79 @@ const LcpNapLocation: React.FC = () => {
         offset: [0, -10],
       });
 
+      marker.on('click', () => setSelectedTechId(tech.user_id));
+
       layer.addLayer(marker);
     });
   }, [showTechnicians, technicians, isMapReady]);
 
-  // Drop the layer with the page so a remount never inherits stale pins.
+  /**
+   * Draw the selected technician's trip: a ring around the technician and a pin
+   * on the closest LCP/NAP labelled with its name and distance.
+   */
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !isMapReady) return;
+
+    if (!techTripLayerRef.current) {
+      techTripLayerRef.current = L.layerGroup().addTo(map);
+    }
+
+    const layer = techTripLayerRef.current;
+    layer.clearLayers();
+    techTripBoundsRef.current = null;
+
+    const from = showTechnicians && selectedTechnician ? validTechPosition(selectedTechnician) : null;
+    if (!from) return;
+
+    // Not interactive, so a click still reaches the technician's own dot inside it.
+    layer.addLayer(L.circleMarker([from.lat, from.lng], {
+      radius: 16,
+      color: TECH_COLOR,
+      weight: 3,
+      fillColor: TECH_COLOR,
+      fillOpacity: 0.15,
+      interactive: false,
+    }));
+
+    if (closestLcpNap?.status !== 'found') {
+      techTripBoundsRef.current = L.latLngBounds([from.lat, from.lng], [from.lat, from.lng]);
+      frameTechTrip();
+      return;
+    }
+
+    const { location, meters } = closestLcpNap;
+    const to: L.LatLngTuple = [location.latitude, location.longitude];
+
+    const pin = L.marker(to, {
+      icon: pinIcon(colorPalette?.primary || '#7c3aed'),
+      title: location.lcpnap_name,
+      zIndexOffset: 1000,
+    });
+
+    // An element rather than an HTML string, as the technician labels are.
+    const label = document.createElement('span');
+    label.textContent = `Closest: ${location.lcpnap_name} · ${formatKm(meters)}`;
+    label.style.cssText = 'font-size:11px;font-weight:600;color:#1f2937;';
+    pin.bindTooltip(label, { permanent: true, direction: 'top' });
+
+    // The pin covers the LCP/NAP's own dot, so it answers the click that dot would.
+    pin.on('click', () => setSelectedLocation(location));
+    layer.addLayer(pin);
+
+    techTripBoundsRef.current = L.latLngBounds([from.lat, from.lng], to);
+    frameTechTrip();
+  }, [showTechnicians, selectedTechnician, closestLcpNap, isMapReady, colorPalette]);
+
+  // Drop the layers with the page so a remount never inherits stale pins.
   useEffect(() => {
     return () => {
       technicianLayerRef.current?.clearLayers();
       technicianLayerRef.current?.remove();
       technicianLayerRef.current = null;
+      techTripLayerRef.current?.clearLayers();
+      techTripLayerRef.current?.remove();
+      techTripLayerRef.current = null;
     };
   }, []);
 
@@ -1193,24 +1357,27 @@ const LcpNapLocation: React.FC = () => {
                     </div>
                   ) : (
                     technicians.map((tech) => {
-                      const hasLocation = tech.latitude != null && tech.longitude != null;
+                      const hasLocation = validTechPosition(tech) !== null;
+                      const isSelected = selectedTechId === tech.user_id;
 
+                      // Selectable even without a location, so the panel below
+                      // can say why there is no closest LCP/NAP to show.
                       return (
                         <button
                           key={tech.user_id}
-                          onClick={() => focusTechnician(tech)}
-                          disabled={!hasLocation}
+                          onClick={() => selectTechnician(tech)}
                           title={hasLocation
-                            ? `Zoom to ${tech.full_name || tech.username || 'technician'}`
+                            ? `Find the closest LCP/NAP to ${tech.full_name || tech.username || 'technician'}`
                             : 'No location reported yet'}
                           className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 border-b last:border-0 transition-colors ${isDarkMode
-                            ? 'border-gray-800 text-gray-200 hover:bg-gray-800 disabled:text-gray-500'
-                            : 'border-gray-100 text-gray-700 hover:bg-gray-50 disabled:text-gray-400'
-                            } disabled:cursor-not-allowed disabled:hover:bg-transparent`}
+                            ? `border-gray-800 hover:bg-gray-800 ${hasLocation ? 'text-gray-200' : 'text-gray-500'}`
+                            : `border-gray-100 hover:bg-gray-50 ${hasLocation ? 'text-gray-700' : 'text-gray-400'}`
+                            } ${isSelected ? 'font-bold bg-black/5' : ''}`}
+                          style={isSelected ? { color: colorPalette?.primary || '#7c3aed' } : {}}
                         >
                           <span
                             className="h-2.5 w-2.5 rounded-full flex-shrink-0"
-                            style={{ backgroundColor: hasLocation ? '#3b82f6' : '#9ca3af' }}
+                            style={{ backgroundColor: hasLocation ? TECH_COLOR : '#9ca3af' }}
                           />
                           <span className="truncate">
                             {tech.full_name || tech.username || 'Technician'}
@@ -1220,6 +1387,77 @@ const LcpNapLocation: React.FC = () => {
                     })
                   )}
                 </div>
+
+                {selectedTechnician && (
+                  <div
+                    className={`px-3 py-2.5 border-t text-xs space-y-1.5 ${isDarkMode
+                      ? 'border-gray-700 text-gray-300'
+                      : 'border-gray-200 text-gray-600'
+                      }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`text-sm font-semibold ${isDarkMode ? 'text-gray-200' : 'text-gray-700'}`}>
+                        Closest LCP/NAP
+                      </span>
+                      <button
+                        onClick={() => setSelectedTechId(null)}
+                        title="Clear selection"
+                        className={`p-0.5 rounded-full transition-colors ${isDarkMode ? 'text-gray-400 hover:text-white hover:bg-gray-800' : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+                          }`}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    {closestLcpNap?.status === 'no-tech-location' && (
+                      <p>
+                        {selectedTechnician.full_name || selectedTechnician.username || 'This technician'} has
+                        no valid location yet, so the closest LCP/NAP cannot be found.
+                      </p>
+                    )}
+
+                    {closestLcpNap?.status === 'loading' && (
+                      <p className="flex items-center gap-2">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Loading LCP/NAP locations...
+                      </p>
+                    )}
+
+                    {closestLcpNap?.status === 'no-lcpnap' && (
+                      <p>No LCP/NAP locations with valid coordinates to compare against.</p>
+                    )}
+
+                    {closestLcpNap?.status === 'found' && (
+                      <>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="h-2.5 w-2.5 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: TECH_COLOR }}
+                          />
+                          <span className="truncate">
+                            {selectedTechnician.full_name || selectedTechnician.username || 'Technician'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <MapPin
+                            className="h-3.5 w-3.5 flex-shrink-0"
+                            style={{ color: colorPalette?.primary || '#7c3aed' }}
+                          />
+                          <span className={`truncate font-medium ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                            {closestLcpNap.location.lcpnap_name}
+                          </span>
+                        </div>
+
+                        <div className={`pt-1.5 border-t flex items-center justify-between gap-2 ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`}>
+                          <span>Distance</span>
+                          <span className={`font-semibold ${isDarkMode ? 'text-white' : 'text-gray-900'}`}>
+                            {formatKm(closestLcpNap.meters)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

@@ -19,7 +19,12 @@ class AgentCommissionHistory extends Model
         'allowance',
         'created_by',
         'remarks',
+        // The first proof image. Kept exactly as it always was, so every screen
+        // reading it still finds one Drive link.
         'proof_of_payment',
+        // Every proof image, first one included. Null on payouts recorded with
+        // a single image before this column existed.
+        'proof_images',
         'agent_id',
         'organization_id',
         'commission_id_list',
@@ -38,7 +43,11 @@ class AgentCommissionHistory extends Model
         // those as paid rather than re-deriving a possibly different set.
         'job_order_ids'
     ];
-    
+
+    protected $casts = [
+        'proof_images' => 'array',
+    ];
+
     public $timestamps = false; // The table has created_at but uses CURRENT_TIMESTAMP, and no updated_at
 
     public function agent()

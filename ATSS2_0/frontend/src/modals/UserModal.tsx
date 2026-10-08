@@ -4,6 +4,8 @@ import { User, CreateUserRequest, UpdateUserRequest, Role, Organization, Agent }
 import { userService, roleService, organizationService } from '../services/userService';
 import { agentService } from '../services/agentService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
+import AuditTrailList, { AuditEntry } from '../components/AuditTrailList';
+import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 
 interface UserModalProps {
@@ -47,6 +49,9 @@ const EMPTY_USER_FORM: CreateUserRequest = {
   quota: AGENT_DEFAULTS.quota,
   incentives_value: AGENT_DEFAULTS.incentives_value,
   remarks: '',
+  // No allowance unless one is entered; the period is asked for with it.
+  allowance_value: undefined,
+  period: '',
 };
 
 const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, agentOnly = false }) => {
@@ -77,6 +82,36 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
   const [formData, setFormData] = useState<CreateUserRequest>({
     ...EMPTY_USER_FORM,
   });
+
+  // Who created or changed this user, and what changed. Edit mode only.
+  const [auditTrail, setAuditTrail] = useState<AuditEntry[]>([]);
+  const [auditTrailLoading, setAuditTrailLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen || !user?.id) {
+      setAuditTrail([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadAuditTrail = async () => {
+      setAuditTrailLoading(true);
+      try {
+        const res: any = await apiClient.get(`/users/${user.id}/audit-trail`);
+        if (!cancelled) setAuditTrail(res.data?.success && Array.isArray(res.data.data) ? res.data.data : []);
+      } catch {
+        // A reference beside the form, not part of it: without access, or on
+        // a failure, the section is simply left out.
+        if (!cancelled) setAuditTrail([]);
+      } finally {
+        if (!cancelled) setAuditTrailLoading(false);
+      }
+    };
+    loadAuditTrail();
+
+    return () => { cancelled = true; };
+  }, [isOpen, user?.id]);
 
   useEffect(() => {
     const theme = localStorage.getItem('theme');
@@ -133,6 +168,8 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
           quota: user.agent_balance?.quota ?? undefined,
           incentives_value: user.agent_balance?.incentives_value ?? undefined,
           remarks: user.agent_balance?.remarks ?? '',
+          allowance_value: user.agent_balance?.allowance_value ?? undefined,
+          period: (user.agent_balance?.period || '').toLowerCase(),
         });
         setConfirmPassword('');
       } else {
@@ -151,7 +188,7 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
     if (name === 'role_id' || name === 'agent_id' || name === 'organization_id') {
       const val = value ? parseInt(value) : undefined;
       setFormData(prev => ({ ...prev, [name]: val }));
-    } else if (name === 'commission' || name === 'quota' || name === 'incentives_value') {
+    } else if (name === 'commission' || name === 'quota' || name === 'incentives_value' || name === 'allowance_value') {
       const val = value === '' ? undefined : parseFloat(value);
       setFormData(prev => ({ ...prev, [name]: val }));
     } else {
@@ -194,6 +231,8 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
       if (formData.commission === undefined || isNaN(formData.commission)) newErrors.commission = 'Required';
       if (formData.quota === undefined || isNaN(formData.quota)) newErrors.quota = 'Required';
       if (formData.incentives_value === undefined || isNaN(formData.incentives_value)) newErrors.incentives_value = 'Required';
+      // An allowance has to say how often it is paid.
+      if ((formData.allowance_value ?? 0) > 0 && !formData.period) newErrors.period = 'Required with an allowance';
     }
 
     setErrors(newErrors);
@@ -226,6 +265,8 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
           quota: formData.quota,
           incentives_value: formData.incentives_value,
           remarks: formData.remarks,
+          allowance_value: formData.allowance_value,
+          period: formData.period,
         };
         if (formData.password) updateData.password = formData.password;
         response = await userService.updateUser(user.id, updateData);
@@ -413,6 +454,25 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
                   {errors.incentives_value && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.incentives_value}</p>}
                 </div>
 
+                {/* The agent's standing allowance, added to their invoice each
+                    week or once a month. Optional; the period is asked for
+                    whenever an amount is entered. */}
+                <div className="col-span-1 animate-in fade-in slide-in-from-top-1 duration-200">
+                  <label className={labelClass}>Allowance</label>
+                  <input type="number" step="0.01" min="0" name="allowance_value" value={formData.allowance_value ?? ''} onChange={handleInputChange} className={`${inputClass} ${errors.allowance_value ? 'border-red-500' : ''}`} placeholder="0.00" />
+                  {errors.allowance_value && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.allowance_value}</p>}
+                </div>
+
+                <div className="col-span-1 animate-in fade-in slide-in-from-top-1 duration-200">
+                  <label className={labelClass}>Period{(formData.allowance_value ?? 0) > 0 ? '*' : ''}</label>
+                  <select name="period" value={formData.period || ''} onChange={handleInputChange} className={`${inputClass} ${errors.period ? 'border-red-500' : ''}`}>
+                    <option value="">Select Period</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                  {errors.period && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.period}</p>}
+                </div>
+
                 <div className="col-span-2 animate-in fade-in slide-in-from-top-1 duration-200">
                   <label className={labelClass}>Remarks</label>
                   <textarea name="remarks" value={formData.remarks || ''} onChange={handleInputChange} className={inputClass} placeholder="Enter remarks" rows={3} />
@@ -461,6 +521,25 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
               </div>
             )}
           </div>
+
+          {isEditMode && (
+            <div className={`pt-5 border-t ${isDarkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+              <p className={`text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                Audit Trail
+              </p>
+              {auditTrailLoading ? (
+                <p className={`flex items-center gap-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  <Loader2 size={14} className="animate-spin" /> Loading...
+                </p>
+              ) : auditTrail.length > 0 ? (
+                <AuditTrailList entries={auditTrail} isDarkMode={isDarkMode} />
+              ) : (
+                <p className={`text-sm italic ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                  No changes recorded yet.
+                </p>
+              )}
+            </div>
+          )}
         </form>
 
         {/* Footer */}

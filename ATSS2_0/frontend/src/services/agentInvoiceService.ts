@@ -40,6 +40,18 @@ export interface AgentInvoiceRecord {
     pdf_drive_url?: string | null;
     created_at: string | null;
     customers?: AgentInvoiceCustomer[];
+    /** The standing allowances the invoice pays; on the detail response only. */
+    allowances?: AgentInvoiceAllowanceLine[];
+}
+
+/** One standing allowance billed on an invoice, with what it covers. */
+export interface AgentInvoiceAllowanceLine {
+    agent_id: number;
+    agent_name: string | null;
+    period: 'weekly' | 'monthly' | string;
+    coverage_start: string | null;
+    coverage_end: string | null;
+    amount: number;
 }
 
 /** One billing week that has invoices, for the download dialog's picker. */

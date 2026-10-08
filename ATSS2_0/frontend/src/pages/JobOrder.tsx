@@ -4,6 +4,7 @@ import GlobalSearch from './globalfunctions/GlobalSearch';
 import JobOrderDetails from '../components/JobOrderDetails';
 import GlobalRelatedDataOverlay from '../components/GlobalRelatedDataOverlay';
 import JobOrderFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/JobOrderFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import SessionExpiredModal from '../components/SessionExpiredModal';
 import { useJobOrderStore } from '../store/jobOrderStore';
 import { getBillingStatuses, BillingStatus } from '../services/lookupService';
@@ -1015,6 +1016,15 @@ const JobOrderPage: React.FC = () => {
       });
     });
   };
+
+  // What the funnel filter recommends under a text field: the values in the job
+  // orders this user can see, read exactly as the filter reads them. `users` is
+  // a dependency because Assigned Email resolves to a name through it.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleJobOrders, getVal),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [accessibleJobOrders, users]
+  );
 
   // 1. Initial search and funnel filtering (Global filtered set for sidebar counts)
   const globalFilteredJobOrders = useMemo(() => {
@@ -2840,6 +2850,7 @@ const JobOrderPage: React.FC = () => {
           setCurrentPage(1);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
       />
 
       <SessionExpiredModal 

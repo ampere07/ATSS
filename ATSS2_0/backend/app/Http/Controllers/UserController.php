@@ -5,7 +5,9 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Models\Organization;
 use App\Models\AgentBalance;
+use App\Models\AgentInvoiceAllowance;
 use App\Models\Role;
+use App\Support\AuditTrail;
 use App\Support\Permissions;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -16,6 +18,34 @@ use App\Services\ActivityLogService;
 
 class UserController extends Controller
 {
+    /**
+     * What a user's audit trail reports, as field => [label, kind]: readable
+     * names rather than ids, the agent terms that decide what they are paid, and
+     * whether the password changed — never the password itself.
+     */
+    private const AUDITED_USER_FIELDS = [
+        'first_name'       => ['First Name', 'text'],
+        'middle_initial'   => ['Middle Initial', 'text'],
+        'last_name'        => ['Last Name', 'text'],
+        'username'         => ['Username', 'text'],
+        'email_address'    => ['Email Address', 'text'],
+        'contact_number'   => ['Contact Number', 'text'],
+        'role'             => ['Role', 'text'],
+        'organization'     => ['Organization', 'text'],
+        'team'             => ['Team', 'text'],
+        'status'           => ['Status', 'text'],
+        'commission'       => ['Commission', 'money'],
+        'quota'            => ['Quota', 'text'],
+        'incentives_value' => ['Incentives', 'money'],
+        'remarks'          => ['Remarks', 'text'],
+        'allowance_value'  => ['Allowance', 'money'],
+        'period'           => ['Allowance Period', 'text'],
+        'password'         => ['Password', 'text'],
+    ];
+
+    /** The audited fields read from agent_balance, held back from callers who may not read it. */
+    private const AUDITED_BALANCE_FIELDS = ['commission', 'quota', 'incentives_value', 'remarks', 'allowance_value', 'period'];
+
     /**
      * The relations a user listing may carry for this caller.
      *
@@ -132,6 +162,95 @@ class UserController extends Controller
     }
 
     /**
+     * A user as their audit trail records them. Relations are reloaded, so a
+     * snapshot taken after a save reads what was saved, not what was loaded
+     * before it.
+     */
+    private function auditSnapshot(User $user): array
+    {
+        $user->load(['role', 'organization', 'agent', 'agentBalance']);
+        $balance = $user->agentBalance;
+
+        return [
+            'first_name'       => $user->first_name,
+            'middle_initial'   => $user->middle_initial,
+            'last_name'        => $user->last_name,
+            'username'         => $user->username,
+            'email_address'    => $user->email_address,
+            'contact_number'   => $user->contact_number,
+            'role'             => $user->role->role_name ?? null,
+            'organization'     => $user->organization->organization_name ?? null,
+            'team'             => $user->agent->team_name ?? null,
+            'status'           => $user->active ? 'Active' : 'Inactive',
+            'commission'       => $balance->commission ?? null,
+            'quota'            => $balance->quota ?? null,
+            'incentives_value' => $balance->incentives_value ?? null,
+            'remarks'          => $balance->remarks ?? null,
+            'allowance_value'  => $balance->allowance_value ?? null,
+            'period'           => isset($balance->period) && $balance->period !== '' ? ucfirst($balance->period) : null,
+        ];
+    }
+
+    /**
+     * Write a user change to the audit trail. Never fails the request it is
+     * part of — the change has already been saved — but a failure is logged.
+     */
+    private function recordAudit(int $userId, ?array $before, array $after, $authUser, ?string $action = null): void
+    {
+        try {
+            AuditTrail::record(
+                'users',
+                $userId,
+                $before,
+                $after,
+                $authUser->email_address ?? $authUser->email ?? null,
+                $action
+            );
+        } catch (\Exception $e) {
+            \Log::warning('Failed to write the user audit trail for user ' . $userId . ': ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * A user's audit trail, newest first: who created, changed or deleted the
+     * account, when, and each field's old and new value.
+     *
+     * Whoever may open the user may read it — show() applies the organization
+     * rules, so it is asked rather than the rules being repeated here. The agent
+     * terms are held back from a caller who may not read agent balances, the
+     * same line listRelationsFor() draws for the user list.
+     */
+    public function auditTrail($id)
+    {
+        $access = $this->show($id);
+        if ($access->getStatusCode() !== 200) {
+            return $access;
+        }
+
+        try {
+            $fields = self::AUDITED_USER_FIELDS;
+            if (!in_array('agentBalance', $this->listRelationsFor(auth()->user()), true)) {
+                $fields = array_diff_key($fields, array_flip(self::AUDITED_BALANCE_FIELDS));
+            }
+
+            return response()->json([
+                'success' => true,
+                'data'    => AuditTrail::entries('users', (int) $id, $fields, [
+                    'actions' => ['deleted' => 'Deleted'],
+                ]),
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Failed to read the user audit trail for user ' . $id . ': ' . $e->getMessage());
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to load the audit trail',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
      * Give an agent the agent_balance row that makes them one, or update it.
      *
      * Holding that row is the definition of an agent everywhere it matters - the
@@ -154,10 +273,16 @@ class UserController extends Controller
 
         $data = ['organization_id' => $user->organization_id];
 
-        foreach (['commission', 'quota', 'incentives_value', 'remarks'] as $field) {
+        foreach (['commission', 'quota', 'incentives_value', 'remarks', 'allowance_value', 'period'] as $field) {
             if ($request->has($field)) {
                 $data[$field] = $request->input($field);
             }
+        }
+
+        // Stored lower-case, as the invoice run compares it; blank is "none".
+        if (array_key_exists('period', $data)) {
+            $period = strtolower(trim((string) $data['period']));
+            $data['period'] = $period !== '' ? $period : null;
         }
 
         if (!AgentBalance::where('agent_id', $user->id)->exists()) {
@@ -183,6 +308,31 @@ class UserController extends Controller
         $data = array_intersect_key($data, array_flip(self::balanceColumns()));
 
         AgentBalance::updateOrCreate(['agent_id' => $user->id], $data);
+    }
+
+    /** Read the allowance period case-insensitively: "Weekly" is "weekly". */
+    private function normalizePeriod(Request $request): void
+    {
+        if (is_string($request->input('period'))) {
+            $request->merge(['period' => strtolower(trim($request->input('period')))]);
+        }
+    }
+
+    /**
+     * An allowance needs to say how often it is paid: refuse an amount above
+     * zero without a weekly or monthly period, rather than saving one the
+     * invoice run would skip.
+     */
+    private function requirePeriodWithAllowance($validator, Request $request): void
+    {
+        $validator->after(function ($v) use ($request) {
+            $amount = (float) $request->input('allowance_value', 0);
+            $period = strtolower(trim((string) $request->input('period', '')));
+
+            if ($amount > 0 && !in_array($period, AgentInvoiceAllowance::PERIODS, true)) {
+                $v->errors()->add('period', 'Choose Weekly or Monthly for the allowance.');
+            }
+        });
     }
 
     /**
@@ -262,6 +412,8 @@ class UserController extends Controller
 
     public function store(Request $request)
     {
+        $this->normalizePeriod($request);
+
         $validator = Validator::make($request->all(), [
             'salutation' => 'nullable|string|max:10|in:Mr,Ms,Mrs,Dr,Prof',
             'first_name' => 'required|string|max:255',
@@ -279,7 +431,10 @@ class UserController extends Controller
             'quota' => 'nullable|numeric|min:0',
             'incentives_value' => 'nullable|numeric|min:0',
             'remarks' => 'nullable|string',
+            'allowance_value' => 'nullable|numeric|min:0',
+            'period' => 'nullable|string|in:' . implode(',', AgentInvoiceAllowance::PERIODS),
         ]);
+        $this->requirePeriodWithAllowance($validator, $request);
 
         if ($validator->fails()) {
             return response()->json([
@@ -340,6 +495,8 @@ class UserController extends Controller
             });
 
             $user->load(['organization', 'role', 'agent', 'agentBalance']);
+
+            $this->recordAudit($user->id, null, $this->auditSnapshot($user), $authUser);
 
             // Try to log user creation activity (but don't fail if logging fails)
             try {
@@ -420,7 +577,9 @@ class UserController extends Controller
                 'error' => 'User ID must be a positive integer'
             ], 400);
         }
-        
+
+        $this->normalizePeriod($request);
+
         $validator = Validator::make($request->all(), [
             'salutation' => 'sometimes|string|max:10|in:Mr,Ms,Mrs,Dr,Prof',
             'first_name' => 'sometimes|string|max:255',
@@ -438,7 +597,10 @@ class UserController extends Controller
             'quota' => 'sometimes|nullable|numeric|min:0',
             'incentives_value' => 'sometimes|nullable|numeric|min:0',
             'remarks' => 'sometimes|nullable|string',
+            'allowance_value' => 'sometimes|nullable|numeric|min:0',
+            'period' => 'sometimes|nullable|string|in:' . implode(',', AgentInvoiceAllowance::PERIODS),
         ]);
+        $this->requirePeriodWithAllowance($validator, $request);
 
         if ($validator->fails()) {
             return response()->json([
@@ -479,6 +641,7 @@ class UserController extends Controller
             }
 
             $oldData = $user->toArray();
+            $auditBefore = $this->auditSnapshot($user);
             $updateData = [];
             
             // Only include fields that are actually in the request
@@ -516,6 +679,17 @@ class UserController extends Controller
             // Also covers an account being PROMOTED to agent here: the row is created
             // on the edit that makes them one, not left for a later save to notice.
             $this->syncAgentBalance($user, $request);
+
+            // Read back after the agent terms are synced, so a rate change is in it.
+            $auditAfter = $this->auditSnapshot($user);
+            if ($request->has('password')) {
+                // That it changed, never what it was or is.
+                $auditBefore['password'] = 'Previous password';
+                $auditAfter['password']  = 'Changed';
+            }
+            if ($auditBefore != $auditAfter) {
+                $this->recordAudit($user->id, $auditBefore, $auditAfter, $authUser);
+            }
 
             // Try to log user update activity (but don't fail if logging fails)
             try {
@@ -578,7 +752,10 @@ class UserController extends Controller
             }
 
             $username = $user->username;
+            $auditBefore = $this->auditSnapshot($user);
             $user->delete();
+
+            $this->recordAudit((int) $id, $auditBefore, [], $authUser, 'deleted');
 
             // Try to log user deletion activity (but don't fail if logging fails)
             try {

@@ -9,6 +9,7 @@ import { useInvoiceStore, InvoiceRecordUI } from '../store/invoiceStore';
 import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import InvoiceFunnelFilter, { FilterValues, allColumns as filterColumns } from '../filter/InvoiceFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import pusher from '../services/pusherService';
 import { exportToCSV } from '../utils/exportUtils';
 
@@ -158,6 +159,19 @@ const PaginationControls: React.FC<PaginationControlsProps> = ({
       </div>
     </div>
   );
+};
+
+// Reads a column's value for the funnel filter, resolving property names if needed
+const getInvoiceFilterValue = (item: any, k: string) => {
+  switch (k) {
+    case 'accountNo': return item.accountNo ?? item.account_no;
+    case 'fullName': return item.fullName ?? item.full_name;
+    case 'invoiceDate': return item.invoiceDateRaw ?? item.invoiceDate;
+    case 'dueDate': return item.dueDateRaw ?? item.dueDate;
+    case 'dateProcessed': return item.dateProcessedRaw ?? item.dateProcessed;
+    case 'invoiceBalance': return item.invoiceBalance ?? item.invoice_balance;
+    default: return item[k];
+  }
 };
 
 const Invoice: React.FC = () => {
@@ -334,20 +348,7 @@ const Invoice: React.FC = () => {
     if (activeFilters && Object.keys(activeFilters).length > 0) {
       filtered = filtered.filter(record => {
         return Object.entries(activeFilters).every(([key, filter]: [string, any]) => {
-          // Helper to resolve property names if needed
-          const getVal = (item: any, k: string) => {
-            switch (k) {
-              case 'accountNo': return item.accountNo ?? item.account_no;
-              case 'fullName': return item.fullName ?? item.full_name;
-              case 'invoiceDate': return item.invoiceDateRaw ?? item.invoiceDate;
-              case 'dueDate': return item.dueDateRaw ?? item.dueDate;
-              case 'dateProcessed': return item.dateProcessedRaw ?? item.dateProcessed;
-              case 'invoiceBalance': return item.invoiceBalance ?? item.invoice_balance;
-              default: return item[k];
-            }
-          };
-
-          const val = getVal(record, key);
+          const val = getInvoiceFilterValue(record, key);
 
           if (filter.type === 'checklist') {
             if (!filter.value || !Array.isArray(filter.value) || filter.value.length === 0) return true;
@@ -435,6 +436,24 @@ const Invoice: React.FC = () => {
 
     return filtered;
   }, [invoiceRecords, searchQuery, activeFilters, invoiceDateFrom, invoiceDateTo, dateRangeType, userOrgId]);
+
+  // The invoices this user may see — mirrors the organization filter in globalFilteredInvoices above
+  const accessibleInvoices = useMemo(() => {
+    let filtered = invoiceRecords;
+    if (userOrgId) {
+      filtered = filtered.filter((record: InvoiceRecordUI) => record.organization_id === userOrgId);
+    } else {
+      filtered = filtered.filter((record: InvoiceRecordUI) => !record.organization_id);
+    }
+    return filtered;
+  }, [invoiceRecords, userOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // invoices this user can see, read exactly as the filter reads them.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleInvoices, getInvoiceFilterValue),
+    [accessibleInvoices]
+  );
 
   // Derive date items from context data instead of fetching separately or static
   const dateItems = useMemo(() => {
@@ -1985,6 +2004,7 @@ const Invoice: React.FC = () => {
             setIsFunnelFilterOpen(false);
           }}
           currentFilters={activeFilters}
+          getSuggestions={getFilterSuggestions}
         />
 
       {selectedRecord && userRole !== 'customer' && (

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ModalUITemplate from './ui-modal/ModalUITemplate';
 import apiClient from '../config/api';
-import { User, Camera, X, Loader2 } from 'lucide-react';
+import { User, Camera, X, Loader2, FileText } from 'lucide-react';
+import { PROOF_FILE_ACCEPT, isPdfFile, screenProofFiles } from '../components/proofFiles';
 import SearchableField, { GroupedOption } from '../components/common/SearchableField';
 import { transactionService } from '../services/transactionService';
 import { userService } from '../services/userService';
@@ -35,7 +36,11 @@ interface AgentPayoutModalProps {
     approveId?: number;
     /** Reference of the record being approved, shown read-only. */
     approveRefNumber?: string;
-    /** Allowance already entered on the record being approved, pre-filled. */
+    /**
+     * Allowance already on the record being approved. The form no longer asks
+     * for one, but a payout raised while it did keeps what it was given: it is
+     * included in the amount shown, which is what the API will pay.
+     */
     approveAllowance?: number;
     /**
      * What the invoice the record settles bills, before the allowance — null
@@ -53,9 +58,11 @@ interface PayoutFormData {
     remarks: string;
     proof_of_payment: string;
     payout_type: string;
-    allowance: string;
     [key: string]: string | number;
 }
+
+/** Matches the `proof_images` limit CommissionController validates. */
+const MAX_PROOF_IMAGES = 10;
 
 const AgentPayoutForm: React.FC<{
     agentId?: number;
@@ -177,10 +184,18 @@ const AgentPayoutForm: React.FC<{
 
     const groupedAgents = getGroupedAgents();
 
-    // Image upload state
-    const [imageFile, setImageFile] = useState<File | null>(null);
-    const [imagePreview, setImagePreview] = useState<string | null>(null);
+    // Proof images: the files picked and a preview URL for each, kept in step by
+    // index. Several can be attached — a transfer often needs more than one
+    // screenshot to show the whole receipt.
+    const [imageFiles, setImageFiles] = useState<File[]>([]);
+    const [imagePreviews, setImagePreviews] = useState<string[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const revokePreviews = (urls: string[]) => {
+        urls.forEach(url => {
+            if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+        });
+    };
 
     const generateRefNumber = () => {
         const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -198,7 +213,6 @@ const AgentPayoutForm: React.FC<{
         remarks: '',
         proof_of_payment: '',
         payout_type: 'all',
-        allowance: ''
     });
 
     const getAgentBalances = (agentObj: any) => {
@@ -274,17 +288,14 @@ const AgentPayoutForm: React.FC<{
                 remarks: '',
                 proof_of_payment: '',
                 payout_type: 'all',
-                allowance: approveAllowance && approveAllowance > 0 ? String(approveAllowance) : ''
             });
-            setImageFile(null);
-            setImagePreview(null);
+            setImageFiles([]);
+            setImagePreviews([]);
             setError(null);
         } else {
-            if (imagePreview && imagePreview.startsWith('blob:')) {
-                URL.revokeObjectURL(imagePreview);
-            }
-            setImagePreview(null);
-            setImageFile(null);
+            revokePreviews(imagePreviews);
+            setImagePreviews([]);
+            setImageFiles([]);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, agentId, agentName, agents, fromInvoice, invoiceNumber, approveRefNumber, approveAllowance, approveInvoiceAmount]);
@@ -295,11 +306,8 @@ const AgentPayoutForm: React.FC<{
         setFormData(prev => {
             const newData = { ...prev, [name]: value };
 
-            // Settling an invoice: the amount follows the allowance.
+            // Settling an invoice: the amount is the invoice's, already set.
             if (settlesInvoice) {
-                if (name === 'allowance') {
-                    newData.total_amount = invoicePayoutAmount(value);
-                }
                 return newData;
             }
 
@@ -327,34 +335,40 @@ const AgentPayoutForm: React.FC<{
         });
     };
 
+    /** Images and PDFs, added to what is already attached, up to the limit the API accepts. */
     const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
+        const { accepted: usable, problem } = screenProofFiles(Array.from(e.target.files || []));
+        // Cleared so picking the same file again after removing it still fires.
+        e.target.value = '';
 
-        if (imagePreview && imagePreview.startsWith('blob:')) {
-            URL.revokeObjectURL(imagePreview);
-        }
+        const room = MAX_PROOF_IMAGES - imageFiles.length;
+        const accepted = usable.slice(0, Math.max(0, room));
+        const overLimit = accepted.length < usable.length
+            ? `Up to ${MAX_PROOF_IMAGES} proof files can be attached.`
+            : null;
 
-        setImageFile(file);
-        setImagePreview(URL.createObjectURL(file));
+        setError([problem, overLimit].filter(Boolean).join(' ') || null);
+        if (accepted.length === 0) return;
+
+        setImageFiles(prev => [...prev, ...accepted]);
+        setImagePreviews(prev => [...prev, ...accepted.map(f => URL.createObjectURL(f))]);
     };
 
-    const handleRemoveImage = () => {
-        if (imagePreview && imagePreview.startsWith('blob:')) {
-            URL.revokeObjectURL(imagePreview);
-        }
-        setImageFile(null);
-        setImagePreview(null);
+    const handleRemoveImage = (index: number) => {
+        revokePreviews([imagePreviews[index]].filter(Boolean));
+        setImageFiles(prev => prev.filter((_, i) => i !== index));
+        setImagePreviews(prev => prev.filter((_, i) => i !== index));
         setFormData(prev => ({ ...prev, proof_of_payment: '' }));
-        if (fileInputRef.current) fileInputRef.current.value = '';
     };
+
+    const hasProof = imageFiles.length > 0;
 
     const handleSave = async () => {
         // Approving asks for everything, so everything is checked. It does not
         // run the balance test below: the figure being entered is what the
         // approver is settling, and the balance has not moved yet.
         if (approveId) {
-            if (!formData.total_amount || Number(formData.total_amount) <= 0 || !formData.remarks || !imageFile) {
+            if (!formData.total_amount || Number(formData.total_amount) <= 0 || !formData.remarks || !hasProof) {
                 setError('Amount, proof, and remarks are required to approve.');
                 return;
             }
@@ -374,7 +388,7 @@ const AgentPayoutForm: React.FC<{
             return;
         }
 
-        if (!formData.agent_id || !formData.ref_number || !formData.total_amount || !formData.remarks || !imageFile) {
+        if (!formData.agent_id || !formData.ref_number || !formData.total_amount || !formData.remarks || !hasProof) {
             setError('Agent, reference number, amount, proof, and remarks are required.');
             return;
         }
@@ -403,22 +417,33 @@ const AgentPayoutForm: React.FC<{
         setError(null);
 
         try {
-            let proofUrl = formData.proof_of_payment;
+            // One upload per image, in the order they were attached, so the first
+            // one picked is the one older screens show. Stopped at the first
+            // failure: a payout is not recorded with part of its proof missing.
+            const proofUrls: string[] = [];
 
-            if (imageFile) {
+            for (let i = 0; i < imageFiles.length; i++) {
+                const file = imageFiles[i];
                 const imageFormData = new FormData();
                 imageFormData.append('folder_name', `agent-payout - ${selectedAgentName}`);
-                imageFormData.append('payment_proof_image', imageFile, imageFile.name);
+                imageFormData.append('payment_proof_image', file, file.name);
 
                 const uploadResponse = await transactionService.uploadTransactionImage(imageFormData);
                 if (uploadResponse.success && uploadResponse.data?.payment_proof_image_url) {
-                    proofUrl = uploadResponse.data.payment_proof_image_url;
+                    proofUrls.push(uploadResponse.data.payment_proof_image_url);
                 } else {
-                    setError('Failed to upload proof of payment image.');
+                    setError(imageFiles.length > 1
+                        ? `Failed to upload proof file ${i + 1} of ${imageFiles.length}.`
+                        : 'Failed to upload the proof of payment.');
                     setLoading(false);
                     return;
                 }
             }
+
+            const proofUrl = proofUrls[0] ?? formData.proof_of_payment;
+            // Sent only when there is something to send, so a payout raised from
+            // an invoice (no proof asked for) posts exactly what it did before.
+            const proofImages = proofUrls.length > 0 ? { proof_images: proofUrls } : {};
 
             const authData = localStorage.getItem('authData');
             const currentUser = authData ? JSON.parse(authData) : null;
@@ -426,7 +451,7 @@ const AgentPayoutForm: React.FC<{
             const payload = {
               ...formData,
               proof_of_payment: proofUrl,
-              allowance: Number(formData.allowance || 0),
+              ...proofImages,
               // Send the payout type the user actually picked. The option values
               // (commission / incentives_payout / Bonus_payout / all) map 1:1 onto the
               // balance branches in CommissionController::storeHistory — a literal
@@ -449,9 +474,9 @@ const AgentPayoutForm: React.FC<{
                     type: formData.payout_type,
                     remarks: formData.remarks,
                     proof_of_payment: proofUrl,
-                    // Written onto the invoice this payout settles when it
-                    // is approved, and added to that invoice's subtotal.
-                    allowance: Number(formData.allowance || 0),
+                    ...proofImages,
+                    // No allowance: the form no longer takes one, and leaving
+                    // it out keeps whatever the record already carries.
                 })
                 : await apiClient.post('/commissions/history', payload);
 
@@ -509,10 +534,10 @@ const AgentPayoutForm: React.FC<{
                 // amount being entered is what is being settled, and no money
                 // has moved yet for it to exceed.
                 disabled: loading || !formData.agent_id || (approveId
-                    ? (!formData.total_amount || Number(formData.total_amount) <= 0 || !formData.remarks || !imageFile)
+                    ? (!formData.total_amount || Number(formData.total_amount) <= 0 || !formData.remarks || !hasProof)
                     : fromInvoice
                         ? !formData.ref_number
-                        : (!formData.total_amount || Number(formData.total_amount) <= 0 || Number(formData.total_amount) > availableTotal || !formData.remarks || !imageFile))
+                        : (!formData.total_amount || Number(formData.total_amount) <= 0 || Number(formData.total_amount) > availableTotal || !formData.remarks || !hasProof))
             }}
         >
             <div className="space-y-5">
@@ -618,29 +643,6 @@ const AgentPayoutForm: React.FC<{
                     />
                 </div>
 
-                {/* Allowance — paid on top of the invoice. Only offered where
-                    there is an invoice to add it to: raised from one, or
-                    approving a payout that was. Nothing changes on the invoice
-                    until the payout is approved. */}
-                {(fromInvoice || approveId) && (
-                <div>
-                    <label className={labelClass}>Allowance</label>
-                    <input
-                        name="allowance"
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={formData.allowance}
-                        onChange={handleInputChange}
-                        className={inputClass}
-                        placeholder="0.00"
-                    />
-                    <p className={`text-[11px] mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        Optional. Added to the agent's invoice subtotal once this payout is approved.
-                    </p>
-                </div>
-                )}
-
                 {/* Total Amount — not asked for on an invoice payout.
                     Locked on "All Balance": that option means every bucket is
                     being cashed out, so the figure is the agent's whole balance
@@ -666,7 +668,7 @@ const AgentPayoutForm: React.FC<{
                         className={`${inputClass}${amountLocked ? ' cursor-not-allowed opacity-75' : ''}`}
                         placeholder="0.00"
                         title={settlesInvoice
-                            ? 'Paying this invoice draws exactly what it bills, plus the allowance.'
+                            ? 'Paying this invoice draws exactly what it bills.'
                             : amountLocked
                                 ? 'A payout cashes out the agent\'s whole balance, so the amount is filled in automatically.'
                                 : undefined}
@@ -674,7 +676,9 @@ const AgentPayoutForm: React.FC<{
                     {amountLocked && (
                         <p className={`text-[11px] mt-1 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                             {settlesInvoice
-                                ? `Invoice ${approveRefNumber || ''} — ₱${Number(approveInvoiceAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} plus allowance. Set automatically.`
+                                ? `Invoice ${approveRefNumber || ''} — ₱${Number(approveInvoiceAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}${Number(approveAllowance || 0) > 0
+                                    ? ` plus ₱${Number(approveAllowance).toLocaleString(undefined, { minimumFractionDigits: 2 })} allowance already on this payout`
+                                    : ''}. Set automatically.`
                                 : 'Paying the agent\'s full balance — amount is set automatically.'}
                         </p>
                     )}
@@ -684,51 +688,91 @@ const AgentPayoutForm: React.FC<{
                 {/* Proof — not asked for on an invoice payout. */}
                 {!fromInvoice && (
                 <div>
-                    <label className={labelClass}>Proof <span className="text-red-500">*</span></label>
-                    <div
-                        className={`relative w-full border-2 border-dashed rounded-lg overflow-hidden cursor-pointer transition-colors ${isDarkMode
-                            ? 'border-gray-700 bg-gray-800 hover:border-gray-500'
-                            : 'border-gray-300 bg-gray-50 hover:border-gray-400'
-                            } ${imagePreview ? 'h-auto' : 'h-40'}`}
-                        onClick={() => fileInputRef.current?.click()}
-                    >
-                        <input
-                            ref={fileInputRef}
-                            type="file"
-                            accept="image/*"
-                            onChange={handleImageSelect}
-                            className="hidden"
-                        />
+                    <label className={labelClass}>
+                        Proof <span className="text-red-500">*</span>
+                        {hasProof && (
+                            <span className={`ml-2 text-xs font-normal ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                                {imageFiles.length} of {MAX_PROOF_IMAGES}
+                            </span>
+                        )}
+                    </label>
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept={PROOF_FILE_ACCEPT}
+                        multiple
+                        onChange={handleImageSelect}
+                        className="hidden"
+                    />
 
-                        {imagePreview ? (
-                            <div className="relative w-full">
-                                <img
-                                    src={imagePreview}
-                                    alt="Proof"
-                                    className="w-full h-auto object-contain block"
-                                />
+                    {hasProof ? (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {imagePreviews.map((preview, index) => (
+                                <div
+                                    key={preview}
+                                    className={`relative h-32 rounded-lg overflow-hidden border ${isDarkMode ? 'border-gray-700 bg-gray-800' : 'border-gray-300 bg-gray-50'}`}
+                                >
+                                    {imageFiles[index] && isPdfFile(imageFiles[index]) ? (
+                                        // No thumbnail for a PDF: its name, and a click opens it.
+                                        <button
+                                            type="button"
+                                            onClick={() => window.open(preview, '_blank')}
+                                            title={`Open ${imageFiles[index].name}`}
+                                            className={`w-full h-full flex flex-col items-center justify-center gap-1 px-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}
+                                        >
+                                            <FileText size={28} />
+                                            <span className="text-[11px] font-medium truncate max-w-full">{imageFiles[index].name}</span>
+                                        </button>
+                                    ) : (
+                                        <img
+                                            src={preview}
+                                            alt={`Proof ${index + 1}`}
+                                            className="w-full h-full object-cover block"
+                                        />
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRemoveImage(index)}
+                                        className="absolute top-1.5 right-1.5 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 shadow-md z-20 transition-colors"
+                                        title="Remove file"
+                                    >
+                                        <X size={12} />
+                                    </button>
+                                    <div className="absolute bottom-1.5 left-1.5 bg-black/60 text-white px-1.5 py-0.5 rounded text-[10px] pointer-events-none">
+                                        {index + 1}
+                                    </div>
+                                </div>
+                            ))}
+
+                            {imageFiles.length < MAX_PROOF_IMAGES && (
                                 <button
                                     type="button"
-                                    onClick={(e) => { e.stopPropagation(); handleRemoveImage(); }}
-                                    className="absolute top-2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1 shadow-md z-20 transition-colors"
-                                    title="Remove image"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className={`h-32 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-1 transition-colors ${isDarkMode
+                                        ? 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-500'
+                                        : 'border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400'
+                                        }`}
                                 >
-                                    <X size={14} />
+                                    <Camera size={20} />
+                                    <span className="text-xs font-medium">Add more</span>
                                 </button>
-                                <div className="absolute bottom-2 left-2 bg-green-500 text-white px-2 py-1 rounded text-xs flex items-center gap-1 shadow-md pointer-events-none">
-                                    <Camera size={12} /> Uploaded
-                                </div>
-                            </div>
-                        ) : (
-                            <div className={`w-full h-full flex flex-col items-center justify-center gap-2 ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                                <Camera size={28} />
-                                <span className="text-sm font-medium">Click to upload proof</span>
-                                <span className="text-xs opacity-60">PNG, JPG, JPEG accepted</span>
-                            </div>
-                        )}
-                    </div>
+                            )}
+                        </div>
+                    ) : (
+                        <div
+                            className={`w-full h-40 border-2 border-dashed rounded-lg cursor-pointer transition-colors flex flex-col items-center justify-center gap-2 ${isDarkMode
+                                ? 'border-gray-700 bg-gray-800 hover:border-gray-500 text-gray-400'
+                                : 'border-gray-300 bg-gray-50 hover:border-gray-400 text-gray-500'
+                                }`}
+                            onClick={() => fileInputRef.current?.click()}
+                        >
+                            <Camera size={28} />
+                            <span className="text-sm font-medium">Click to upload proof</span>
+                            <span className="text-xs opacity-60">Images or PDF · up to 10 MB each · select several at once</span>
+                        </div>
+                    )}
                     <p className={`text-[11px] mt-1.5 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                        Image will be saved to Google Drive automatically
+                        Files will be saved to Google Drive automatically
                     </p>
                 </div>
                 )}

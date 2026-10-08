@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Exceptions\IncentiveAlreadyBilled;
 use App\Support\CronLog;
 use App\Models\AgentInvoice;
+use App\Models\AgentInvoiceAllowance;
 use App\Models\AgentInvoiceCustomer;
 use App\Models\User;
 use App\Support\AgentProgramme;
@@ -12,6 +13,7 @@ use Carbon\Carbon;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 /**
@@ -59,6 +61,13 @@ use Throwable;
  * unstamped — so a quota already billed cannot be billed again, and two runs
  * overlapping cannot both take the same one. See incentivesForPeriod() and
  * claimIncentives().
+ *
+ *   ALLOWANCE is each agent's standing allowance (agent_balance.allowance_value,
+ *   paid 'weekly' or 'monthly'), added to the subtotal. A weekly one covers the
+ *   billing week; a monthly one covers the calendar month and is paid once, on
+ *   the first invoice of that month. Every allowance paid is recorded in
+ *   agent_invoice_allowances, whose unique key stops the same coverage being
+ *   paid twice. See allowancesForPeriod() and claimAllowances().
  *
  * Everything for one owner is written inside a transaction, so a failure part
  * way through leaves no invoice rather than an invoice missing its customers —
@@ -352,6 +361,11 @@ class AgentInvoiceService
                 'ab.commission'
             );
 
+        // The standing allowance, where this deployment has the columns.
+        if ($this->allowanceTermsExist()) {
+            $query->addSelect('ab.allowance_value', 'ab.period as allowance_period');
+        }
+
         if ($onlyAgentId !== null) {
             $query->where('u.id', $onlyAgentId);
         }
@@ -374,6 +388,10 @@ class AgentInvoiceService
                 // customer at the rate of whoever brought them in.
                 'commission_rate' => (float) ($row->commission ?? 0),
                 'organization_id' => $row->organization_id !== null ? (int) $row->organization_id : null,
+                // The agent's standing allowance and how often it is paid —
+                // see allowancesForPeriod(). Zero or no period means none.
+                'allowance_value'  => (float) ($row->allowance_value ?? 0),
+                'allowance_period' => strtolower(trim((string) ($row->allowance_period ?? ''))),
             ];
 
             $teamId = $row->team_id !== null && $row->team_id !== '' ? (int) $row->team_id : null;
@@ -457,13 +475,18 @@ class AgentInvoiceService
         // Read, never recalculated — the cron is the source of truth.
         $incentive = $this->incentivesForPeriod($owner, $periodStart, $periodEnd, $tag);
 
-        // An owner can legitimately have one without the other: a quota can
-        // complete in a week whose own installs are all in the next one, and a
-        // week of installs can complete no quota at all. Only when BOTH are
-        // empty is there nothing to invoice.
-        if ($billable === [] && $incentive['amount'] <= 0) {
+        // The standing allowances due on this invoice, and not yet billed.
+        $allowances     = $this->allowancesForPeriod($owner, $periodStart, $periodEnd, $tag);
+        $allowanceTotal = round(array_sum(array_column($allowances, 'amount')), 2);
+
+        // An owner can legitimately have any one without the others: a quota can
+        // complete in a week whose own installs are all in the next one, a week
+        // of installs can complete no quota at all, and an allowance is owed
+        // whether or not anything was installed. Only when ALL are empty is
+        // there nothing to invoice.
+        if ($billable === [] && $incentive['amount'] <= 0 && $allowanceTotal <= 0) {
             $summary['owners_no_work']++;
-            $this->writeLog("{$tag} ⊘ SKIPPED: nothing billable this week (no referrals, no incentives awarded in the period)");
+            $this->writeLog("{$tag} ⊘ SKIPPED: nothing billable this week (no referrals, no incentives awarded in the period, no allowance due)");
             return;
         }
 
@@ -520,8 +543,8 @@ class AgentInvoiceService
         )), 2);
 
         // Matches the reference document: the installation fee is stated on the
-        // invoice but does not form part of what is owed.
-        $subtotal = round($totalAmount + $commission, 2);
+        // invoice but does not form part of what is owed. The allowance is.
+        $subtotal = round($totalAmount + $commission + $allowanceTotal, 2);
 
         $invoice = null;
 
@@ -529,7 +552,7 @@ class AgentInvoiceService
             DB::transaction(function () use (
                 $owner, $ownerKey, $periodStart, $periodEnd, $billable, $unitPrice,
                 $count, $totalAmount, $installationFee, $commission, $subtotal,
-                $incentive, $tag, &$invoice
+                $incentive, $allowances, $allowanceTotal, $tag, &$invoice
             ) {
                 $invoice = AgentInvoice::create([
                     'invoice_number'   => $this->nextInvoiceNumber(),
@@ -547,6 +570,7 @@ class AgentInvoiceService
                     'installation_fee' => $installationFee,
                     'total_amount'     => $totalAmount,
                     'commission'       => $commission,
+                    'allowance'        => $allowanceTotal,
                     'subtotal'         => $subtotal,
                     'status'           => AgentInvoice::STATUS_GENERATED,
                     'organization_id'  => $owner['organization_id'],
@@ -587,6 +611,11 @@ class AgentInvoiceService
                 }
 
                 $this->claimIncentives($incentive, $invoice, $now, $tag);
+
+                // Inside the transaction for the same reason: an allowance
+                // somebody else billed first (the unique key refuses it) rolls
+                // this invoice back rather than issuing it without one.
+                $this->claimAllowances($allowances, $invoice, $ownerKey, $now);
             });
         } catch (IncentiveAlreadyBilled $e) {
             // Another invoice claimed one of these completed quotas between our
@@ -633,6 +662,18 @@ class AgentInvoiceService
             ));
         }
 
+        foreach ($allowances as $allowance) {
+            $this->writeVerbose(sprintf(
+                '%s     allowance: %s — %s ₱%s, coverage %s to %s',
+                $tag,
+                $allowance['agent_name'],
+                $allowance['period'],
+                number_format($allowance['amount'], 2),
+                $allowance['coverage_start'],
+                $allowance['coverage_end']
+            ));
+        }
+
         if ($quota > 0 && $quotasReached === 0) {
             $this->writeVerbose(sprintf(
                 '%s   no completed quota fell in this week — the agent\'s progress toward their quota of %d is held by the incentive cron, not lost',
@@ -643,7 +684,8 @@ class AgentInvoiceService
 
         $this->writeLog(
             "{$tag} ✓ SUCCESS - {$invoice->invoice_number} issued — {$count} customer(s), incentive ₱"
-            . number_format($totalAmount, 2) . ", subtotal ₱" . number_format($subtotal, 2)
+            . number_format($totalAmount, 2) . ", allowance ₱" . number_format($allowanceTotal, 2)
+            . ", subtotal ₱" . number_format($subtotal, 2)
         );
 
         // The PDF is written outside the transaction: a file that fails to
@@ -852,6 +894,134 @@ class AgentInvoiceService
             $incentive['quotas'],
             $invoice->invoice_number
         ));
+    }
+
+    /**
+     * The standing allowances due on this owner's invoice for this week.
+     *
+     * One entry per member whose agent_balance carries an allowance_value above
+     * zero and a period of 'weekly' or 'monthly', for the coverage this invoice
+     * pays:
+     *
+     *   • WEEKLY  — the billing week itself, Monday to Sunday. Each weekly
+     *     invoice pays its own seven days.
+     *   • MONTHLY — the calendar month the invoice falls due in, i.e. the month
+     *     of the Monday after the billing week. The first weekly invoice of a
+     *     month pays that month; the rest of the month's invoices find it
+     *     already billed, and the next is paid once the following month starts.
+     *
+     * Anything already in agent_invoice_allowances for the same agent, period
+     * and coverage start is left out, and the unique key on those columns
+     * refuses it anyway — so a re-run, a retry or two runs racing never pay the
+     * same week or month twice.
+     *
+     * Only the week a scheduled run bills — the latest one to have ended — pays
+     * allowances. A backfill or a run for an older week pays none: the allowance
+     * is a standing term from the day it is set, and a past week cannot say
+     * whether it was set then, so billing it there would invent back pay.
+     *
+     * @return array<int, array{agent_id: int, agent_name: string, period: string,
+     *                          coverage_start: string, coverage_end: string, amount: float}>
+     */
+    private function allowancesForPeriod(array $owner, Carbon $periodStart, Carbon $periodEnd, string $tag = ''): array
+    {
+        if (!$this->allowanceTermsExist() || !AgentInvoice::allowanceLedgerExists()) {
+            return [];
+        }
+
+        $withAllowance = array_filter($owner['members'], fn ($m) => (float) ($m['allowance_value'] ?? 0) > 0);
+        if ($withAllowance === []) {
+            return [];
+        }
+
+        [$latestStart] = $this->periodFor();
+        if (!$periodStart->isSameDay($latestStart)) {
+            $this->writeVerbose("{$tag}   allowance not billed: only the latest completed week ({$latestStart->format('Y-m-d')}) pays allowances, and this run is for an earlier one");
+            return [];
+        }
+
+        $due = [];
+
+        foreach ($withAllowance as $member) {
+            $amount = round((float) $member['allowance_value'], 2);
+            $period = $member['allowance_period'] ?? '';
+
+            if (!in_array($period, AgentInvoiceAllowance::PERIODS, true)) {
+                $this->writeLog("{$tag}   [WARN] {$member['name']} has an allowance of ₱" . number_format($amount, 2)
+                    . " but no weekly/monthly period (\"{$period}\") — not billed until a period is set");
+                continue;
+            }
+
+            if ($period === AgentInvoiceAllowance::PERIOD_WEEKLY) {
+                $from = $periodStart->copy()->startOfDay();
+                $to   = $periodEnd->copy()->startOfDay();
+            } else {
+                // The month the invoice falls due in: the Monday after the week.
+                $dueOn = $periodEnd->copy()->addDay();
+                $from  = $dueOn->copy()->startOfMonth()->startOfDay();
+                $to    = $dueOn->copy()->endOfMonth()->startOfDay();
+            }
+
+            $billedOn = AgentInvoiceAllowance::where('agent_id', $member['user_id'])
+                ->where('period', $period)
+                ->whereDate('coverage_start', $from->format('Y-m-d'))
+                ->value('agent_invoice_id');
+
+            if ($billedOn) {
+                $this->writeVerbose(sprintf(
+                    '%s   allowance already billed: %s %s coverage from %s is on invoice #%d',
+                    $tag, $member['name'], $period, $from->format('Y-m-d'), $billedOn
+                ));
+                continue;
+            }
+
+            $due[] = [
+                'agent_id'       => (int) $member['user_id'],
+                'agent_name'     => $member['name'],
+                'period'         => $period,
+                'coverage_start' => $from->format('Y-m-d'),
+                'coverage_end'   => $to->format('Y-m-d'),
+                'amount'         => $amount,
+            ];
+        }
+
+        return $due;
+    }
+
+    /**
+     * Record the allowances this invoice pays.
+     *
+     * A row the unique key refuses — the same agent's week or month already on
+     * another invoice — throws, and the surrounding transaction rolls the whole
+     * invoice back, exactly as a customer billed twice does.
+     */
+    private function claimAllowances(array $allowances, AgentInvoice $invoice, string $ownerKey, Carbon $now): void
+    {
+        if ($allowances === []) {
+            return;
+        }
+
+        DB::table('agent_invoice_allowances')->insert(array_map(fn ($a) => [
+            'agent_invoice_id' => $invoice->id,
+            'agent_id'         => $a['agent_id'],
+            'owner_key'        => $ownerKey,
+            'agent_name'       => $a['agent_name'],
+            'period'           => $a['period'],
+            'coverage_start'   => $a['coverage_start'],
+            'coverage_end'     => $a['coverage_end'],
+            'amount'           => $a['amount'],
+            'created_at'       => $now,
+            'updated_at'       => $now,
+        ], $allowances));
+    }
+
+    /** Whether agent_balance has the allowance columns on this deployment, checked once. */
+    private function allowanceTermsExist(): bool
+    {
+        static $exists = null;
+
+        return $exists ??= Schema::hasColumn('agent_balance', 'allowance_value')
+            && Schema::hasColumn('agent_balance', 'period');
     }
 
     /**

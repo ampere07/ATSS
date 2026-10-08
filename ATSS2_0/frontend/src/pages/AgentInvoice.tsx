@@ -34,6 +34,7 @@ const columns: ColumnDefinition[] = [
     { key: 'period', label: 'Billing Period', minWidth: 190 },
     { key: 'total_customers', label: 'Customers', minWidth: 110, align: 'right' },
     { key: 'total_amount', label: 'Total Amount', minWidth: 140, align: 'right' },
+    { key: 'allowance', label: 'Allowance', minWidth: 120, align: 'right' },
     { key: 'subtotal', label: 'Subtotal', minWidth: 140, align: 'right' },
     { key: 'status', label: 'Status', minWidth: 120 },
     // No Actions column: a row opens its detail pane on click, and View PDF,
@@ -492,6 +493,8 @@ const AgentInvoice: React.FC = () => {
                 return record.total_customers;
             case 'total_amount':
                 return formatCurrency(record.total_amount);
+            case 'allowance':
+                return formatCurrency(record.allowance ?? 0);
             case 'subtotal':
                 return <span className="font-semibold">{formatCurrency(record.subtotal)}</span>;
             case 'status':

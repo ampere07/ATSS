@@ -6,6 +6,7 @@ import GlobalRelatedDataOverlay from '../components/GlobalRelatedDataOverlay';
 import AddApplicationModal from '../modals/AddApplicationModal';
 import SessionExpiredModal from '../components/SessionExpiredModal';
 import ApplicationFunnelFilter, { allColumns as filterColumns } from '../filter/ApplicationFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import { useApplicationStore } from '../store/applicationStore';
 import { Application } from '../types/application';
 import { getCities, City } from '../services/cityService';
@@ -649,6 +650,27 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
 
     return filtered;
   }, [applications, searchQuery, funnelFilters, timestampFrom, timestampTo, currentUserOrgId]);
+
+  // Applications this user may see — mirrors the organization filter in globalFilteredApplications above.
+  const accessibleApplications = useMemo(() => applications.filter(application => {
+    if (currentUserOrgId) {
+      if (application.organization_id !== currentUserOrgId) {
+        return false;
+      }
+    } else {
+      if (application.organization_id) {
+        return false;
+      }
+    }
+    return true;
+  }), [applications, currentUserOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // applications this user can see, read exactly as the filter reads them.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleApplications, (row, key) => (row as any)[key]),
+    [accessibleApplications]
+  );
 
   const statusItems = useMemo(() => {
     const statuses = [
@@ -2058,6 +2080,7 @@ const ApplicationManagement: React.FC<ApplicationManagementProps> = ({ onNavigat
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={funnelFilters}
+        getSuggestions={getFilterSuggestions}
       />
 
       {/* Session Expired Modal */}

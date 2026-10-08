@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, ChevronLeft, ChevronRight, Search, Check } from 'lucide-react';
+import FilterTextSuggest from './FilterTextSuggest';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import apiClient from '../config/api';
 import { planService } from '../services/planService';
@@ -15,6 +16,11 @@ interface PaymentPortalFunnelFilterProps {
     onClose: () => void;
     onApplyFilters: (filters: FilterValues) => void;
     currentFilters?: FilterValues;
+    /**
+     * The column's values, most common first, recommended under a text field.
+     * Omitted, a text field is a plain input as before.
+     */
+    getSuggestions?: (columnKey: string) => string[];
 }
 
 export interface FilterValues {
@@ -55,7 +61,8 @@ const PaymentPortalFunnelFilter: React.FC<PaymentPortalFunnelFilterProps> = ({
     isOpen,
     onClose,
     onApplyFilters,
-    currentFilters
+    currentFilters,
+    getSuggestions
 }) => {
     const [isDarkMode, setIsDarkMode] = useState(localStorage.getItem('theme') === 'dark');
     const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
@@ -472,31 +479,14 @@ const PaymentPortalFunnelFilter: React.FC<PaymentPortalFunnelFilterProps> = ({
         }
 
         return (
-            <div>
-                <label className={`text-sm font-medium mb-2 block ${isDarkMode ? 'text-gray-300' : 'text-gray-700'
-                    }`}>
-                    Search Value
-                </label>
-                <input
-                    type="text"
-                    value={typeof currentValue?.value === 'string' ? currentValue.value : ''}
-                    onChange={(e) => handleTextChange(selectedColumn.key, e.target.value)}
-                    placeholder={`Enter ${selectedColumn.label.toLowerCase()}`}
-                    className={`w-full px-3 py-2 rounded border ${isDarkMode
-                        ? 'bg-gray-800 border-gray-700 text-white'
-                        : 'bg-white border-gray-300 text-gray-900'
-                        }`}
-                    style={{ borderColor: 'transparent' }}
-                    onFocus={(e) => {
-                        if (colorPalette?.primary) {
-                            e.currentTarget.style.borderColor = colorPalette.primary;
-                        }
-                    }}
-                    onBlur={(e) => {
-                        e.currentTarget.style.borderColor = 'transparent';
-                    }}
-                />
-            </div>
+            <FilterTextSuggest
+                value={typeof currentValue?.value === 'string' ? currentValue.value : ''}
+                onChange={(value) => handleTextChange(selectedColumn.key, value)}
+                placeholder={`Enter ${selectedColumn.label.toLowerCase()}`}
+                suggestions={getSuggestions ? getSuggestions(selectedColumn.key) : []}
+                isDarkMode={isDarkMode}
+                primaryColor={colorPalette?.primary || '#7c3aed'}
+            />
         );
     };
 

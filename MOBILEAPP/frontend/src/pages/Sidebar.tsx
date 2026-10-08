@@ -69,6 +69,13 @@ interface MenuItem {
    * same reason.
    */
   onlyRoles?: number[];
+  /**
+   * List this entry only for the users whose landing page it is — `home` from
+   * usePermissions, which also answers for a custom role built on one of the
+   * seeded ones. For a landing page that other roles can open but should not
+   * see as a tab of their own.
+   */
+  onlyAsHome?: boolean;
 }
 
 interface NavGroup {
@@ -133,21 +140,16 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
     {
       title: 'Operations',
       items: [
-        // The agent dashboard is deliberately not listed here (the customer's
-        // is, as Home under Account).
+        // The agent's dashboard, for the users who land on it. It used to be
+        // left off on the grounds that an agent is already looking at it after
+        // signing in — but once they opened any other tab there was no way
+        // back, the same gap the customer's Home tab (under Account) was added
+        // to close. Listed first so it is always on the collapsed bar.
         //
-        // Both are landing pages: ROLE_HOME sends an agent to 'agent-dashboard'
-        // and a customer to 'customer-dashboard' at sign-in, and the switch in
-        // Dashboard.tsx falls back to them for those roles. So they are where
-        // those users already are, and a tab pointing at the screen you are
-        // looking at is a tab that does nothing.
-        //
-        // Hidden here rather than unrouted or de-permissioned: the sections
-        // still render, still carry their keys, and the two roles still land on
-        // them. Removing the routes would have dropped both onto a blank
-        // screen, and dropping the keys would have broken parity with the web
-        // client and the server catalog that PermissionsParityTest guards.
-        //
+        // `onlyAsHome` rather than a role list: it follows the landing page, so
+        // a custom role built on Agent gets it too, while a SuperAdmin — whose
+        // wildcard holds this key as well — keeps only their own Dashboard.
+        { id: 'agent-dashboard', label: 'Dashboard', icon: LayoutDashboard, requires: 'agent-dashboard', onlyAsHome: true },
         // The administrator's own dashboard and the live monitor lead, as they
         // do on the web sidebar. `requires` narrows the first to the bare
         // 'dashboard' key — see MenuItem.
@@ -297,12 +299,13 @@ const Sidebar: React.FC<SidebarProps> = ({ activeSection, onSectionChange, userR
   // The signed-in role, for the handful of entries permissions cannot decide.
   // Read through usePermissions so this agrees with every other screen about
   // who somebody is, rather than depending on the prop being passed.
-  const { roleId: resolvedRoleId } = usePermissions();
+  const { roleId: resolvedRoleId, home } = usePermissions();
   const effectiveRoleId = Number(roleId ?? resolvedRoleId) || resolvedRoleId;
 
   const filterByPermission = (items: MenuItem[]): MenuItem[] =>
     items.filter(item => {
       if (item.onlyRoles && !item.onlyRoles.includes(effectiveRoleId)) return false;
+      if (item.onlyAsHome && home !== item.id) return false;
       return can(item.requires ?? permissionForSection(item.id));
     });
 

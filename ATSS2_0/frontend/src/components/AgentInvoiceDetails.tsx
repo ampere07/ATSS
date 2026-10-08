@@ -199,6 +199,21 @@ const AgentInvoiceDetails: React.FC<AgentInvoiceDetailsProps> = ({
             <Row label="Total Amount">{peso(invoiceRecord.total_amount)}</Row>
             <Row label="Commission">{peso(invoiceRecord.commission)}</Row>
             <Row label="Allowance">{peso(invoiceRecord.allowance || 0)}</Row>
+            {/* Each standing allowance the invoice pays, with its period and
+                the dates it covers. Team invoices name the agent. */}
+            {(invoiceRecord.allowances || []).map((line, i) => (
+              <Row
+                key={`${line.agent_id}-${line.period}-${line.coverage_start}-${i}`}
+                label={`${line.period === 'monthly' ? 'Monthly' : 'Weekly'} allowance${invoiceRecord.invoice_type === 'team' && line.agent_name ? ` · ${line.agent_name}` : ''}`}
+              >
+                <span className="text-right">
+                  {peso(line.amount)}
+                  <span className={`block text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                    {formatDate(line.coverage_start)} – {formatDate(line.coverage_end)}
+                  </span>
+                </span>
+              </Row>
+            ))}
             <Row label="Subtotal">
               <span className="font-semibold">{peso(invoiceRecord.subtotal)}</span>
             </Row>

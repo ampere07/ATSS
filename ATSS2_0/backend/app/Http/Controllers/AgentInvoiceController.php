@@ -593,6 +593,16 @@ class AgentInvoiceController extends Controller
                 'quantity'             => (int) $c->quantity,
                 'total'                => (float) $c->total,
             ])->all();
+
+            // The standing allowances it pays, with what each one covers.
+            $payload['allowances'] = $invoice->allowanceLines()->map(fn ($a) => [
+                'agent_id'       => $a->agent_id,
+                'agent_name'     => $a->agent_name,
+                'period'         => $a->period,
+                'coverage_start' => optional($a->coverage_start)->format('Y-m-d'),
+                'coverage_end'   => optional($a->coverage_end)->format('Y-m-d'),
+                'amount'         => (float) $a->amount,
+            ])->values()->all();
         }
 
         return $payload;

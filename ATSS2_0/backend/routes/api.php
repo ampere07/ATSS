@@ -69,6 +69,10 @@ Route::post('/commissions/achievements', [CommissionController::class, 'storeAch
 // approver is taken from the signed-in user, never from the request body.
 Route::post('/commissions/history/{id}/approve', [CommissionController::class, 'approveHistory'])->whereNumber('id');
 Route::post('/commissions/history/{id}/reject', [CommissionController::class, 'rejectHistory'])->whereNumber('id');
+// A payout's audit trail, and correcting its proof images (an approver's job,
+// itself written to the trail).
+Route::get('/commissions/history/{id}/audit-trail', [CommissionController::class, 'auditTrail'])->whereNumber('id');
+Route::post('/commissions/history/{id}/proof', [CommissionController::class, 'updateProof'])->whereNumber('id');
 Route::post('/commissions/bonus-history/{id}/approve', [CommissionController::class, 'approveBonus'])->whereNumber('id');
 Route::post('/commissions/bonus-history/{id}/reject', [CommissionController::class, 'rejectBonus'])->whereNumber('id');
 
@@ -1559,6 +1563,8 @@ Route::prefix('users')->middleware('ensure.database.tables')->group(function () 
     // only to the caller's own row.
     Route::post('/push-token', [UserController::class , 'updatePushToken']);
     Route::get('/{id}', [UserController::class , 'show']);
+    // Who created, changed or deleted the account, and what changed.
+    Route::get('/{id}/audit-trail', [UserController::class , 'auditTrail']);
     Route::put('/{id}', [UserController::class , 'update']);
     Route::delete('/{id}', [UserController::class , 'destroy']);
     Route::post('/{id}/roles', [UserController::class , 'assignRole']);

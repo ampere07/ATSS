@@ -17,6 +17,7 @@ import { paymentMethodService, PaymentMethod } from '../services/paymentMethodSe
 import BillingDetails from '../components/CustomerDetails';
 import { getCustomerDetail, CustomerDetailData, convertCustomerDataToBillingDetail } from '../services/customerDetailService';
 import TransactionFunnelFilter, { FilterValues, allColumns } from '../filter/TransactionFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import SessionExpiredModal from '../components/SessionExpiredModal';
 import apiClient from '../config/api';
 import { exportToCSV } from '../utils/exportUtils';
@@ -659,6 +660,29 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
     }
   }, []);
 
+  // How the funnel filter reads a column off a transaction.
+  const getValForFilter = (item: any, k: string) => {
+    switch (k) {
+      case 'id': return item.id;
+      case 'account_no': return item.account?.account_no || item.account_no;
+      case 'full_name': return item.account?.customer?.full_name;
+      case 'contact_no': return item.account?.customer?.contact_number_primary;
+      case 'date_processed': return item.date_processed;
+      case 'processed_by_user': return item.processor?.email_address || item.processed_by_user;
+      case 'payment_method': return item.payment_method_info?.payment_method || getPaymentMethodName(item.payment_method);
+      case 'reference_no': return item.reference_no;
+      case 'or_no': return item.or_no;
+      case 'remarks': return item.remarks;
+      case 'status': return item.status;
+      case 'transaction_type': return item.transaction_type;
+      case 'barangay': return item.account?.customer?.barangay;
+      case 'city': return item.account?.customer?.city;
+      case 'region': return item.account?.customer?.region;
+      case 'account_balance': return item.account?.account_balance;
+      default: return item[k];
+    }
+  };
+
   // 1. Initial search/funnel filtering (Global filtered set for sidebar counts)
   const globalFilteredTransactions = useMemo(() => {
     const normalizedQuery = searchQuery.toLowerCase().replace(/\s+/g, '');
@@ -685,28 +709,6 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
     if (activeFilters && Object.keys(activeFilters).length > 0) {
       filtered = filtered.filter(transaction => {
         return Object.entries(activeFilters).every(([key, filter]: [string, any]) => {
-          const getValForFilter = (item: any, k: string) => {
-            switch (k) {
-              case 'id': return item.id;
-              case 'account_no': return item.account?.account_no || item.account_no;
-              case 'full_name': return item.account?.customer?.full_name;
-              case 'contact_no': return item.account?.customer?.contact_number_primary;
-              case 'date_processed': return item.date_processed;
-              case 'processed_by_user': return item.processor?.email_address || item.processed_by_user;
-              case 'payment_method': return item.payment_method_info?.payment_method || getPaymentMethodName(item.payment_method);
-              case 'reference_no': return item.reference_no;
-              case 'or_no': return item.or_no;
-              case 'remarks': return item.remarks;
-              case 'status': return item.status;
-              case 'transaction_type': return item.transaction_type;
-              case 'barangay': return item.account?.customer?.barangay;
-              case 'city': return item.account?.customer?.city;
-              case 'region': return item.account?.customer?.region;
-              case 'account_balance': return item.account?.account_balance;
-              default: return item[k];
-            }
-          };
-
           const val = getValForFilter(transaction, key);
 
           if (filter.type === 'checklist') {
@@ -781,6 +783,29 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
 
     return filtered;
   }, [transactions, searchQuery, activeFilters, processedDateFrom, processedDateTo, userOrgId]);
+
+  // The transactions this user may see, before search and funnel filters.
+  // Mirrors the organization scoping in the global memo above.
+  const accessibleTransactions = useMemo(() => {
+    return transactions.filter(transaction => {
+      if (userOrgId) {
+        if (transaction.organization_id !== userOrgId) return false;
+      } else {
+        if (transaction.organization_id) return false;
+      }
+      return true;
+    });
+  }, [transactions, userOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // transactions this user can see, read exactly as the filter reads them.
+  // `paymentMethods` is a dependency because Payment Method resolves to a
+  // name through it.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleTransactions, getValForFilter),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [accessibleTransactions, paymentMethods]
+  );
 
   // Generate hierarchical location items - Now using globalFilteredTransactions
   const locationItems = useMemo(() => {
@@ -2209,6 +2234,7 @@ const TransactionList: React.FC<TransactionListProps> = ({ onNavigate }) => {
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
       />
 
       <SessionExpiredModal 

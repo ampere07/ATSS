@@ -11,6 +11,7 @@ import { getRegions, Region } from '../services/regionService';
 import { barangayService, Barangay } from '../services/barangayService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
 import CustomerFunnelFilter, { allColumns as filterColumns, Column as FilterColumn } from '../filter/CustomerFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import SessionExpiredModal from '../components/SessionExpiredModal';
 import { useBillingStore } from '../store/billingStore';
 import { billingStatusService, BillingStatus } from '../services/billingStatusService';
@@ -931,6 +932,24 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
 
     return applyFunnelFilters(filtered, activeFilters);
   }, [billingRecords, searchQuery, activeFilters, userOrgId]);
+
+  // Records this user may see — mirrors the organization filter in globalFilteredRecords above.
+  const accessibleBillingRecords = useMemo(() => billingRecords.filter(record => {
+    if (userOrgId) {
+      if (record.organization_id !== userOrgId) return false;
+    } else {
+      if (record.organization_id) return false;
+    }
+    return true;
+  }), [billingRecords, userOrgId]);
+
+  // What the funnel filter recommends under a text field: the values in the
+  // records this user can see, read exactly as the filter reads them (getVal).
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(accessibleBillingRecords, getVal),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [accessibleBillingRecords]
+  );
 
   // Memoize status tree (Status > Billing Status > Barangay) - Now using globalFilteredRecords
   const statusTree = useMemo(() => {
@@ -2674,6 +2693,7 @@ const Customer: React.FC<CustomerProps> = ({ initialSearchQuery, autoOpenAccount
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
       />
 
       <SessionExpiredModal 

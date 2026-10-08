@@ -521,6 +521,28 @@ class AgentInvoicePdfService
             'billedToLabel'    => strtoupper((string) $invoice->billed_to),
             'periodLabel'      => $periodStart->format('M j') . ' – ' . $periodEnd->format('M j, Y'),
 
+            // The standing allowances this invoice pays (agent_invoice_allowances),
+            // each with what it covers. A team invoice names the agent, since a
+            // team can have several on different terms.
+            'allowanceLines' => $invoice->allowanceLines()->map(fn ($a) => [
+                'detail' => strtoupper(implode(' · ', array_filter([
+                    $invoice->invoice_type === AgentInvoice::TYPE_TEAM ? $a->agent_name : null,
+                    ucfirst((string) $a->period),
+                    $a->coverage_start->format('F j, Y') . ' – ' . $a->coverage_end->format('F j, Y'),
+                ]))),
+                'amount' => (float) $a->amount,
+            ])->all(),
+
+            // Only on an invoice given an allowance coverage by hand. When set,
+            // the allowance prints below the incentive with these dates when
+            // there is one; when null the template keeps its old allowance line.
+            'allowanceCoverageLabel' => ($invoice->allowance_coverage_start && $invoice->allowance_coverage_end)
+                ? strtoupper(
+                    Carbon::parse((string) $invoice->allowance_coverage_start)->format('M j') . ' – '
+                    . Carbon::parse((string) $invoice->allowance_coverage_end)->format('M j, Y')
+                )
+                : null,
+
             // A team invoice names who brought each customer in; a solo invoice
             // would only repeat the one name in the heading.
             'showReferrer'     => $invoice->invoice_type === AgentInvoice::TYPE_TEAM,

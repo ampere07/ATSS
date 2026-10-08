@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { FileText, Search, ChevronDown, RefreshCw, Columns3, ArrowUp, ArrowDown, Menu, X, ArrowLeft, Filter, ChevronLeft, ChevronRight } from 'lucide-react';
 import ApplicationVisitDetails from '../components/ApplicationVisitDetails';
 import ApplicationVisitFunnelFilter, { FilterValues } from '../filter/ApplicationVisitFunnelFilter';
+import { suggestionSource } from '../filter/FilterTextSuggest';
 import { useApplicationVisitContext, type ApplicationVisit } from '../contexts/ApplicationVisitContext';
 import { getApplication } from '../services/applicationService';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
@@ -275,6 +276,14 @@ const ApplicationVisitPage: React.FC = () => {
       });
     }
   });
+
+  // What the funnel filter recommends under a text field: the values in the
+  // visits this user can see (technicians only receive their own from the
+  // server), read exactly as applyFilters reads them.
+  const getFilterSuggestions = useMemo(
+    () => suggestionSource(applicationVisits, (row, key) => (row as any)[key]),
+    [applicationVisits]
+  );
 
   // Apply location and search filters first
   let filteredVisits = applicationVisits.filter(visit => {
@@ -1441,6 +1450,7 @@ const ApplicationVisitPage: React.FC = () => {
           setIsFunnelFilterOpen(false);
         }}
         currentFilters={activeFilters}
+        getSuggestions={getFilterSuggestions}
       />
 
       <style>{`

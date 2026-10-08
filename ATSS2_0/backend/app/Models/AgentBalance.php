@@ -27,6 +27,11 @@ class AgentBalance extends Model
         // Credited when an agent claims an onboarded-referral milestone.
         'achievement',
         'organization_id',
+        // The agent's standing allowance — a setting, like the rates above —
+        // and whether it is paid 'weekly' or 'monthly'. The weekly invoice run
+        // bills it; see AgentInvoiceService::allowancesForPeriod().
+        'allowance_value',
+        'period',
     ];
 
     public function agent()

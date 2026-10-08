@@ -224,6 +224,9 @@ final class ApiPermissionMap
         // "signed in is enough" and has to sit above the users* rule that would
         // otherwise demand a staff page key from a technician or a customer.
         ['users/push-token',             null, null],
+        // A user's change history is for the pages that edit users, not every
+        // page that only reads the list to pick a technician.
+        ['users/*/audit-trail', ['user-management', 'tech-users', 'agent-management'], ['user-management', 'tech-users', 'agent-management']],
         // 'inventory' is here because an inventory log records who took an item
         // out and who brought it back, so the log form has to offer the account
         // list — the same reason a job order has to offer technicians.
@@ -451,6 +454,11 @@ final class ApiPermissionMap
         ['agent-invoices*',              'agent-invoices', 'agent-invoices.generate'],
         ['commissions/*/approve',        'agent-payout.approve', 'agent-payout.approve'],
         ['commissions/*/reject',         'agent-payout.approve', 'agent-payout.approve'],
+        // A payout's audit trail is read by anyone on the page (auditTrail()
+        // scopes an agent to their own); replacing its proof images is an
+        // approver's correction.
+        ['commissions/*/audit-trail',    'bonus-history', 'bonus-history'],
+        ['commissions/*/proof',          'agent-payout.approve', 'agent-payout.approve'],
         // Claiming an achievement is the agent's own act, so the page key is
         // enough: storeAchievement() discards any agent_id a non-admin sends
         // and credits the caller.

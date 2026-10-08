@@ -16,7 +16,10 @@ export interface PayoutHistoryData {
     created_by: string;
     created_at: string;
     remarks?: string;
+    /** The first proof image — the only one on payouts recorded before multi-image proof. */
     proof_of_payment?: string;
+    /** Every proof image, first one included. Null when the payout has just one. */
+    proof_images?: string[] | null;
     updated_by?: string;
     updated_at?: string;
     approved_by?: string;
