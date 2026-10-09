@@ -67,15 +67,15 @@ return [
     | Capping page one is what avoids that: the rows that would have caused the
     | overflow start page two instead, and the totals follow them.
     |
-    | A TEAM invoice fits fewer than a solo one. Its rows name who brought each
-    | customer in, on a second line under the name, so every row is taller. A
-    | solo invoice has no such line — the one agent is already in the heading —
-    | and its rows are single-height. This value is the TEAM cap; the solo one
-    | is below it.
+    | Rows with a second line under the customer's name are taller and fit
+    | fewer. A team invoice puts "referred by …" there, and every invoice puts
+    | the install date there, so this cap applies to any invoice whose lines
+    | carry either. The solo cap below is only for the single-height rows of a
+    | solo invoice with no install dates recorded.
     */
     'first_page_rows' => env('AGENT_INVOICE_FIRST_PAGE_ROWS', 10),
 
-    // Page one of a SOLO invoice, whose rows are single-height.
+    // Page one of a SOLO invoice whose rows are single-height (no install dates).
     'first_page_rows_solo' => env('AGENT_INVOICE_FIRST_PAGE_ROWS_SOLO', 15),
 
     /*

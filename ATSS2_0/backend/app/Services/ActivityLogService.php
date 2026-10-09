@@ -250,7 +250,7 @@ class ActivityLogService
             $createdBy,
             null,
             'role',
-            $role->role_id,
+            $role->id ?? $role->role_id,
             $additionalData
         );
     }
@@ -265,7 +265,7 @@ class ActivityLogService
             $updatedBy,
             null,
             'role',
-            $role->role_id,
+            $role->id ?? $role->role_id,
             ['changes' => $changes]
         );
     }

@@ -27,7 +27,12 @@ export const useRoleStore = create<RoleState>((set) => ({
         set({ error: response.message || 'Failed to fetch roles', isLoading: false });
       }
     } catch (err: any) {
-      set({ error: err.message || 'An error occurred', isLoading: false });
+      // The server's own message — "You do not have permission…" — rather
+      // than axios's "Request failed with status code 403".
+      set({
+        error: err?.response?.data?.message || err?.message || 'Failed to fetch roles',
+        isLoading: false,
+      });
     }
   },
 

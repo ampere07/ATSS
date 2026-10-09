@@ -218,8 +218,6 @@ final class ApiPermissionMap
         // signed in. A customer signing in to pay a bill has no reason to
         // enumerate staff accounts.
         //
-        // roles/* stays open to any signed-in user because the client fetches
-        // its own role at sign-in to learn what its menu should contain.
         // Every role's app registers its own device for push, so this is
         // "signed in is enough" and has to sit above the users* rule that would
         // otherwise demand a staff page key from a technician or a customer.
@@ -227,6 +225,11 @@ final class ApiPermissionMap
         // A user's change history is for the pages that edit users, not every
         // page that only reads the list to pick a technician.
         ['users/*/audit-trail', ['user-management', 'tech-users', 'agent-management'], ['user-management', 'tech-users', 'agent-management']],
+        // Moving an account onto or off a role is an edit to that account —
+        // the same key PUT users/{id} demands for the same change — whichever
+        // verb carries it. The users* rule below would otherwise read the POST
+        // as `.create` and the DELETE as `.delete`.
+        ['users/*/roles',                'user-management', 'user-management.edit'],
         // 'inventory' is here because an inventory log records who took an item
         // out and who brought it back, so the log form has to offer the account
         // list — the same reason a job order has to offer technicians.
@@ -243,7 +246,14 @@ final class ApiPermissionMap
             'agent-management', 'team-agent', 'bonus-history', 'agent-payout',
             'job-order', 'work-order', 'application-management',
         ], ['agent-management', 'team-agent']],
-        ['roles*',                       null, 'roles', 'roles'],
+        // Read by Role Management and by the role picker on the account forms
+        // of the user pages — nothing else. It used to be open to any signed-in
+        // account on the belief that clients fetch their own role at sign-in;
+        // they do not (sign-in and me/permissions carry it), and leaving it
+        // open handed a customer every role's name and permission list.
+        ['roles*', [
+            'roles', 'user-management', 'agent-management', 'team-agent', 'tech-users',
+        ], 'roles', 'roles'],
         ['groups*',                      null, ['group-management', 'user-management'], 'group-management'],
         ['organizations*',               null, 'organization', 'organization'],
         ['email-queue/send-credentials/*', 'user-management', 'user-management'],

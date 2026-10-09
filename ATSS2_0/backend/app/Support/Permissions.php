@@ -352,6 +352,21 @@ final class Permissions
     public const CRUD_VERBS = ['create', 'edit', 'delete'];
 
     /**
+     * Keys that may not be held together.
+     *
+     * Each pair opens two different Done forms for the same record — the
+     * technician's and the administrator's — and a role holding both would get
+     * whichever the page happens to check first. The Role modal clears one when
+     * the other is ticked; RoleController refuses the pair outright, counting a
+     * hybrid's inherited keys, so a request built outside the modal cannot
+     * store it either.
+     */
+    public const EXCLUSIVE_PAIRS = [
+        ['job-order.tech-edit', 'job-order.admin-edit'],
+        ['service-order.tech-edit', 'service-order.admin-edit'],
+    ];
+
+    /**
      * What holding a page key used to carry with it, page by page.
      *
      * Before the verbs above existed, most of these pages drew their Add, Edit
@@ -683,6 +698,67 @@ final class Permissions
     }
 
     /**
+     * Does this user hold every key, present and future?
+     *
+     * True for a SuperAdmin and for a hybrid built on one. Only such a user may
+     * hand that reach to somebody else — see RoleController and UserController.
+     *
+     * @param  \App\Models\User|object|null  $user
+     */
+    public static function holdsEverything($user): bool
+    {
+        return in_array(self::WILDCARD, self::forUser($user), true);
+    }
+
+    /**
+     * Does this role grant every key — SuperAdmin itself, or a hybrid on it?
+     *
+     * @param  \App\Models\Role|object|null  $role
+     */
+    public static function roleGrantsEverything($role): bool
+    {
+        return in_array(self::WILDCARD, self::roleKeys($role), true);
+    }
+
+    /**
+     * The same question by id, for callers holding only a `role_id`.
+     *
+     * A seeded role is answered from the table without a query; a custom role
+     * is looked up, since only its row knows whether it is built on SuperAdmin.
+     */
+    public static function roleIdGrantsEverything(int|string|null $roleId): bool
+    {
+        if ($roleId === null || $roleId === '' || (int) $roleId <= 0) {
+            return false;
+        }
+
+        if (Role::isLocked($roleId)) {
+            return in_array(self::WILDCARD, self::ROLE_PERMISSIONS[(int) $roleId] ?? [], true);
+        }
+
+        return self::roleGrantsEverything(Role::find((int) $roleId));
+    }
+
+    /**
+     * The EXCLUSIVE_PAIRS both of whose keys appear in the list.
+     *
+     * @param  string[]  $keys
+     * @return array<int, array{0: string, 1: string}>
+     */
+    public static function exclusiveConflicts(array $keys): array
+    {
+        $conflicts = [];
+
+        foreach (self::EXCLUSIVE_PAIRS as $pair) {
+            if (in_array($pair[0], $keys, true) && in_array($pair[1], $keys, true)) {
+                $conflicts[] = $pair;
+            }
+        }
+
+        return $conflicts;
+    }
+
+    /**
      * The keys a seeded role holds, or [] for anything that is not one.
      *
      * This is what a hybrid role inherits. Read through here rather than from
@@ -902,10 +978,14 @@ final class Permissions
     /**
      * Add the parent page of every "page.verb" key present.
      *
+     * Public so RoleController can store a role in the same shape it is read:
+     * an action ticked without its page still opens that page, so the page is
+     * written alongside it rather than left implied.
+     *
      * @param  string[]  $keys
      * @return string[]
      */
-    private static function withImpliedPages(array $keys): array
+    public static function withImpliedPages(array $keys): array
     {
         $result = $keys;
 

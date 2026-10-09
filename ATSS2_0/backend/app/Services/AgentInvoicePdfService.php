@@ -73,6 +73,11 @@ class AgentInvoicePdfService
      *   7  installation fee dropped from the totals, which now read as a sum:
      *      clients x commission = total amount, + allowance (when there is
      *      one) + incentive = subtotal
+     *
+     * The install date under each customer's name was added WITHOUT a bump, on
+     * purpose: invoices already issued keep the PDF they were sent with, and
+     * the date appears from the next generated invoice on (and on any older one
+     * rendered for the first time, or re-rendered because its figures changed).
      */
     private const LAYOUT_VERSION = 7;
 
@@ -346,16 +351,16 @@ class AgentInvoicePdfService
      * @param  array<int, array>  $rows
      * @return array<int, array<int, array>>
      */
-    private function paginateRows(array $rows, bool $isTeam = true): array
+    private function paginateRows(array $rows, bool $twoLineRows = true): array
     {
         if ($rows === []) {
             return [];
         }
 
-        // A solo invoice fits more on page one. Its rows are single-height,
-        // where a team's carry "referred by …" on a second line beneath the
-        // customer's name — see $showReferrer in invoiceViewData().
-        $first = $isTeam
+        // Single-height rows fit more on page one. A row is two lines tall when
+        // it carries the small line beneath the customer's name — "referred by
+        // …" on a team invoice, the install date on any line that has one.
+        $first = $twoLineRows
             ? (int) config('agent_invoices.first_page_rows', 10)
             : (int) config('agent_invoices.first_page_rows_solo', 15);
 
@@ -484,6 +489,9 @@ class AgentInvoicePdfService
         $rows = $customers->map(fn ($c) => [
             'customer_name'    => $c->customer_name,
             'referred_by_name' => $c->referred_by_name,
+            // As billed: the install date the weekly run recorded on the line,
+            // which is what put the customer in this invoice's week.
+            'installed_label'  => $c->installed_date ? $c->installed_date->format('M j, Y') : null,
             'unit_price'       => $c->unit_price,
             'quantity'         => $c->quantity,
             'total'            => $c->total,
@@ -514,7 +522,11 @@ class AgentInvoicePdfService
              * A single page of rows stays a single chunk, so the common invoice
              * is unaffected.
              */
-            'customerPages' => $this->paginateRows($rows, $invoice->invoice_type === AgentInvoice::TYPE_TEAM),
+            'customerPages' => $this->paginateRows(
+                $rows,
+                $invoice->invoice_type === AgentInvoice::TYPE_TEAM
+                    || collect($rows)->contains(fn ($r) => !empty($r['installed_label']))
+            ),
 
             // The reference document shows the date in capitals: AUGUST 10, 2026.
             'invoiceDateLabel' => strtoupper($invoiceDate->format('F j, Y')),

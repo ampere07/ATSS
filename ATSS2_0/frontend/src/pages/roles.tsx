@@ -6,14 +6,27 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import RoleModal from '../modals/RoleModal';
 import { useRoleStore } from '../store/roleStore';
 import { roleService } from '../services/userService';
-import { baseRoleLabel } from '../config/permissions';
+import { ROLE, WILDCARD, baseRoleLabel, isLockedRole } from '../config/permissions';
 import { usePageActions } from '../hooks/usePageActions';
+import { usePermissions } from '../hooks/usePermissions';
+
+/** What the server said, rather than axios's "Request failed with status code 400". */
+const serverMessage = (err: any, fallback: string): string =>
+    err?.response?.data?.message || err?.message || fallback;
 
 const Roles: React.FC = () => {
     // Add, Edit and Delete are granted separately. The same keys the API
     // demands, so a control is only drawn when the request behind it would
     // succeed.
     const actions = usePageActions('roles');
+
+    // A role built on SuperAdmin hands out everything, so the server lets only
+    // a holder of everything change or delete one. Its controls are not drawn
+    // for anybody else.
+    const { permissions: callerPermissions } = usePermissions();
+    const callerHoldsEverything = callerPermissions.includes(WILDCARD);
+    const isOutOfReach = (role: Role) =>
+        !callerHoldsEverything && Number(role.base_role_id) === ROLE.SUPER_ADMIN;
 
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
     const [searchQuery, setSearchQuery] = useState('');
@@ -54,23 +67,28 @@ const Roles: React.FC = () => {
         fetchRoles();
     }, [fetchRoles]);
 
+    // The organization boundary is drawn by the server: GET /roles returns the
+    // seeded roles and the caller's own organization's, nothing else. The copy
+    // of that filter that lived here read authData.organization_id, which
+    // sign-in never stores, so it never filtered anything.
     const filteredRoles = useMemo(() => {
-        const authData = JSON.parse(localStorage.getItem('authData') || '{}');
-        const userOrgId = authData.organization_id;
+        const query = searchQuery.toLowerCase().trim();
 
-        return roles.filter(role => {
-            // Organization filter: Allow system roles (ID <= 8) OR roles belonging to the user's organization
-            if (userOrgId && role.id > 8 && role.organization_id && role.organization_id !== userOrgId) {
-                return false;
-            }
-
-            const name = role.role_name.toLowerCase();
-            const query = searchQuery.toLowerCase().trim();
-            return name.includes(query);
-        });
+        return roles.filter(role => (role.role_name || '').toLowerCase().includes(query));
     }, [roles, searchQuery]);
 
-    const totalPages = Math.ceil(filteredRoles.length / itemsPerPage);
+    const totalPages = Math.max(1, Math.ceil(filteredRoles.length / itemsPerPage));
+
+    // A search, a smaller page size or a delete can leave the current page past
+    // the last one, which drew an empty table under a "26-25 of 25" footer.
+    useEffect(() => {
+        if (currentPage > totalPages) setCurrentPage(totalPages);
+    }, [currentPage, totalPages]);
+
+    useEffect(() => {
+        setCurrentPage(1);
+    }, [searchQuery, itemsPerPage]);
+
     const paginatedRoles = useMemo(() => {
         const start = (currentPage - 1) * itemsPerPage;
         return filteredRoles.slice(start, start + itemsPerPage);
@@ -88,18 +106,30 @@ const Roles: React.FC = () => {
         }
     };
 
-    const handleDeleteRole = async (id: number) => {
-        if (!actions.canDelete) return;
-        if (window.confirm('Are you sure you want to delete this role?')) {
+    const handleDeleteRole = async (role: Role) => {
+        if (!actions.canDelete || isOutOfReach(role)) return;
+
+        // The server refuses a role somebody still holds; say so before asking
+        // for a confirmation that would only end in that refusal.
+        const holders = Number(role.users_count) || 0;
+        if (holders > 0) {
+            alert(
+                `"${role.role_name}" is assigned to ${holders} ${holders === 1 ? 'user' : 'users'}. ` +
+                'Move them to another role before deleting it.'
+            );
+            return;
+        }
+
+        if (window.confirm(`Are you sure you want to delete the role "${role.role_name}"?`)) {
             try {
-                const res = await roleService.deleteRole(id);
+                const res = await roleService.deleteRole(role.id);
                 if (res.success) {
-                    removeRoleFromStore(id);
+                    removeRoleFromStore(role.id);
                 } else {
                     alert(res.message || 'Failed to delete role');
                 }
             } catch (err: any) {
-                alert(err.message || 'An error occurred');
+                alert(serverMessage(err, 'Failed to delete role'));
             }
         }
     };
@@ -144,6 +174,9 @@ const Roles: React.FC = () => {
                     <div className="flex items-center gap-2">
                         <button
                             onClick={() => fetchRoles()}
+                            disabled={isLoading}
+                            title="Refresh"
+                            aria-label="Refresh roles"
                             className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
                         >
                             <RefreshCw size={18} className={isLoading ? 'animate-spin' : ''} />
@@ -151,6 +184,8 @@ const Roles: React.FC = () => {
                         {actions.canCreate && (
                         <button
                             onClick={() => { setSelectedRole(null); setShowModal(true); }}
+                            title="Add role"
+                            aria-label="Add role"
                             className="p-2 rounded-lg text-white shadow-lg transition-transform active:scale-95"
                             style={{ backgroundColor: colorPalette?.primary || '#3b82f6' }}
                         >
@@ -203,14 +238,14 @@ const Roles: React.FC = () => {
                                                     <Shield size={14} />
                                                 </div>
                                                 <span className="text-sm font-medium">{role.role_name}</span>
-                                                {role.id <= 8 && (
+                                                {isLockedRole(role.id) && (
                                                     <span className={`ml-2 px-1.5 py-0.5 text-[10px] font-bold rounded uppercase ${isDarkMode ? 'bg-blue-900/30 text-blue-400' : 'bg-blue-100 text-blue-600'}`}>
                                                         System
                                                     </span>
                                                 )}
                                                 {/* A hybrid: it holds this seeded role's access plus its own
                                                     extras, so the base is worth reading at a glance. */}
-                                                {role.id > 8 && baseRoleLabel(role.base_role_id) && (
+                                                {!isLockedRole(role.id) && baseRoleLabel(role.base_role_id) && (
                                                     <span
                                                         className={`ml-2 px-1.5 py-0.5 text-[10px] font-bold rounded uppercase ${isDarkMode ? 'bg-purple-900/30 text-purple-400' : 'bg-purple-100 text-purple-600'}`}
                                                         title={`Inherits everything a ${baseRoleLabel(role.base_role_id)} holds, plus its own permissions`}
@@ -228,11 +263,20 @@ const Roles: React.FC = () => {
                                         </td>
                                         <td className="px-6 py-4 text-right">
                                             <div className="flex items-center justify-end gap-2">
-                                                {role.id > 8 ? (
+                                                {isLockedRole(role.id) || isOutOfReach(role) ? (
+                                                    <span
+                                                        className={`text-[10px] font-medium px-2 py-1 rounded-full ${isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-100 text-gray-400'}`}
+                                                        title={isLockedRole(role.id) ? 'System roles cannot be edited' : 'Only a SuperAdmin can change a role built on SuperAdmin'}
+                                                    >
+                                                        Locked
+                                                    </span>
+                                                ) : (
                                                     <>
                                                         {actions.canEdit && (
                                                         <button
                                                             onClick={() => { setSelectedRole(role); setShowModal(true); }}
+                                                            title="Edit role"
+                                                            aria-label={`Edit role ${role.role_name}`}
                                                             className={`p-1.5 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-blue-400' : 'hover:bg-gray-100 text-blue-600'}`}
                                                         >
                                                             <Edit size={16} />
@@ -240,17 +284,15 @@ const Roles: React.FC = () => {
                                                         )}
                                                         {actions.canDelete && (
                                                         <button
-                                                            onClick={() => handleDeleteRole(role.id)}
+                                                            onClick={() => handleDeleteRole(role)}
+                                                            title="Delete role"
+                                                            aria-label={`Delete role ${role.role_name}`}
                                                             className={`p-1.5 rounded-lg transition-colors ${isDarkMode ? 'hover:bg-gray-800 text-red-400' : 'hover:bg-gray-100 text-red-600'}`}
                                                         >
                                                             <Trash2 size={16} />
                                                         </button>
                                                         )}
                                                     </>
-                                                ) : (
-                                                    <span className={`text-[10px] font-medium px-2 py-1 rounded-full ${isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-100 text-gray-400'}`}>
-                                                        Locked
-                                                    </span>
                                                 )}
                                             </div>
                                         </td>

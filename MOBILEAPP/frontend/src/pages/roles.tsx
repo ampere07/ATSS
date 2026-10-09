@@ -10,7 +10,6 @@ import {
   Dimensions,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Plus,
   RefreshCw,
@@ -28,13 +27,15 @@ import { settingsColorPaletteService, ColorPalette } from '../services/settingsC
 import RoleModal from '../modals/RoleModal';
 import { useRoleStore } from '../store/roleStore';
 import { roleService } from '../services/userService';
+import { ROLE, WILDCARD, isLockedRole } from '../config/permissions';
+import { usePageActions } from '../hooks/usePageActions';
+import { usePermissions } from '../hooks/usePermissions';
 
 const Roles: React.FC = () => {
   // App is forced light mode.
   const isDarkMode = false;
   const [searchQuery, setSearchQuery] = useState('');
   const [colorPalette, setColorPalette] = useState<ColorPalette | null>(null);
-  const [userOrgId, setUserOrgId] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const primaryColor = colorPalette?.primary || '#7c3aed';
@@ -51,6 +52,17 @@ const Roles: React.FC = () => {
     removeRoleFromStore,
   } = useRoleStore();
 
+  // Add, Edit and Delete are granted separately — the same keys the API
+  // demands — so a control is only drawn when the request behind it would
+  // succeed. They were drawn for anybody who could open the page.
+  const actions = usePageActions('roles');
+
+  // A role built on SuperAdmin hands out everything; only a holder of
+  // everything may change or delete one.
+  const { permissions: callerPermissions } = usePermissions();
+  const isOutOfReach = (role: Role) =>
+    !callerPermissions.includes(WILDCARD) && Number(role.base_role_id) === ROLE.SUPER_ADMIN;
+
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
@@ -62,13 +74,6 @@ const Roles: React.FC = () => {
         setColorPalette(await settingsColorPaletteService.getActive());
       } catch (err) {
         console.error('Failed to fetch color palette:', err);
-      }
-      try {
-        const authData = await AsyncStorage.getItem('authData');
-        const parsed = authData ? JSON.parse(authData) : {};
-        setUserOrgId(parsed.organization_id ?? null);
-      } catch (e) {
-        // ignore auth parse errors
       }
     };
     init();
@@ -86,19 +91,15 @@ const Roles: React.FC = () => {
     return () => clearInterval(intervalId);
   }, [fetchRoles]);
 
+  // The organization boundary is drawn by the server: GET /roles returns the
+  // seeded roles and the caller's own organization's, nothing else. The copy
+  // of that filter that lived here read authData.organization_id, which
+  // sign-in never stores, so it never filtered anything.
   const filteredRoles = useMemo(() => {
-    return roles.filter((role) => {
-      // Organization filter: Allow system roles (ID <= 8) OR roles belonging to the user's organization
-      const roleOrgId = (role as any).organization_id;
-      if (userOrgId && role.id > 8 && roleOrgId && roleOrgId !== userOrgId) {
-        return false;
-      }
+    const query = searchQuery.toLowerCase().trim();
 
-      const name = (role.role_name || '').toLowerCase();
-      const query = searchQuery.toLowerCase().trim();
-      return name.includes(query);
-    });
-  }, [roles, searchQuery, userOrgId]);
+    return roles.filter((role) => (role.role_name || '').toLowerCase().includes(query));
+  }, [roles, searchQuery]);
 
   const totalPages = Math.ceil(filteredRoles.length / itemsPerPage);
   const paginatedRoles = useMemo(() => {
@@ -128,22 +129,36 @@ const Roles: React.FC = () => {
     }
   };
 
-  const handleDeleteRole = (id: number) => {
-    Alert.alert('Delete Role', 'Are you sure you want to delete this role?', [
+  const handleDeleteRole = (role: Role) => {
+    if (!actions.canDelete || isOutOfReach(role)) return;
+
+    // The server refuses a role somebody still holds; say so up front rather
+    // than after a confirmation.
+    const holders = Number(role.users_count) || 0;
+    if (holders > 0) {
+      Alert.alert(
+        'Role In Use',
+        `"${role.role_name}" is assigned to ${holders} ${holders === 1 ? 'user' : 'users'}. Move them to another role before deleting it.`
+      );
+      return;
+    }
+
+    Alert.alert('Delete Role', `Are you sure you want to delete the role "${role.role_name}"?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
           try {
-            const res = await roleService.deleteRole(id);
+            const res = await roleService.deleteRole(role.id);
             if (res.success) {
-              removeRoleFromStore(id);
+              removeRoleFromStore(role.id);
             } else {
               Alert.alert('Error', res.message || 'Failed to delete role');
             }
           } catch (err: any) {
-            Alert.alert('Error', err.message || 'An error occurred');
+            // The server's reason, not axios's "Request failed with status code 400".
+            Alert.alert('Error', err?.response?.data?.message || err?.message || 'Failed to delete role');
           }
         },
       },
@@ -155,7 +170,8 @@ const Roles: React.FC = () => {
   const showingEnd = Math.min(currentPage * itemsPerPage, filteredRoles.length);
 
   const renderItem = ({ item: role }: { item: Role }) => {
-    const isSystem = role.id <= 8;
+    const isSystem = isLockedRole(role.id);
+    const isLocked = isSystem || isOutOfReach(role);
     return (
       <View
         style={{
@@ -194,20 +210,24 @@ const Roles: React.FC = () => {
           </View>
 
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            {!isSystem ? (
+            {!isLocked ? (
               <>
-                <TouchableOpacity
-                  onPress={() => {
-                    setSelectedRole(role);
-                    setShowModal(true);
-                  }}
-                  style={{ padding: 8, borderRadius: 6 }}
-                >
-                  <Edit2 size={18} color={primaryColor} />
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => handleDeleteRole(role.id)} style={{ padding: 8, borderRadius: 6 }}>
-                  <Trash2 size={18} color="#ef4444" />
-                </TouchableOpacity>
+                {actions.canEdit && (
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSelectedRole(role);
+                      setShowModal(true);
+                    }}
+                    style={{ padding: 8, borderRadius: 6 }}
+                  >
+                    <Edit2 size={18} color={primaryColor} />
+                  </TouchableOpacity>
+                )}
+                {actions.canDelete && (
+                  <TouchableOpacity onPress={() => handleDeleteRole(role)} style={{ padding: 8, borderRadius: 6 }}>
+                    <Trash2 size={18} color="#ef4444" />
+                  </TouchableOpacity>
+                )}
               </>
             ) : (
               <View style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999, backgroundColor: '#f3f4f6' }}>
@@ -265,15 +285,17 @@ const Roles: React.FC = () => {
                 <RefreshCw size={18} color="#6b7280" />
               )}
             </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => {
-                setSelectedRole(null);
-                setShowModal(true);
-              }}
-              style={{ padding: 10, borderRadius: 8, backgroundColor: primaryColor }}
-            >
-              <Plus size={20} color="#ffffff" />
-            </TouchableOpacity>
+            {actions.canCreate && (
+              <TouchableOpacity
+                onPress={() => {
+                  setSelectedRole(null);
+                  setShowModal(true);
+                }}
+                style={{ padding: 10, borderRadius: 8, backgroundColor: primaryColor }}
+              >
+                <Plus size={20} color="#ffffff" />
+              </TouchableOpacity>
+            )}
           </View>
         </View>
 

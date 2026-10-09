@@ -8,6 +8,8 @@ import UserModal from '../modals/UserModal';
 
 import { useUserStore } from '../store/userStore';
 import { usePageActions } from '../hooks/usePageActions';
+import { usePermissions } from '../hooks/usePermissions';
+import { ROLE, WILDCARD } from '../config/permissions';
 
 const UserManagement: React.FC<{ agentOnly?: boolean }> = ({ agentOnly = false }) => {
   // Add, Edit and Delete are granted separately on Users Management.
@@ -21,6 +23,15 @@ const UserManagement: React.FC<{ agentOnly?: boolean }> = ({ agentOnly = false }
   const actions = agentOnly
     ? { canView: true, canCreate: true, canEdit: true, canDelete: true, can: () => true }
     : userActions;
+
+  // An account on a role that grants everything — SuperAdmin, or a custom
+  // role built on it — is edited and deleted only by somebody who holds
+  // everything too; the server refuses anybody else, so the buttons are not
+  // drawn for them.
+  const { permissions: callerPermissions } = usePermissions();
+  const isOutOfReach = (target: User) =>
+    !callerPermissions.includes(WILDCARD) &&
+    (Number(target.role_id) === ROLE.SUPER_ADMIN || Number(target.role?.base_role_id) === ROLE.SUPER_ADMIN);
 
   const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
   const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
@@ -306,8 +317,8 @@ const UserManagement: React.FC<{ agentOnly?: boolean }> = ({ agentOnly = false }
           <UserDetails
             user={selectedUser}
             onClose={() => { setSelectedUser(null); setMobileView('users'); }}
-            onEdit={actions.canEdit ? (u) => { setSelectedUser(u); setShowModal(true); } : undefined}
-            canDelete={actions.canDelete}
+            onEdit={actions.canEdit && !isOutOfReach(selectedUser) ? (u) => { setSelectedUser(u); setShowModal(true); } : undefined}
+            canDelete={actions.canDelete && !isOutOfReach(selectedUser)}
             isMobile={isMobile}
             isDarkMode={isDarkMode}
             colorPalette={colorPalette}

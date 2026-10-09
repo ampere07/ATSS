@@ -15,6 +15,8 @@ import { userService, roleService, organizationService } from '../services/userS
 import { agentService } from '../services/agentService';
 import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { ROLE, WILDCARD } from '../config/permissions';
+import { readStoredAuth, usePermissions } from '../hooks/usePermissions';
 
 interface UserModalProps {
   isOpen: boolean;
@@ -41,6 +43,24 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
     title: string;
     message: string;
   }>({ isOpen: false, type: 'loading', title: '', message: '' });
+
+  // A role that grants everything — SuperAdmin, or a custom role built on it —
+  // is assigned only by somebody who already holds everything, and nobody
+  // below SuperAdmin may change their own role; the server refuses both. The
+  // account's current role stays listed so the picker still reads true.
+  const { permissions: callerPermissions } = usePermissions();
+  const callerHoldsEverything = callerPermissions.includes(WILDCARD);
+  const assignableRoles = roles.filter(
+    (r) =>
+      callerHoldsEverything ||
+      r.id === user?.role_id ||
+      (r.id !== ROLE.SUPER_ADMIN && Number(r.base_role_id) !== ROLE.SUPER_ADMIN)
+  );
+  const [selfId, setSelfId] = useState<number | null>(null);
+  useEffect(() => {
+    readStoredAuth().then((auth) => setSelfId(Number((auth as any)?.id) || null));
+  }, []);
+  const roleLocked = isEditMode && !!user && selfId === user.id && !callerHoldsEverything;
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -394,10 +414,11 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
                 <Picker
                   selectedValue={String(formData.role_id || '')}
                   onValueChange={(v) => setField('role_id', v)}
+                  enabled={!roleLocked}
                   style={{ height: 44 }}
                 >
                   <Picker.Item label="Select Role" value="" />
-                  {roles.map((r) => (
+                  {assignableRoles.map((r) => (
                     <Picker.Item key={r.id} label={r.role_name} value={String(r.id)} />
                   ))}
                 </Picker>

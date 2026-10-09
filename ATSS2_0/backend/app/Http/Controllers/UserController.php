@@ -122,6 +122,96 @@ class UserController extends Controller
     }
 
     /**
+     * Refuse a write that would hand out SuperAdmin reach, take over an account
+     * that has it, move the caller off their own role, or assign a role from
+     * another organization; null when the write is allowed.
+     *
+     * Holding a Users Management key is not the same as holding everything. A
+     * custom role given that key could otherwise set role_id 7 on its own
+     * account, or reset a SuperAdmin's password and sign in as them. So a
+     * role that grants everything — SuperAdmin, or a custom role built on it —
+     * is assigned only by somebody who already holds everything, and an
+     * account on such a role is edited or deleted only by them too.
+     *
+     * `$assigning` says whether the request sets the role at all, and
+     * `$targetRoleId` what it sets it to — null or 0 for none. They are kept
+     * apart because "role_id was not sent" and "role_id was cleared" are
+     * different writes, and only the second changes anything.
+     *
+     * The role is checked only when it is changing: the edit form sends the
+     * account's current role_id back with every save, and an account already
+     * on a role the caller could not hand out is still theirs to edit.
+     *
+     * The organization check is the boundary RoleController::index() draws —
+     * a caller in an organization is offered the seeded roles and its own
+     * organization's, so a role_id from anywhere else did not come from the UI.
+     */
+    private function denyIfRoleNotAssignable($authUser, ?User $existing, bool $assigning = false, $targetRoleId = null)
+    {
+        $holdsEverything = Permissions::holdsEverything($authUser);
+
+        if (!$holdsEverything && $existing !== null && Permissions::roleIdGrantsEverything($existing->role_id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only a SuperAdmin can change or delete a SuperAdmin account.',
+            ], 403);
+        }
+
+        if (!$assigning) {
+            return null;
+        }
+
+        // The same reading store() and update() give it: anything not a
+        // positive id is "no role".
+        $target = ($targetRoleId === null || $targetRoleId === '' || (int) $targetRoleId <= 0) ? null : (int) $targetRoleId;
+        $current = ($existing === null || empty($existing->role_id)) ? null : (int) $existing->role_id;
+
+        if ($existing !== null && $target === $current) {
+            return null;
+        }
+
+        // Moving yourself onto another role — or off yours — is the one
+        // assignment nobody below SuperAdmin may make: it is how a Users
+        // Management key would turn into whatever the most powerful role in
+        // the organization holds. Moving other people is the job the key
+        // exists for, and is not limited to roles the caller could grant — an
+        // Administrator creates Agents, whose role holds keys an Administrator
+        // does not.
+        if (!$holdsEverything && $existing !== null && $authUser !== null && (int) $existing->id === (int) $authUser->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You cannot change your own role. Ask a SuperAdmin.',
+            ], 403);
+        }
+
+        if ($target === null) {
+            return null;
+        }
+
+        if (!$holdsEverything && Permissions::roleIdGrantsEverything($target)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only a SuperAdmin can assign a SuperAdmin role.',
+            ], 403);
+        }
+
+        $callerOrganizationId = $authUser->organization_id ?? null;
+
+        if ($callerOrganizationId !== null && !Role::isLocked($target)) {
+            $role = Role::find($target);
+
+            if ($role !== null && (int) $role->organization_id !== (int) $callerOrganizationId) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'That role belongs to another organization.',
+                ], 403);
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Is this account an agent, for the purpose of owning an agent_balance row?
      *
      * Three things make somebody one, and the third is why this is a method rather
@@ -453,6 +543,10 @@ class UserController extends Controller
                 return $denied;
             }
 
+            if ($denied = $this->denyIfRoleNotAssignable($authUser, null, true, $request->role_id)) {
+                return $denied;
+            }
+
             // A request with no user reaches here only if the API's access
             // control was bypassed; treat it as unprivileged rather than as a
             // global administrator.
@@ -640,6 +734,14 @@ class UserController extends Controller
                 }
             }
 
+            // After the organization boundary, so an account outside it is
+            // refused the same way whatever role it holds — answering first
+            // told a caller which of another organization's accounts were
+            // SuperAdmins.
+            if ($denied = $this->denyIfRoleNotAssignable($authUser, $user, $request->has('role_id'), $request->input('role_id'))) {
+                return $denied;
+            }
+
             $oldData = $user->toArray();
             $auditBefore = $this->auditSnapshot($user);
             $updateData = [];
@@ -751,6 +853,11 @@ class UserController extends Controller
                 }
             }
 
+            // After the organization boundary, as in update().
+            if ($denied = $this->denyIfRoleNotAssignable($authUser, $user)) {
+                return $denied;
+            }
+
             $username = $user->username;
             $auditBefore = $this->auditSnapshot($user);
             $user->delete();
@@ -779,6 +886,91 @@ class UserController extends Controller
                 'error' => $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Put an account on a role: POST /users/{id}/roles with `role_id`.
+     *
+     * The route and the client's userService.assignRole() were declared but
+     * this method was not, so every call was a 500. It is the same write as
+     * changing the role in the user form, and goes through update() so the
+     * organization, agent-only and SuperAdmin checks there apply unchanged.
+     */
+    public function assignRole(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'role_id' => 'required|integer|exists:roles,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        // Answered here: update() reads a missing account as a failed save.
+        if (!ctype_digit((string) $id) || !User::whereKey((int) $id)->exists()) {
+            return response()->json(['success' => false, 'message' => 'User not found'], 404);
+        }
+
+        $this->narrowTo($request, ['role_id' => (int) $request->input('role_id')]);
+
+        return $this->update($request, $id);
+    }
+
+    /**
+     * Take an account off its role: DELETE /users/{id}/roles?role_id=N.
+     *
+     * `role_id`, when sent, must be the role the account holds — a stale
+     * screen asking to remove a role the account has since left must not
+     * clear whatever it holds now. Goes through update(), as assignRole does.
+     */
+    public function removeRole(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'role_id' => 'nullable|integer',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        $user = ctype_digit((string) $id) ? User::find((int) $id) : null;
+
+        if ($user === null) {
+            return response()->json(['success' => false, 'message' => 'User not found'], 404);
+        }
+
+        if ($request->filled('role_id') && (int) $user->role_id !== (int) $request->input('role_id')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'The account does not hold that role.',
+            ], 422);
+        }
+
+        $this->narrowTo($request, ['role_id' => null]);
+
+        return $this->update($request, $id);
+    }
+
+    /**
+     * Leave the request carrying exactly these fields and nothing else.
+     *
+     * replace() alone swaps the body but not the query string or uploads,
+     * which input(), has() and all() still merge in — so `?password=…` on a
+     * role change would have reached update() and been saved along with it.
+     */
+    private function narrowTo(Request $request, array $fields): void
+    {
+        $request->query->replace([]);
+        $request->files->replace([]);
+        $request->replace($fields);
     }
 
     public function updatePushToken(Request $request)

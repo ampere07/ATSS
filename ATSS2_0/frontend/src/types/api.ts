@@ -90,6 +90,8 @@ export interface User {
     role_name: string;
     description?: string;
     permissions?: string;
+    /** The seeded role a hybrid custom role is built on, or null. */
+    base_role_id?: number | null;
   };
   agent_balance?: {
     id: number;
@@ -133,8 +135,12 @@ export interface Role {
    * on the server, never copied into `permissions` — plus the ones below.
    */
   base_role_id?: number | null;
-  /** Only the keys ticked against this role; a hybrid's inherited keys are not here. */
-  permissions?: string;
+  /**
+   * Only the keys ticked against this role; a hybrid's inherited keys are not
+   * here. An array from Laravel's cast, or a JSON / comma-separated string on a
+   * row written before that cast existed — read it with parsePermissions().
+   */
+  permissions?: string[] | string | null;
   /**
    * What the role effectively holds, as the server resolves it.
    *
@@ -147,6 +153,8 @@ export interface Role {
   created_at: string;
   updated_at: string;
   organization_id?: number | null;
+  /** How many accounts hold the role. A role still held cannot be deleted. */
+  users_count?: number;
   users?: User[];
 }
 

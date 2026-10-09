@@ -61,11 +61,19 @@
             </thead>
             <tbody>
             @foreach ($pageRows as $customer)
+                @php
+                    // The line under the name: who referred them (team invoices
+                    // only) and when they were installed.
+                    $byLine = array_filter([
+                        $showReferrer && !empty($customer['referred_by_name']) ? 'referred by ' . $customer['referred_by_name'] : null,
+                        !empty($customer['installed_label']) ? 'installed ' . $customer['installed_label'] : null,
+                    ]);
+                @endphp
                 <tr>
                     <td class="desc">
                         {{ $customer['customer_name'] }}
-                        @if ($showReferrer && !empty($customer['referred_by_name']))
-                            <span class="by">referred by {{ $customer['referred_by_name'] }}</span>
+                        @if ($byLine)
+                            <span class="by">{{ implode(' · ', $byLine) }}</span>
                         @endif
                     </td>
                     <td>{{ $peso }} {{ number_format((float) $customer['unit_price'], 0) }}</td>

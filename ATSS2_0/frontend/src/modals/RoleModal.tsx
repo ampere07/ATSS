@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useCallback, useState, useEffect, useMemo } from 'react';
 import { Role, ApiResponse } from '../types/api';
 import { roleService } from '../services/userService';
 import ModalUITemplate, { useModalTheme } from './ui-modal/ModalUITemplate';
@@ -11,6 +11,7 @@ import {
   parsePermissions,
   permissionGroups,
 } from '../config/permissions';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface RoleModalProps {
   isOpen: boolean;
@@ -47,6 +48,26 @@ const EXCLUSIVE_PARTNER: Record<string, string> = {
 /** No base role — the standalone custom role this modal used to only build. */
 const NO_BASE = 0;
 
+/**
+ * Add the page behind every action in the list, unless the base grants it.
+ *
+ * An action opens its page whether or not the page is ticked, so a list
+ * holding the action without the page would show View unticked on a page the
+ * role can in fact open.
+ */
+const withParentPages = (keys: string[], inherited: Set<string>): string[] => {
+  const result = [...keys];
+
+  keys.forEach(key => {
+    if (!key.includes('.')) return;
+
+    const parent = key.split('.')[0];
+    if (!result.includes(parent) && !inherited.has(parent)) result.push(parent);
+  });
+
+  return result;
+};
+
 const RoleForm: React.FC<{
   formData: any;
   handleInputChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
@@ -54,9 +75,11 @@ const RoleForm: React.FC<{
   handlePermissionChange: (pageId: string, checked: boolean) => void;
   errors: Record<string, string>;
   baseRoleId: number;
+  baseRoleOptions: Array<{ id: number; label: string }>;
   selectedPermissions: string[];
   inherited: Set<string>;
   inheritsEverything: boolean;
+  canGrant: (key: string) => boolean;
 }> = ({
   formData,
   handleInputChange,
@@ -64,9 +87,11 @@ const RoleForm: React.FC<{
   handlePermissionChange,
   errors,
   baseRoleId,
+  baseRoleOptions,
   selectedPermissions,
   inherited,
   inheritsEverything,
+  canGrant,
 }) => {
   const { isDarkMode } = useModalTheme();
 
@@ -83,12 +108,25 @@ const RoleForm: React.FC<{
   /** Held because the base role holds it, rather than because it was ticked here. */
   const isInherited = (key: string) => inheritsEverything || inherited.has(key);
 
+  /** The base holds the key this one cannot be combined with. */
+  const isExcludedByBase = (key: string) => !!EXCLUSIVE_PARTNER[key] && isInherited(EXCLUSIVE_PARTNER[key]);
+
   /**
-   * A key is locked when the base already grants it, or when the base grants
-   * the key it is mutually exclusive with.
+   * A key is locked when the base already grants it, when the base grants the
+   * key it is mutually exclusive with, or when it is one the editor may not
+   * hand out — see canGrant.
    */
-  const isLocked = (key: string) =>
-    isInherited(key) || (!!EXCLUSIVE_PARTNER[key] && isInherited(EXCLUSIVE_PARTNER[key]));
+  const isLocked = (key: string) => isInherited(key) || isExcludedByBase(key) || !canGrant(key);
+
+  /** Why a locked checkbox is locked, as its tooltip. */
+  const lockReason = (key: string): string | undefined => {
+    if (isInherited(key)) return `Granted by ${baseLabel}`;
+    if (isExcludedByBase(key)) {
+      return `${baseLabel} holds ${labelFor(EXCLUSIVE_PARTNER[key])}, which this cannot be combined with`;
+    }
+    if (!canGrant(key)) return 'You can only grant permissions you hold yourself';
+    return undefined;
+  };
 
   const isChecked = (key: string) => isInherited(key) || selectedPermissions.includes(key);
 
@@ -140,7 +178,7 @@ const RoleForm: React.FC<{
             className={inputClass()}
           >
             <option value={NO_BASE}>None — pick every page by hand</option>
-            {BASE_ROLE_OPTIONS.map(option => (
+            {baseRoleOptions.map(option => (
               <option key={option.id} value={option.id}>{option.label}</option>
             ))}
           </select>
@@ -166,6 +204,9 @@ const RoleForm: React.FC<{
             View opens the page. Each action beside it is a button on that page —
             leave one unticked and it is hidden for this role.
           </p>
+          {errors.permissions && (
+            <p className="text-red-500 text-xs mb-2 font-medium ml-1">{errors.permissions}</p>
+          )}
           <div className={`border rounded-lg overflow-hidden ${isDarkMode ? 'border-gray-700' : 'border-gray-200'}`}>
             <div className={`grid grid-cols-[minmax(0,1.4fr)_72px_minmax(0,2.2fr)] px-4 py-2 text-xs font-bold uppercase tracking-wider border-b ${isDarkMode ? 'bg-gray-800 text-gray-400 border-gray-700' : 'bg-gray-50 text-gray-500 border-gray-200'}`}>
               <div>Page Name</div>
@@ -194,9 +235,10 @@ const RoleForm: React.FC<{
                       <div className="flex justify-center">
                         <input
                           type="checkbox"
+                          aria-label={`${labelFor(pageId)}: View`}
                           checked={isChecked(pageId)}
                           disabled={isLocked(pageId)}
-                          title={isInherited(pageId) ? `Granted by ${baseLabel}` : undefined}
+                          title={lockReason(pageId)}
                           onChange={(e) => handlePermissionChange(pageId, e.target.checked)}
                           className={checkboxClass(pageId)}
                         />
@@ -213,15 +255,10 @@ const RoleForm: React.FC<{
                             </span>
                             <input
                               type="checkbox"
+                              aria-label={`${labelFor(pageId)}: ${labelFor(actionId)}`}
                               checked={isChecked(actionId)}
                               disabled={isLocked(actionId)}
-                              title={
-                                isInherited(actionId)
-                                  ? `Granted by ${baseLabel}`
-                                  : isLocked(actionId)
-                                    ? `${baseLabel} holds ${labelFor(EXCLUSIVE_PARTNER[actionId])}, which this cannot be combined with`
-                                    : undefined
-                              }
+                              title={lockReason(actionId)}
                               onChange={(e) => handlePermissionChange(actionId, e.target.checked)}
                               className={checkboxClass(actionId)}
                             />
@@ -266,6 +303,40 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
   const inheritsEverything = inheritedKeys.includes(WILDCARD);
   const inherited = useMemo(() => new Set(inheritedKeys), [inheritedKeys]);
 
+  // The editor may hand out only what they hold themselves — the server refuses
+  // anything more. A key the role already had when the modal opened stays
+  // theirs to keep or remove: only additions are checked.
+  const { permissions: callerPermissions } = usePermissions();
+  const callerHoldsEverything = callerPermissions.includes(WILDCARD);
+
+  const originalKeys = useMemo(() => {
+    if (!role) return new Set<string>();
+
+    const own = Array.isArray(role.effective_permissions)
+      ? role.effective_permissions
+      : parsePermissions(role.permissions);
+
+    return new Set(withParentPages([...own, ...inheritedPermissions(role.base_role_id)], new Set()));
+  }, [role]);
+
+  const canGrant = useCallback(
+    (key: string) => callerHoldsEverything || callerPermissions.includes(key) || originalKeys.has(key),
+    [callerHoldsEverything, callerPermissions, originalKeys]
+  );
+
+  // A base is offered when the editor could grant everything it brings, so a
+  // SuperAdmin base only to somebody who holds everything. The role's current
+  // base is always listed, so the picker reads true.
+  const baseRoleOptions = useMemo(
+    () =>
+      BASE_ROLE_OPTIONS.filter(
+        option =>
+          option.id === Number(role?.base_role_id) ||
+          inheritedPermissions(option.id).every(canGrant)
+      ),
+    [canGrant, role]
+  );
+
   useEffect(() => {
     if (isOpen) {
       if (role) {
@@ -285,10 +356,21 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
         // Falls back to the column for a caller that has not been given the
         // resolved list — an array from Laravel's cast, or a JSON /
         // comma-separated string on a row written before that cast existed.
+        //
+        // An extra whose exclusive partner the base grants is dropped here, as
+        // switching to that base would drop it. A role saved that way before
+        // the server refused the pair would otherwise open with the extra
+        // ticked and locked — impossible to untick, and refused on every save.
+        const baseKeys = new Set(inheritedPermissions(role.base_role_id));
+        const own = Array.isArray(role.effective_permissions)
+          ? role.effective_permissions
+          : parsePermissions(role.permissions);
+
         setSelectedPermissions(
-          Array.isArray(role.effective_permissions)
-            ? role.effective_permissions
-            : parsePermissions(role.permissions)
+          withParentPages(
+            own.filter(key => !(EXCLUSIVE_PARTNER[key] && baseKeys.has(EXCLUSIVE_PARTNER[key]))),
+            baseKeys
+          )
         );
       } else {
         setFormData({
@@ -328,10 +410,19 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
       return;
     }
 
+    // An extra action whose page the old base supplied loses that page when
+    // the base changes, so the page comes back as an extra of its own —
+    // otherwise View would read unticked on a page the role still opens.
     const held = new Set(nextInherited);
     setSelectedPermissions(prev =>
-      prev.filter(key => !held.has(key) && !(EXCLUSIVE_PARTNER[key] && held.has(EXCLUSIVE_PARTNER[key])))
+      withParentPages(
+        prev.filter(key => !held.has(key) && !(EXCLUSIVE_PARTNER[key] && held.has(EXCLUSIVE_PARTNER[key]))),
+        held
+      )
     );
+    if (errors.permissions) {
+      setErrors(prev => ({ ...prev, permissions: '' }));
+    }
   };
 
   const handlePermissionChange = (pageId: string, checked: boolean) => {
@@ -370,11 +461,26 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
 
       return newPermissions;
     });
+    if (errors.permissions) {
+      setErrors(prev => ({ ...prev, permissions: '' }));
+    }
   };
+
+  /** What the save sends: the extras alone, with the page behind each action. */
+  const extrasToSave = (): string[] =>
+    inheritsEverything
+      ? []
+      : withParentPages(selectedPermissions.filter(key => !inherited.has(key)), inherited);
 
   const validate = () => {
     const newErrors: Record<string, string> = {};
     if (!formData.role_name.trim()) newErrors.role_name = 'Required';
+    else if (formData.role_name.trim().length > 255) newErrors.role_name = 'At most 255 characters';
+
+    // A role holding nothing signs its users in to a page that refuses them.
+    if (baseRoleId === NO_BASE && extrasToSave().length === 0) {
+      newErrors.permissions = 'Choose a system role to start from, or tick at least one permission.';
+    }
 
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
@@ -385,22 +491,16 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
     setLoading(true);
 
     try {
+      // No organization_id: the server files a role under the caller's own
+      // organization and ignores one sent from here.
       const payload = {
-        role_name: formData.role_name,
+        role_name: formData.role_name.trim(),
         description: formData.description,
         base_role_id: baseRoleId === NO_BASE ? null : baseRoleId,
         // Extras only. The server merges these with the base role's keys on
         // every read, so an inherited key sent back here would only go stale.
-        permissions: inheritsEverything
-          ? []
-          : selectedPermissions.filter(key => !inherited.has(key)),
+        permissions: extrasToSave(),
       };
-
-      const authData = localStorage.getItem('authData');
-      const currentUser = authData ? JSON.parse(authData) : null;
-      if (currentUser?.organization_id) {
-        (payload as any).organization_id = currentUser.organization_id;
-      }
 
       let response: ApiResponse<Role>;
       if (isEditMode && role) {
@@ -419,15 +519,33 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
       // Prefer what the server said over axios's "Request failed with status
       // code 500", which names the status and nothing about the cause. A 422
       // body carries the per-field messages; a 500 carries the exception.
+      //
+      // A message about the name or the permissions is shown beside that
+      // field; anything else goes in the banner.
       const body = error?.response?.data;
-      const fieldErrors: string[] = body?.errors
-        ? Object.values(body.errors as Record<string, string[]>).flat()
-        : [];
-      const detail = [body?.message, ...fieldErrors, body?.error]
+      const serverErrors = (body?.errors || {}) as Record<string, string[] | string>;
+      const firstOf = (value?: string[] | string) => (Array.isArray(value) ? value.join(' ') : value || '');
+
+      const roleNameError = firstOf(serverErrors.role_name);
+      const permissionErrors = Object.entries(serverErrors)
+        .filter(([field]) => field === 'permissions' || field.startsWith('permissions.'))
+        .map(([, value]) => firstOf(value));
+      const otherErrors = Object.entries(serverErrors)
+        .filter(([field]) => field !== 'role_name' && field !== 'permissions' && !field.startsWith('permissions.'))
+        .map(([, value]) => firstOf(value));
+
+      const fieldLevel = !!roleNameError || permissionErrors.length > 0;
+      const detail = [fieldLevel ? '' : body?.message, ...otherErrors, body?.error]
         .filter(Boolean)
         .join(' — ');
 
-      setErrors({ general: detail || error.message || 'An unexpected error occurred' });
+      setErrors({
+        ...(roleNameError ? { role_name: roleNameError } : {}),
+        ...(permissionErrors.length > 0 ? { permissions: permissionErrors.join(' ') } : {}),
+        ...(detail || !fieldLevel
+          ? { general: detail || error.message || 'An unexpected error occurred' }
+          : {}),
+      });
     } finally {
       setLoading(false);
     }
@@ -453,9 +571,11 @@ const RoleModal: React.FC<RoleModalProps> = ({ isOpen, onClose, onSave, role }) 
         handlePermissionChange={handlePermissionChange}
         errors={errors}
         baseRoleId={baseRoleId}
+        baseRoleOptions={baseRoleOptions}
         selectedPermissions={selectedPermissions}
         inherited={inherited}
         inheritsEverything={inheritsEverything}
+        canGrant={canGrant}
       />
     </ModalUITemplate>
   );

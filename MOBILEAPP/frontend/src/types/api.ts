@@ -105,6 +105,19 @@ export interface Role {
   id: number;
   role_name: string;
   description?: string;
+  /** The seeded role (1-8) a hybrid custom role inherits from, or null. */
+  base_role_id?: number | null;
+  /** Only the keys ticked against this role, as stored. Read it with parsePermissions(). */
+  permissions?: string[] | string | null;
+  /**
+   * What the role effectively holds, as the server resolves it — including the
+   * buttons a role saved before the per-action keys existed is still granted.
+   * Seed the Role modal from this, never from `permissions`.
+   */
+  effective_permissions?: string[] | null;
+  organization_id?: number | null;
+  /** How many accounts hold the role. A role still held cannot be deleted. */
+  users_count?: number;
   created_at: string;
   updated_at: string;
   users?: User[];

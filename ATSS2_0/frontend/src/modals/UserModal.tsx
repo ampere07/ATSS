@@ -7,6 +7,8 @@ import LoadingModalGlobal from '../components/common/LoadingModalGlobal';
 import AuditTrailList, { AuditEntry } from '../components/AuditTrailList';
 import apiClient from '../config/api';
 import { settingsColorPaletteService, ColorPalette } from '../services/settingsColorPaletteService';
+import { ROLE, WILDCARD } from '../config/permissions';
+import { usePermissions } from '../hooks/usePermissions';
 
 interface UserModalProps {
   isOpen: boolean;
@@ -139,6 +141,31 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
     };
     if (isOpen) loadData();
   }, [isOpen]);
+
+  // A role that grants everything — SuperAdmin, or a custom role built on it —
+  // is assigned only by somebody who already holds everything; the server
+  // refuses anybody else. The account's current role stays listed so the
+  // picker still reads true when editing.
+  const { permissions: callerPermissions } = usePermissions();
+  const callerHoldsEverything = callerPermissions.includes(WILDCARD);
+  const assignableRoles = roles.filter(
+    r =>
+      callerHoldsEverything ||
+      r.id === user?.role_id ||
+      (r.id !== ROLE.SUPER_ADMIN && Number(r.base_role_id) !== ROLE.SUPER_ADMIN)
+  );
+
+  // Nobody below SuperAdmin may change their own role; the server refuses it.
+  // The picker still shows it, locked, so their own details remain editable.
+  const editingSelf = (() => {
+    if (!isEditMode || !user) return false;
+    try {
+      return Number(JSON.parse(localStorage.getItem('authData') || '{}').id) === user.id;
+    } catch {
+      return false;
+    }
+  })();
+  const roleLocked = editingSelf && !callerHoldsEverything;
 
   // Auto-set role_id to Agent role when agentOnly mode is active
   useEffect(() => {
@@ -416,9 +443,16 @@ const UserModal: React.FC<UserModalProps> = ({ isOpen, onClose, onSave, user, ag
                   style={{ pointerEvents: 'none' }}
                 />
               ) : (
-                <select name="role_id" value={formData.role_id || ''} onChange={handleInputChange} className={`${inputClass} ${errors.role_id ? 'border-red-500' : ''}`}>
+                <select
+                  name="role_id"
+                  value={formData.role_id || ''}
+                  onChange={handleInputChange}
+                  disabled={roleLocked}
+                  title={roleLocked ? 'You cannot change your own role. Ask a SuperAdmin.' : undefined}
+                  className={`${inputClass} ${errors.role_id ? 'border-red-500' : ''} ${roleLocked ? 'opacity-70 cursor-not-allowed' : ''}`}
+                >
                   <option value="">Select Role</option>
-                  {roles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
+                  {assignableRoles.map(r => <option key={r.id} value={r.id}>{r.role_name}</option>)}
                 </select>
               )}
               {errors.role_id && <p className="text-red-500 text-[10px] mt-1 font-medium">{errors.role_id}</p>}
